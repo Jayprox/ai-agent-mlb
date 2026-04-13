@@ -65,12 +65,13 @@ VITE_ODDS_API_KEY=your_key_here
 
 ## Sandbox Flags (top of prop-scout-v7.jsx)
 
-These three booleans at the top of the file control which data sources are live vs mock:
+These booleans at the top of the file control which data sources are live vs mock:
 
 ```js
-const IS_SANDBOX       = false; // Open-Meteo weather API
-const IS_ODDS_SANDBOX  = false; // The Odds API (sportsbook odds)
-const IS_STATS_SANDBOX = false; // MLB Stats API (via backend proxy)
+const IS_SANDBOX        = false; // Open-Meteo weather API
+const IS_ODDS_SANDBOX   = false; // The Odds API (sportsbook odds)
+const IS_STATS_SANDBOX  = false; // MLB Stats API (via backend proxy)
+const IS_SAVANT_SANDBOX = IS_STATS_SANDBOX; // Baseball Savant — shares Stats gate
 ```
 
 | Flag | `true` | `false` |
@@ -78,10 +79,11 @@ const IS_STATS_SANDBOX = false; // MLB Stats API (via backend proxy)
 | `IS_SANDBOX` | Mock weather | Live Open-Meteo weather |
 | `IS_ODDS_SANDBOX` | Mock odds | Live Odds API (DK/FD/CZR/MGM table) |
 | `IS_STATS_SANDBOX` | Mock SLATE games | Live MLB schedule + stats |
+| `IS_SAVANT_SANDBOX` | Mock arsenal/splits | Live Savant arsenal + batter splits |
 
-The footer auto-describes which sources are live. All three `false` = full live mode.
+The footer auto-describes which sources are live. All flags `false` = full live mode.
 
-**Important:** `IS_STATS_SANDBOX = false` requires the backend to be running (`npm start` in `backend/`). If the backend is down, the schedule fetch silently falls back to mock SLATE data.
+**Important:** `IS_STATS_SANDBOX = false` requires the backend to be running (`npm start` in `backend/`). If the backend is down, the schedule fetch silently falls back to mock SLATE data. Savant routes also require the backend.
 
 ---
 
@@ -107,7 +109,9 @@ ai-agent-mlb/
 │       ├── schedule.js     ← GET /api/schedule?date=YYYY-MM-DD
 │       ├── lineups.js      ← GET /api/lineups/:gamePk
 │       ├── players.js      ← GET /api/players/:playerId/stats
-│       └── umpires.js      ← GET /api/umpires/:gamePk
+│       ├── umpires.js      ← GET /api/umpires/:gamePk
+│       ├── arsenal.js      ← GET /api/arsenal/:pitcherId (Baseball Savant)
+│       └── splits.js       ← GET /api/splits/:batterId  (Baseball Savant)
 └── checkpoints/
     ├── v6-odds-api/        ← Snapshot at Odds API milestone
     └── v7-multibook-odds/  ← Snapshot at multi-book table milestone (current)
@@ -144,6 +148,8 @@ Frontend calls `/api/...` (relative URL). Vite dev server proxies to `http://loc
 | `GET /api/lineups/:gamePk` | 5 min (confirmed) / 1 min (pending) | Returns `{ confirmed, away[], home[] }` |
 | `GET /api/players/:playerId/stats?group=pitching\|hitting` | 6 hours | Shaped to mirror mock data |
 | `GET /api/umpires/:gamePk` | 1 hour | Returns `null` gracefully if not yet assigned |
+| `GET /api/arsenal/:pitcherId` | 6 hours | Baseball Savant: pitch mix, velocity, whiff %. Returns `{ arsenal: [{abbr, type, pct, velo, whiffPct, ba, slg, color}] }` |
+| `GET /api/splits/:batterId` | 6 hours | Baseball Savant: batter's AVG/whiff/SLG vs each pitch type. Returns `{ splits: { FF: { avg, whiff, slg, pitches } } }` |
 
 **Known quirk:** MLB Stats API `currentTeam` does NOT include `abbreviation`. Both `schedule.js` and `players.js` use a `TEAM_ABBR[id]` lookup table to resolve it.
 
@@ -183,7 +189,10 @@ Frontend calls `/api/...` (relative URL). Vite dev server proxies to `http://loc
 #### Arsenal Tab
 - Each pitch: usage bar, batter AVG vs it, whiff rate, HANDLES/WEAK SPOT/NEUTRAL badge
 - Exposure alerts: heavy usage + weak spot = red alert; heavy usage + handles = green multiplier
-- Empty state if arsenal not yet loaded (Baseball Savant pending)
+- **SAVANT LIVE badge** when real arsenal is loaded from Baseball Savant
+- Pitcher whiff rate per pitch shown in the pitch header (from Savant `whiffPct`)
+- `good`/`note` auto-computed from live stats when mock fields are absent
+- Loading state shown while arsenal is being fetched
 
 #### Intel Tab
 - **Weather card**: temp, wind direction relative to park (e.g. "7 mph IN from CF"), humidity, rain chance, open air vs dome. LIVE badge when real data. 30-min cache.
@@ -257,7 +266,7 @@ The mock SLATE array is always present as a fallback scaffold. Live data overlay
 ## Future Enhancements (Logged, Not Started)
 
 - **Prediction market odds (Kalshi / Polymarket)** — The Odds API does not cover prediction markets. OddsPapi (oddspapi.io) aggregates Kalshi + Polymarket + sportsbooks in one normalized response. Could add a prediction market row to the multi-book odds table.
-- **Baseball Savant arsenal feed** — Pitcher pitch mix %, velocity, whiff rate by pitch type. CSV export endpoint. Updates per start. This unlocks real arsenal data in the Arsenal tab and real matchup scores in the Lineup tab.
+- **Baseball Savant arsenal feed** — ✅ DONE. Backend routes `/api/arsenal/:pitcherId` and `/api/splits/:batterId` fetch from Savant's Statcast search CSV. Arsenal overlays into pitcher object on game open. Batter splits fetched lazily when lineup drawer opens. `good`/`note` auto-computed from live stats. Column names logged on first fetch for debugging.
 - **Prop engine** — Once arsenal data lands, generate prop confidence scores from pitcher matchup data, park factors, weather, umpire zone.
 - **Trends layer** — Prop hit rate on specific lines (e.g. Judge OVER 1.5 TB last 10 games), pitcher K prop home vs away hit rate, NRFI streaks
 - **Injury flags** — Manual flag system to mark players questionable/out
@@ -283,4 +292,81 @@ The mock SLATE array is always present as a fallback scaffold. Live data overlay
 
 ---
 
-*Updated April 2026 — Prop Scout v7 (full live mode: weather + odds + MLB stats)*
+## Baseball Savant Integration Notes
+
+### Strategy: JSON first, CSV fallback
+Both `arsenal.js` and `splits.js` use a two-strategy approach:
+1. **Primary (Strategy 1):** `https://baseballsavant.mlb.com/player-services/arsenal-scores?playerId={id}&year={year}&type=pitcher|batter` — Savant's internal JSON API. Lightweight, fast, 10s timeout. Browser-like headers required.
+2. **Fallback (Strategy 2):** `https://baseballsavant.mlb.com/statcast_search/csv?...` — Raw Statcast CSV. The route aggregates it by pitch type. 15s timeout. **Warning:** this endpoint has been observed hanging for server-side requests without proper headers — Strategy 1 was added specifically to avoid this.
+
+If both fail, route returns `502`. 6-hour cache via `cache.js`.
+
+### How Arsenal Fetch Works
+1. When a game card opens, `useEffect` fires and calls `GET /api/arsenal/:pitcherId`
+2. Backend tries `arsenal-scores` JSON first (Strategy 1), CSV fallback (Strategy 2)
+3. Result shaped to `{ abbr, type, pct, velo, whiffPct, ba, slg, color }` per pitch
+4. Cached 6 hours. State stored in `pitcherArsenal[pitcherId]`
+5. Arsenal overlaid into `game.pitcher.arsenal` via the existing overlay pattern
+6. `pitcher.arsenalLive = true` when real data is present
+
+Backend log pattern when working:
+```
+→ Savant arsenal-scores  https://baseballsavant.mlb.com/player-services/arsenal-scores?playerId=701542&year=2026&type=pitcher
+✓ Savant arsenal-scores  pitcherId=701542 rows=5 fields=pitch_type|pitch_percent|...
+✓ Arsenal cached  pitcherId=701542 source=arsenal_scores_json pitches=5
+```
+
+If Strategy 1 fails: `⚠ arsenal-scores failed: ...` then CSV attempt logged.
+If both fail: `✗ CSV fallback also failed: ...` and 502 returned.
+
+### How Batter Splits Work
+1. When a lineup batter drawer is expanded, `onBatterExpand` fires
+2. Calls `GET /api/splits/:batterId`
+3. Returns `{ splits: { FF: { avg, whiff, slg, pitches }, SL: {...}, ... } }`
+4. Stored in `batterSplits[batterId]`
+5. `augmentBatter(b)` merges splits into `b.vsPitches` + adds computed `good`/`note` fields
+6. `calcMatchupScore` works with the enriched data automatically
+
+### `computeGood(avg, whiff)` helper
+Since live Savant data has no pre-computed `good` field, `computeGood` derives it:
+- `avg >= .270 && whiff <= 0.22` → `"handles"`
+- `avg <= .230 || whiff >= 0.30` → `"weakspot"`
+- else → `"neutral"`
+
+### Known Limitation
+Batter splits in the Arsenal tab (Featured Batter) still use mock `vsPitches` from SLATE data, since the featured batter doesn't have a live MLB ID until player selection logic is built. Lineup Tab batters get live splits when their drawer is opened.
+
+### SAVANT_HEADERS (required on all Savant requests)
+```js
+{
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Referer': 'https://baseballsavant.mlb.com/',
+  'X-Requested-With': 'XMLHttpRequest'
+}
+```
+
+---
+
+## 🔴 Current Debug State (April 13 2026 — start here next session)
+
+The Baseball Savant integration was just deployed. The fix to use the JSON `arsenal-scores` endpoint (instead of the hanging CSV) was written but **not yet confirmed working** by the user.
+
+### What the user needs to do:
+1. Restart backend: `cd ai-agent-mlb/backend && npm start`
+2. Open a game card in the Arsenal tab
+3. Paste the backend terminal output into the chat
+
+### What to look for:
+- **If working:** Arsenal tab shows **SAVANT LIVE** badge and real pitch mix
+- **If still failing:** Backend console will show `⚠ arsenal-scores failed:` or `✗ CSV fallback also failed:` with the actual error message
+
+### Most likely failure modes at this point:
+- **HTTP 429 / 403** — Savant rate-limiting the server IP. Fix: add retry-after delay or try different headers.
+- **JSON shape mismatch** — `arsenal-scores` returned a shape the parser didn't expect. Fix: log `res.data` raw and adjust the mapper.
+- **Empty rows (rows=0)** — Pitcher has too few appearances in current season. Fix: try prior year as fallback (`year - 1`).
+- **ECONNREFUSED / timeout** — Network issue. Check if Savant is reachable from the server machine.
+
+---
+
+*Updated April 2026 — Prop Scout v7 (full live mode: weather + odds + MLB stats + Baseball Savant arsenal & splits)*

@@ -21,6 +21,8 @@ app.use("/api/schedule", require("./routes/schedule"));
 app.use("/api/lineups",  require("./routes/lineups"));
 app.use("/api/players",  require("./routes/players"));
 app.use("/api/umpires",  require("./routes/umpires"));
+app.use("/api/arsenal",  require("./routes/arsenal"));  // Baseball Savant: pitcher pitch mix
+app.use("/api/splits",   require("./routes/splits"));   // Baseball Savant: batter vs pitch type
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {
@@ -52,5 +54,7 @@ app.listen(PORT, () => {
   console.log(`   /api/schedule        today's games + probable pitchers`);
   console.log(`   /api/lineups/:pk     confirmed batting order`);
   console.log(`   /api/players/:id/stats  season stats + splits`);
-  console.log(`   /api/umpires/:pk     home plate umpire\n`);
+  console.log(`   /api/umpires/:pk     home plate umpire`);
+  console.log(`   /api/arsenal/:id     pitcher pitch mix (Baseball Savant)`);
+  console.log(`   /api/splits/:id      batter splits vs pitch type (Baseball Savant)\n`);
 });

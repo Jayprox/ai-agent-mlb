@@ -157,8 +157,11 @@ const IS_ODDS_SANDBOX = false; // flip to false to enable live odds
 // STATS API (Backend Proxy) CONFIG
 // Flip IS_STATS_SANDBOX to false once the backend is running locally.
 // ─────────────────────────────────────────────
-const API_BASE        = ""; // Vite proxy forwards /api → localhost:3001
+const API_BASE         = ""; // Vite proxy forwards /api → localhost:3001
 const IS_STATS_SANDBOX = false; // flip to false to enable live MLB stats
+// Baseball Savant (arsenal + splits) shares the IS_STATS_SANDBOX gate —
+// set false when backend is running so Savant routes are active too.
+const IS_SAVANT_SANDBOX = IS_STATS_SANDBOX;
 
 const apiFetch = async (path) => {
   const res = await fetch(`${API_BASE}${path}`);
@@ -1133,6 +1136,9 @@ export default function App() {
   const [liveLineups, setLiveLineups] = useState({});
   const [liveUmpires, setLiveUmpires] = useState({});
   const [livePitcherStats, setLivePitcherStats] = useState({});
+  // Baseball Savant data — keyed by MLB player ID
+  const [pitcherArsenal, setPitcherArsenal] = useState({}); // pitcherId → arsenal array
+  const [batterSplits, setBatterSplits] = useState({});     // batterId  → splits object
 
   // Fetch weather when a game card is opened
   useEffect(() => {
@@ -1189,6 +1195,16 @@ export default function App() {
         .then(data => setLivePitcherStats(prev => ({ ...prev, [pitcherId]: data })))
         .catch(err => console.error("Pitcher stats:", err));
     }
+    // Fetch Baseball Savant arsenal for the probable pitcher
+    if (!IS_SAVANT_SANDBOX && pitcherId && !pitcherArsenal[pitcherId]) {
+      apiFetch(`/api/arsenal/${pitcherId}`)
+        .then(data => {
+          if (data?.arsenal?.length) {
+            setPitcherArsenal(prev => ({ ...prev, [pitcherId]: data.arsenal }));
+          }
+        })
+        .catch(err => console.error("Arsenal fetch:", err));
+    }
   }, [selectedId, view, liveSlate]);
 
   // Fetch live odds on mount (and on manual refresh)
@@ -1239,16 +1255,22 @@ export default function App() {
     })(),
     // Pitcher stats: overlay real ERA/WHIP/K etc when loaded
     pitcher: (() => {
-      const ps = livePitcherStats[baseGame.pitcher?.id];
-      if (!ps) return baseGame.pitcher;
+      const ps  = livePitcherStats[baseGame.pitcher?.id];
+      const pid = baseGame.pitcher?.id;
+      const liveArsenal = pid ? pitcherArsenal[pid] : null;
       return {
         ...baseGame.pitcher,
-        era:    ps.era    ?? baseGame.pitcher.era,
-        whip:   ps.whip   ?? baseGame.pitcher.whip,
-        kPer9:  ps.kPer9  ?? baseGame.pitcher.kPer9,
-        bbPer9: ps.bbPer9 ?? baseGame.pitcher.bbPer9,
-        wins:   ps.wins,  losses: ps.losses,
-        k:      ps.k,     bb:     ps.bb,    ip: ps.ip,
+        ...(ps ? {
+          era:    ps.era    ?? baseGame.pitcher.era,
+          whip:   ps.whip   ?? baseGame.pitcher.whip,
+          kPer9:  ps.kPer9  ?? baseGame.pitcher.kPer9,
+          bbPer9: ps.bbPer9 ?? baseGame.pitcher.bbPer9,
+          wins:   ps.wins,  losses: ps.losses,
+          k:      ps.k,     bb:     ps.bb,    ip: ps.ip,
+        } : {}),
+        // Overlay real Savant arsenal when available (preserves mock arsenal as fallback)
+        arsenal: liveArsenal ?? baseGame.pitcher.arsenal ?? [],
+        arsenalLive: !!liveArsenal,
       };
     })(),
   };
@@ -1330,8 +1352,55 @@ export default function App() {
 
   const TABS = ["overview", "lineup", "arsenal", "intel", "props"];
 
-  const batterMatchupScore = (b) =>
-    calcMatchupScore(b.hand, b.vsPitches, pitcher.arsenal, pitcher.hand);
+  // ── Savant splits helpers ─────────────────────────────────
+  // Derive HANDLES / NEUTRAL / WEAK SPOT from live split numbers
+  const computeGood = (avg, whiff) => {
+    const a = parseFloat(avg) || 0;
+    const w = parseFloat(whiff) || 0;
+    if (a >= 0.280 && w < 25) return true;
+    if (a <= 0.215 || w >= 35) return false;
+    return null;
+  };
+
+  const autoNote = (abbr, avg, whiff) => {
+    const a = parseFloat(avg) || 0;
+    const w = parseFloat(whiff) || 0;
+    if (a >= 0.300 && w < 20) return `Elite contact vs ${abbr}`;
+    if (a >= 0.280)            return `Solid contact rate vs ${abbr}`;
+    if (a <= 0.180 || w >= 40) return `Severe weakness vs ${abbr} — high K exposure`;
+    if (a <= 0.215)            return `Weak contact vs ${abbr}`;
+    if (w >= 30)               return `High whiff rate (${whiff}) — chases out of zone`;
+    return `Average results vs ${abbr}`;
+  };
+
+  // Augment a batter object with live Savant splits when available.
+  // Preserves mock vsPitches as fallback.
+  const augmentBatter = (b) => {
+    if (!b?.id) return b;
+    const liveSplits = batterSplits[b.id];
+    if (!liveSplits) return b;
+    // Build enriched vsPitches: add computed `good` and `note` to each live split
+    const enriched = {};
+    Object.entries(liveSplits).forEach(([abbr, s]) => {
+      enriched[abbr] = { ...s, good: computeGood(s.avg, s.whiff), note: autoNote(abbr, s.avg, s.whiff) };
+    });
+    return { ...b, vsPitches: enriched, splitsLive: true };
+  };
+
+  const batterMatchupScore = (b) => {
+    const aug = augmentBatter(b);
+    return calcMatchupScore(aug.hand, aug.vsPitches, pitcher.arsenal, pitcher.hand);
+  };
+
+  // Lazily fetch Savant splits for a batter when their drawer opens
+  const onBatterExpand = (b, openingDrawer) => {
+    if (!openingDrawer || !b?.id || IS_SAVANT_SANDBOX || batterSplits[b.id]) return;
+    apiFetch(`/api/splits/${b.id}`)
+      .then(data => {
+        if (data?.splits) setBatterSplits(prev => ({ ...prev, [b.id]: data.splits }));
+      })
+      .catch(err => console.error("Batter splits:", err));
+  };
 
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); };
 
@@ -1534,16 +1603,17 @@ export default function App() {
 
               {/* Batter rows */}
               <Card style={{ padding: "8px" }}>
-                {lineup.map((b, i) => {
+                {lineup.map((rawB, i) => {
+                  const b = augmentBatter(rawB);
                   const sc = batterMatchupScore(b);
                   const scColor = scoreColor(sc);
                   const isExpanded = expandedBatter === i;
-                  const recentHits = b.hitRate.reduce((a, v) => a + v, 0);
+                  const recentHits = (b.hitRate || []).reduce((a, v) => a + v, 0);
 
                   return (
                     <div key={i}>
                       {/* Row */}
-                      <div onClick={() => setExpandedBatter(isExpanded ? null : i)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 8px", cursor: "pointer", borderRadius: 8, background: isExpanded ? "rgba(34,197,94,0.05)" : "transparent", transition: "background 0.15s" }}>
+                      <div onClick={() => { const opening = !isExpanded; setExpandedBatter(opening ? i : null); onBatterExpand(b, opening); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 8px", cursor: "pointer", borderRadius: 8, background: isExpanded ? "rgba(34,197,94,0.05)" : "transparent", transition: "background 0.15s" }}>
 
                         {/* Order number */}
                         <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#6b7280", flexShrink: 0 }}>{b.order}</div>
@@ -1556,7 +1626,7 @@ export default function App() {
 
                         {/* Last 5 hit dots */}
                         <div style={{ display: "flex", gap: 3, flexShrink: 0 }}>
-                          {b.hitRate.map((h, di) => (
+                          {(b.hitRate || [0,0,0,0,0]).map((h, di) => (
                             <div key={di} style={{ width: 7, height: 7, borderRadius: "50%", background: h ? "#22c55e" : "#374151" }} />
                           ))}
                         </div>
@@ -1583,7 +1653,11 @@ export default function App() {
                           </div>
 
                           {/* vs pitcher arsenal */}
-                          <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>vs {pitcher.name}'s Pitches</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                            <span style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em" }}>vs {pitcher.name}'s Pitches</span>
+                            {b.splitsLive && <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", borderRadius: 4, padding: "1px 5px" }}>SAVANT</span>}
+                            {!b.splitsLive && b.id && !IS_SAVANT_SANDBOX && <span style={{ fontSize: 8, color: "#6b7280" }}>loading…</span>}
+                          </div>
                           {pitcher.arsenal.map(a => {
                             const p = b.vsPitches?.[a.abbr];
                             if (!p) return null;
@@ -1601,7 +1675,7 @@ export default function App() {
                                     <span style={{ fontSize: 10, color: "#9ca3af" }}>{a.type} · {a.pct}%</span>
                                   </div>
                                   <div style={{ display: "flex", gap: 8 }}>
-                                    <span style={{ fontSize: 10, color: wColor, fontFamily: "monospace" }}>{whiff}% K</span>
+                                    <span style={{ fontSize: 10, color: wColor, fontFamily: "monospace" }}>{Math.round(whiff)}% K</span>
                                     <span style={{ fontSize: 11, fontWeight: 700, color, fontFamily: "monospace" }}>{typeof p === "object" ? p.avg : p}</span>
                                   </div>
                                 </div>
@@ -1641,16 +1715,28 @@ export default function App() {
 
           {/* ── ARSENAL ── */}
           {tab === "arsenal" && (<>
-            <SLabel>{pitcher.name}'s Arsenal vs {batter.name}</SLabel>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div style={{ fontSize: 10, color: "#6b7280", letterSpacing: "0.1em", textTransform: "uppercase" }}>— {pitcher.name}'s Arsenal vs {batter.name}</div>
+              {pitcher.arsenalLive
+                ? <div style={{ display: "flex", alignItems: "center", gap: 4 }}><div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 5px #22c55e" }} /><span style={{ fontSize: 9, color: "#22c55e", fontFamily: "monospace" }}>SAVANT LIVE</span></div>
+                : <div style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{!IS_SAVANT_SANDBOX && pitcher.id ? "Fetching…" : "DEMO"}</div>
+              }
+            </div>
             {pitcher.arsenal.length === 0 && (
               <Card style={{ textAlign: "center", padding: "24px 14px" }}>
                 <div style={{ fontSize: 20, marginBottom: 10 }}>⏳</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb", marginBottom: 6 }}>Arsenal Data Pending</div>
-                <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.6 }}>Pitch mix, velocity, and whiff rates come from Baseball Savant — next integration milestone.</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb", marginBottom: 6 }}>Fetching Arsenal…</div>
+                <div style={{ fontSize: 11, color: "#6b7280", lineHeight: 1.6 }}>Loading pitch mix from Baseball Savant. Requires backend to be running.</div>
               </Card>
             )}
             {pitcher.arsenal.map(a => {
-              const vs = batter.vsPitches[a.abbr];
+              const rawVs = batter.vsPitches?.[a.abbr];
+              // Compute derived fields for live data (which lacks `good` and `note`)
+              const vs = rawVs
+                ? (typeof rawVs === "object" && ("good" in rawVs)
+                    ? rawVs
+                    : { ...rawVs, good: computeGood(rawVs.avg, rawVs.whiff), note: autoNote(a.abbr, rawVs.avg, rawVs.whiff) })
+                : null;
               if (!vs) return null;
               const color = vs.good === true ? "#22c55e" : vs.good === false ? "#ef4444" : "#f59e0b";
               const heavy = a.pct >= 25;
@@ -1661,7 +1747,10 @@ export default function App() {
                       <div style={{ width: 36, height: 36, borderRadius: 8, background: `${a.color}22`, border: `1px solid ${a.color}55`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: a.color, flexShrink: 0 }}>{a.abbr}</div>
                       <div>
                         <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>{a.type}</div>
-                        <div style={{ fontSize: 9, color: "#6b7280" }}>{a.velo} mph · {a.pct}% usage</div>
+                        <div style={{ fontSize: 9, color: "#6b7280" }}>
+                          {a.velo ? `${a.velo} mph · ` : ""}{a.pct}% usage
+                          {a.whiffPct != null ? ` · ${a.whiffPct}% whiff` : ""}
+                        </div>
                       </div>
                     </div>
                     <LeanBadge label={vs.good === true ? "HANDLES" : vs.good === false ? "WEAK SPOT" : "NEUTRAL"} positive={vs.good} small />
@@ -1678,7 +1767,7 @@ export default function App() {
                     </div>
                     <div style={{ flex: 1, background: "#1e2030", borderRadius: 8, padding: "8px", textAlign: "center" }}>
                       <div style={{ fontSize: 16, fontWeight: 800, color: parseFloat(vs.whiff) >= 30 ? "#ef4444" : "#e5e7eb" }}>{vs.whiff}</div>
-                      <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>WHIFF RATE</div>
+                      <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>BATTER WHIFF</div>
                     </div>
                   </div>
                   <div style={{ fontSize: 11, color: "#9ca3af" }}>{vs.note}</div>
@@ -1909,14 +1998,16 @@ export default function App() {
             const allMock  = IS_SANDBOX && IS_ODDS_SANDBOX && IS_STATS_SANDBOX;
             const allLive  = !IS_SANDBOX && !IS_ODDS_SANDBOX && !IS_STATS_SANDBOX;
             if (allMock)  return "⚠ Demo mode — all mock data · Flip IS_SANDBOX / IS_ODDS_SANDBOX / IS_STATS_SANDBOX to go live";
-            if (allLive)  return "⚡ Full live mode — weather · odds · MLB stats from real APIs";
+            if (allLive)  return "⚡ Full live mode — weather · odds · MLB stats · Savant arsenal & splits";
             const parts = [];
-            if (!IS_SANDBOX)       parts.push("Weather: LIVE");
-            if (!IS_ODDS_SANDBOX)  parts.push("Odds: LIVE");
-            if (!IS_STATS_SANDBOX) parts.push("MLB Stats: LIVE");
-            if (IS_SANDBOX)        parts.push("Weather: demo");
-            if (IS_ODDS_SANDBOX)   parts.push("Odds: demo");
-            if (IS_STATS_SANDBOX)  parts.push("Stats: demo");
+            if (!IS_SANDBOX)        parts.push("Weather: LIVE");
+            if (!IS_ODDS_SANDBOX)   parts.push("Odds: LIVE");
+            if (!IS_STATS_SANDBOX)  parts.push("MLB Stats: LIVE");
+            if (!IS_SAVANT_SANDBOX) parts.push("Savant: LIVE");
+            if (IS_SANDBOX)         parts.push("Weather: demo");
+            if (IS_ODDS_SANDBOX)    parts.push("Odds: demo");
+            if (IS_STATS_SANDBOX)   parts.push("Stats: demo");
+            if (IS_SAVANT_SANDBOX)  parts.push("Savant: demo");
             return `⚡ ${parts.join(" · ")}`;
           })()}
         </div>
