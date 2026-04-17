@@ -250,7 +250,7 @@ const fetchOdds = async (forceRefresh = false) => {
   oddsCache.error = null;
   try {
     const res = await fetch(
-      `https://api.the-odds-api.com/v4/sports/baseball_mlb/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,totals,totals_h1&oddsFormat=american&dateFormat=iso`
+      `https://api.the-odds-api.com/v4/sports/baseball_mlb/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,totals&oddsFormat=american&dateFormat=iso`
     );
 
     if (!res.ok) {
@@ -973,7 +973,7 @@ const buildLiveGame = (sg) => {
     location:    "",
     weather:     tpl.weather,  // overridden by Open-Meteo when IS_SANDBOX = false
     umpire:      { name: "TBD", kRate: "—", bbRate: "—", tendency: "Awaiting assignment", rating: "neutral" },
-    odds:        tpl.odds,     // overridden by Odds API when IS_ODDS_SANDBOX = false
+    odds:        { ...tpl.odds, lineMove: "none" },  // lineMove reset — overridden by Odds API when live
     nrfi:        tpl.nrfi,     // mock — pending historical data integration
     bullpen:     tpl.bullpen,  // mock — pending bullpen data integration
     pitcher:     mkPitcher(hp),  // home SP — faces the away lineup
@@ -2746,6 +2746,20 @@ export default function App() {
                 const activePitcher = pitcherSide === "home" ? pitcher : (game.awayPitcher ?? pitcher);
                 const facingTeam   = pitcherSide === "home" ? game.away.abbr : game.home.abbr;
                 const gamelog = activePitcher?.id ? liveGameLog[activePitcher.id] : null;
+
+                // ── K lean badge: real prop for home SP, kPer9-derived for away SP ──
+                const activeKProp = pitcherSide === "home"
+                  ? liveProps.find(p => p.propType === "K") ?? null
+                  : null;
+                const activeKPer9 = parseFloat(activePitcher?.kPer9);
+                const kLeanBadge = activeKProp
+                  ? { label: `K ${activeKProp.lean}`, positive: activeKProp.positive }
+                  : !isNaN(activeKPer9)
+                    ? activeKPer9 >= 8.5 ? { label: "K LEAN OVER",  positive: true  }
+                    : activeKPer9 >= 7.0 ? { label: "K LEAN OVER",  positive: true  }
+                    : activeKPer9 <  5.5 ? { label: "K LEAN UNDER", positive: false }
+                    : null  // 5.5–7.0 = neutral, hide badge
+                  : null;
                 const recentStarts = gamelog?.games ?? [];
                 const last3Era = last3EraSummary(recentStarts);
                 const seasonEra = parseFloat(gamelog?.seasonEra ?? activePitcher.era);
@@ -2765,7 +2779,7 @@ export default function App() {
                           <div style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb" }}>{activePitcher.name ?? "TBD"}</div>
                           <div style={{ fontSize: 9, color: "#6b7280" }}>{activePitcher.team} · SP · {activePitcher.hand ?? "?"}HP · vs {facingTeam}</div>
                         </div>
-                        {pitcherSide === "home" && <LeanBadge label="K LEAN OVER" positive={true} small />}
+                        {kLeanBadge && <LeanBadge label={kLeanBadge.label} positive={kLeanBadge.positive} small />}
                       </div>
                     </div>
                   </div>
