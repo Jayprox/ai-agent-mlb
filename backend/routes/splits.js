@@ -26,48 +26,11 @@ const SAVANT_HEADERS = {
 };
 
 // ─────────────────────────────────────────────
-// STRATEGY 1: Baseball Savant arsenal-scores with type=batter
-// Returns batter's run value (and sometimes BA/whiff) vs each pitch type.
-// ─────────────────────────────────────────────
-async function fetchFromArsenalScores(batterId, year) {
-  const url = `https://baseballsavant.mlb.com/player-services/arsenal-scores?playerId=${batterId}&year=${year}&type=batter`;
-  console.log(`  → Savant batter arsenal-scores  ${url}`);
-
-  const res  = await axios.get(url, { headers: SAVANT_HEADERS, timeout: 10000 });
-  const rows = Array.isArray(res.data) ? res.data : (res.data?.data ?? []);
-
-  if (!rows.length) return null;
-
-  console.log(`  ✓ Savant batter splits  batterId=${batterId} rows=${rows.length} fields=${Object.keys(rows[0]).join("|")}`);
-
-  const splits = {};
-  rows
-    .filter(r => r.pitch_type && r.pitch_type !== "PO")
-    .forEach(r => {
-      const abbr  = String(r.pitch_type).toUpperCase();
-      const ba    = num(r.ba    ?? r.avg ?? r.batting_average, -1);
-      const slg   = num(r.slg  ?? r.slg_percent, -1);
-      const whiff = num(r.whiff_percent ?? r.whiff_pct, -1);
-
-      // Only include if we have at least one meaningful stat
-      if (ba < 0 && slg < 0 && whiff < 0) return;
-
-      splits[abbr] = {
-        avg:     ba    >= 0 ? fmtAvg(ba)            : ".000",
-        whiff:   whiff >= 0 ? `${Math.round(whiff)}%` : "0%",
-        slg:     slg   >= 0 ? fmtAvg(slg)           : ".000",
-        pitches: num(r.pitches ?? r.pa, 0),
-      };
-    });
-
-  return Object.keys(splits).length ? splits : null;
-}
-
-// ─────────────────────────────────────────────
-// STRATEGY 2: Statcast CSV — batter perspective
+// Statcast CSV — batter perspective
 // ─────────────────────────────────────────────
 function parseCSV(text) {
-  const lines = text.trim().split("\n");
+  const cleaned = String(text || "").replace(/^\uFEFF/, "").trim();
+  const lines = cleaned.split(/\r?\n/);
   if (lines.length < 2) return [];
   const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, "").toLowerCase().replace(/\s+/g, "_"));
   return lines.slice(1).map(line => {
@@ -91,17 +54,22 @@ async function fetchFromCSV(batterId, year) {
     `&hfSea=${year}%7C`,
     `&player_type=batter`,
     `&batters_lookup%5B%5D=${batterId}`,
+    `&group_by=pitch-type`,
     `&sort_col=pitches`,
     `&sort_order=desc`,
     `&min_pitches=0`,
     `&min_results=0`,
     `&type=details`,
+    `&player_id=${batterId}`,
   ].join("");
   console.log(`  → Savant batter CSV  ${url}`);
 
   const res  = await axios.get(url, { headers: { ...SAVANT_HEADERS, Accept: "text/csv,*/*" }, timeout: 15000 });
   const rows = parseCSV(String(res.data));
-  if (!rows.length || !rows[0].pitch_type) return null;
+  if (!rows.length || !rows[0].pitch_type) {
+    console.log(`  · Savant batter CSV returned no usable rows  batterId=${batterId} year=${year}`);
+    return null;
+  }
 
   console.log(`  ✓ Savant batter CSV  batterId=${batterId} rows=${rows.length}`);
 
@@ -147,7 +115,7 @@ async function fetchFromCSV(batterId, year) {
 // ─────────────────────────────────────────────
 router.get("/:batterId", async (req, res) => {
   const { batterId } = req.params;
-  const year     = req.query.year ?? SEASON;
+  const year     = parseInt(req.query.year ?? SEASON, 10);
   const cacheKey = `splits:batter:${batterId}:${year}`;
 
   const cached = cache.get(cacheKey);
@@ -158,33 +126,30 @@ router.get("/:batterId", async (req, res) => {
 
   let splits = null;
   let source  = null;
+  let resolvedYear = year;
+  const yearsToTry = year > 2008 ? [year, year - 1] : [year];
 
-  // Strategy 1: arsenal-scores JSON (fast)
-  try {
-    splits = await fetchFromArsenalScores(batterId, year);
-    if (splits) source = "arsenal_scores_json";
-  } catch (err) {
-    console.warn(`  ⚠ batter arsenal-scores failed for ${batterId}: ${err.message} — trying CSV`);
-  }
-
-  // Strategy 2: statcast CSV fallback
-  if (!splits) {
+  for (const candidateYear of yearsToTry) {
     try {
-      splits = await fetchFromCSV(batterId, year);
-      if (splits) source = "statcast_csv";
+      splits = await fetchFromCSV(batterId, candidateYear);
+      if (splits) {
+        resolvedYear = candidateYear;
+        source = candidateYear === year ? "statcast_csv" : "statcast_csv_prev_season";
+        break;
+      }
     } catch (err) {
-      console.error(`  ✗ Batter splits CSV also failed for ${batterId}: ${err.message}`);
+      console.error(`  ✗ Batter splits CSV failed for ${batterId} year=${candidateYear}: ${err.message}`);
     }
   }
 
   if (!splits) {
-    return res.status(502).json({ error: "Baseball Savant unavailable — both strategies failed", batterId });
+    return res.status(502).json({ error: "Baseball Savant unavailable", batterId });
   }
 
-  const result = { batterId: parseInt(batterId), season: year, source, splits };
+  const result = { batterId: parseInt(batterId), season: resolvedYear, source, splits };
   cache.set(cacheKey, result, SAVANT_TTL);
   res.setHeader("X-Cache", "MISS");
-  console.log(`  ✓ Batter splits cached  batterId=${batterId} source=${source} types=${Object.keys(splits).join(",")}`);
+  console.log(`  ✓ Batter splits cached  batterId=${batterId} source=${source} season=${resolvedYear} types=${Object.keys(splits).join(",")}`);
   res.json(result);
 });
 

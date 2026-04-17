@@ -70,6 +70,7 @@ router.get("/", async (req, res) => {
 
       return {
         gamePk:  g.gamePk,
+        id:      g.gamePk,
         status:  g.status.detailedState,
         time:    formatGameTime(g.gameDate),
         stadium: g.venue.name,

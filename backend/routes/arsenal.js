@@ -5,6 +5,7 @@ const cache   = require("../services/cache");
 
 const SEASON     = new Date().getFullYear();
 const SAVANT_TTL = 6 * 60 * 60 * 1000; // 6 hours
+const PREV_VELO_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 // ─────────────────────────────────────────────
 // PITCH TYPE METADATA
@@ -44,62 +45,12 @@ const SAVANT_HEADERS = {
 };
 
 // ─────────────────────────────────────────────
-// STRATEGY 1: Baseball Savant arsenal-scores JSON
-// This is the lightest, most reliable Savant endpoint.
-// Returns JSON (not CSV) with one object per pitch type.
-//
-// Sample field names (vary slightly by year):
-//   pitch_type, pitch_name, pitches, pa, avg_speed,
-//   pitch_percent, whiff_percent, put_away_percent, ba, slg, run_value_per_100
-// ─────────────────────────────────────────────
-async function fetchFromArsenalScores(pitcherId, year) {
-  const url = `https://baseballsavant.mlb.com/player-services/arsenal-scores?playerId=${pitcherId}&year=${year}&type=pitcher`;
-  console.log(`  → Savant arsenal-scores  ${url}`);
-
-  const res = await axios.get(url, { headers: SAVANT_HEADERS, timeout: 10000 });
-
-  // Response shape: { data: [...] } or raw array
-  const rows = Array.isArray(res.data) ? res.data : (res.data?.data ?? []);
-
-  if (!rows.length) return null;
-
-  // Log field names on first successful call for schema verification
-  console.log(`  ✓ Savant arsenal-scores  pitcherId=${pitcherId} rows=${rows.length} fields=${Object.keys(rows[0]).join("|")}`);
-
-  let totalPct = 0;
-  const arsenal = rows
-    .filter(r => r.pitch_type && r.pitch_type !== "PO")
-    .map(r => {
-      const abbr     = String(r.pitch_type).toUpperCase();
-      const meta     = PITCH_META[abbr] ?? { type: r.pitch_name ?? abbr, color: "#9ca3af" };
-      const pct      = num(r.pitch_percent, 0);
-      const velo     = num(r.avg_speed, 0);
-      const whiffPct = num(r.whiff_percent, null);
-      const ba       = num(r.ba, null);
-      const slg      = num(r.slg ?? r.slg_percent, null);
-      totalPct += pct;
-      return {
-        abbr,
-        type:     meta.type,
-        pct:      Math.round(pct),
-        velo:     velo > 0 ? velo.toFixed(1) : null,
-        whiffPct: whiffPct != null ? Math.round(whiffPct) : null,
-        ba:       ba != null && ba > 0 ? ba.toFixed(3) : null,
-        slg:      slg != null && slg > 0 ? slg.toFixed(3) : null,
-        color:    meta.color,
-      };
-    })
-    .sort((a, b) => b.pct - a.pct);
-
-  return arsenal.length ? arsenal : null;
-}
-
-// ─────────────────────────────────────────────
-// STRATEGY 2: Baseball Savant statcast CSV (ungrouped, aggregate manually)
-// Fallback if arsenal-scores fails. Fetches raw pitch rows and aggregates.
+// Baseball Savant statcast CSV (ungrouped, aggregate manually)
+// Uses the current export shape from the live Statcast Search page.
 // ─────────────────────────────────────────────
 function parseCSV(text) {
-  const lines = text.trim().split("\n");
+  const cleaned = String(text || "").replace(/^\uFEFF/, "").trim();
+  const lines = cleaned.split(/\r?\n/);
   if (lines.length < 2) return [];
   const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, "").toLowerCase().replace(/\s+/g, "_"));
   return lines.slice(1).map(line => {
@@ -116,19 +67,20 @@ function parseCSV(text) {
   });
 }
 
-async function fetchFromCSV(pitcherId, year) {
-  // Use ungrouped CSV — smaller request by limiting to one team/pitcher
+async function fetchCSVRows(pitcherId, year) {
   const url = [
     `https://baseballsavant.mlb.com/statcast_search/csv`,
     `?hfGT=R%7C`,
     `&hfSea=${year}%7C`,
     `&player_type=pitcher`,
     `&pitchers_lookup%5B%5D=${pitcherId}`,
+    `&group_by=pitch-type`,
     `&sort_col=pitches`,
     `&sort_order=desc`,
     `&min_pitches=0`,
     `&min_results=0`,
     `&type=details`,
+    `&player_id=${pitcherId}`,
   ].join("");
   console.log(`  → Savant CSV  ${url}`);
 
@@ -138,10 +90,16 @@ async function fetchFromCSV(pitcherId, year) {
   });
 
   const rows = parseCSV(String(res.data));
-  if (!rows.length || !rows[0].pitch_type) return null;
+  if (!rows.length || !rows[0].pitch_type) {
+    console.log(`  · Savant CSV returned no usable rows  pitcherId=${pitcherId} year=${year}`);
+    return null;
+  }
 
   console.log(`  ✓ Savant CSV  pitcherId=${pitcherId} rows=${rows.length} cols=${Object.keys(rows[0]).join("|")}`);
+  return rows;
+}
 
+function buildArsenalFromRows(rows) {
   // Aggregate individual pitch rows by pitch type
   const byType = {};
   let totalPitches = 0;
@@ -192,12 +150,35 @@ async function fetchFromCSV(pitcherId, year) {
   return arsenal.length ? arsenal : null;
 }
 
+function buildPrevVeloMap(rows) {
+  const byType = {};
+
+  rows.forEach(r => {
+    const abbr = (r.pitch_type || "").trim().toUpperCase();
+    if (!abbr || abbr === "PO") return;
+    if (!byType[abbr]) byType[abbr] = { veloSum: 0, veloN: 0 };
+
+    const velo = num(r.release_speed || r.effective_speed, 0);
+    if (velo > 60) {
+      byType[abbr].veloSum += velo;
+      byType[abbr].veloN++;
+    }
+  });
+
+  return Object.fromEntries(
+    Object.entries(byType).map(([abbr, entry]) => [
+      abbr,
+      entry.veloN > 0 ? parseFloat((entry.veloSum / entry.veloN).toFixed(1)) : null,
+    ])
+  );
+}
+
 // ─────────────────────────────────────────────
 // ROUTE: GET /api/arsenal/:pitcherId
 // ─────────────────────────────────────────────
 router.get("/:pitcherId", async (req, res) => {
   const { pitcherId } = req.params;
-  const year     = req.query.year ?? SEASON;
+  const year     = parseInt(req.query.year ?? SEASON, 10);
   const cacheKey = `arsenal:pitcher:${pitcherId}:${year}`;
 
   const cached = cache.get(cacheKey);
@@ -208,33 +189,54 @@ router.get("/:pitcherId", async (req, res) => {
 
   let arsenal = null;
   let source  = null;
+  let resolvedYear = year;
+  const yearsToTry = year > 2008 ? [year, year - 1] : [year];
 
-  // Strategy 1: arsenal-scores JSON (fast, clean)
-  try {
-    arsenal = await fetchFromArsenalScores(pitcherId, year);
-    if (arsenal) source = "arsenal_scores_json";
-  } catch (err) {
-    console.warn(`  ⚠ arsenal-scores failed for ${pitcherId}: ${err.message} — trying CSV fallback`);
-  }
-
-  // Strategy 2: statcast CSV fallback
-  if (!arsenal) {
+  for (const candidateYear of yearsToTry) {
     try {
-      arsenal = await fetchFromCSV(pitcherId, year);
-      if (arsenal) source = "statcast_csv";
+      const rows = await fetchCSVRows(pitcherId, candidateYear);
+      arsenal = rows ? buildArsenalFromRows(rows) : null;
+      if (arsenal) {
+        resolvedYear = candidateYear;
+        source = candidateYear === year ? "statcast_csv" : "statcast_csv_prev_season";
+        break;
+      }
     } catch (err) {
-      console.error(`  ✗ CSV fallback also failed for ${pitcherId}: ${err.message}`);
+      console.error(`  ✗ Savant CSV failed for ${pitcherId} year=${candidateYear}: ${err.message}`);
     }
   }
 
   if (!arsenal) {
-    return res.status(502).json({ error: "Baseball Savant unavailable — both strategies failed", pitcherId });
+    return res.status(502).json({ error: "Baseball Savant unavailable", pitcherId });
   }
 
-  const result = { pitcherId: parseInt(pitcherId), season: year, source, arsenal };
+  const prevCacheKey = `arsenal:${pitcherId}:prev`;
+  let prevCache = cache.get(prevCacheKey);
+  let prevVeloMap = null;
+  const prevYear = resolvedYear - 1;
+
+  if (prevCache?.season === prevYear) {
+    prevVeloMap = prevCache.map ?? null;
+  } else {
+    try {
+      const prevRows = await fetchCSVRows(pitcherId, prevYear);
+      prevVeloMap = prevRows ? buildPrevVeloMap(prevRows) : null;
+      cache.set(prevCacheKey, { season: prevYear, map: prevVeloMap }, PREV_VELO_TTL);
+    } catch (err) {
+      console.warn(`  · Savant prev velo skipped for ${pitcherId} year=${prevYear}: ${err.message}`);
+      prevVeloMap = null;
+    }
+  }
+
+  arsenal = arsenal.map(pitch => ({
+    ...pitch,
+    prevVelo: prevVeloMap?.[pitch.abbr] ?? null,
+  }));
+
+  const result = { pitcherId: parseInt(pitcherId), season: resolvedYear, source, arsenal };
   cache.set(cacheKey, result, SAVANT_TTL);
   res.setHeader("X-Cache", "MISS");
-  console.log(`  ✓ Arsenal cached  pitcherId=${pitcherId} source=${source} pitches=${arsenal.length}`);
+  console.log(`  ✓ Arsenal cached  pitcherId=${pitcherId} source=${source} season=${resolvedYear} pitches=${arsenal.length}`);
   res.json(result);
 });
 
