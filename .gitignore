@@ -12,3 +12,12 @@ dist/
 
 # OS files
 .DS_Store
+
+# Runtime data — user picks/notes, never commit
+backend/data/picks.json
+backend/data/notes.json
+backend/data/users.json
+
+# Lock files (generated, not needed in repo)
+package-lock.json
+backend/package-lock.json
