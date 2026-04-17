@@ -1300,6 +1300,483 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
   return picks.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
 }
 
+function computeLiveProps({
+  IS_SAVANT_SANDBOX,
+  IS_STATS_SANDBOX,
+  pitcher,
+  umpire,
+  weather,
+  parkFactor,
+  game,
+  batterSplits,
+  batterMatchupScore,
+  liveOddsMap,
+  pinnedBatterId,
+  activeBatter,
+  calcMatchupScore,
+  activeMatchupPitcher,
+  liveH2H,
+  liveRbiCtx,
+}) {
+  try {
+    const out = [];
+    if (IS_SAVANT_SANDBOX) return out;
+
+    // ── 1. PITCHER STRIKEOUT PROP ──────────────────────────────────────────────
+    const kPer9Num = parseFloat(pitcher.kPer9) || 0;
+    const avgIPNum = parseFloat(pitcher.avgIP) || 5.5;
+    const rawAvgK  = parseFloat(pitcher.avgK);
+    // Use avgK if available (mock or future stat), else derive from kPer9 × avgIP
+    const baseK    = (!isNaN(rawAvgK) && rawAvgK > 0) ? rawAvgK : (kPer9Num / 9) * avgIPNum;
+
+    if (baseK >= 3 && kPer9Num > 0) {
+      const line = Math.ceil(baseK) - 0.5;
+      let score  = 50;
+      let projK  = baseK;
+      const kR   = [`Avg ${baseK.toFixed(1)} K/start`];
+
+      if (pitcher.arsenalLive && pitcher.arsenal.length > 0) {
+        const totalPct  = pitcher.arsenal.reduce((s, p) => s + (p.pct || 0), 0) || 1;
+        const wAvgWhiff = pitcher.arsenal.reduce((s, p) => s + ((parseFloat(p.whiffPct) || 25) * (p.pct || 0)), 0) / totalPct;
+        const dW        = wAvgWhiff - 26;
+        if      (dW >  5) { score += 8; projK += 0.8; kR.push(`Arsenal: ${Math.round(wAvgWhiff)}% whiff (elite)`); }
+        else if (dW >  2) { score += 4; projK += 0.4; kR.push(`${Math.round(wAvgWhiff)}% arsenal whiff`); }
+        else if (dW < -4) { score -= 6; projK -= 0.6; kR.push(`Low arsenal whiff (${Math.round(wAvgWhiff)}%)`); }
+        const bestP = [...pitcher.arsenal].sort((a, b) => (parseFloat(b.whiffPct) || 0) - (parseFloat(a.whiffPct) || 0))[0];
+        if (bestP && parseFloat(bestP.whiffPct) >= 35) kR.push(`${bestP.type}: ${bestP.whiffPct}% whiff`);
+      }
+
+      const umpK = parseFloat(umpire?.kRate) || 22.5;
+      const dU   = umpK - 22.5;
+      if      (dU >  2.5) { score += 7; projK += 0.5; kR.push(`${umpire.name || "Ump"}: wide K zone (${umpire.kRate})`); }
+      else if (dU >  0.8) { score += 3; kR.push(`${umpire.name || "Ump"} favors pitchers`); }
+      else if (dU < -2.0) { score -= 5; projK -= 0.4; kR.push(`${umpire.name || "Ump"}: tight zone (${umpire.kRate})`); }
+
+      if (!weather?.roof) {
+        const t = parseInt(weather?.temp) || 72;
+        if      (t < 48) { score += 4; kR.push(`Cold ${t}° — offense suppressed`); }
+        else if (t < 58) { score += 2; kR.push(`Cool ${t}°`); }
+        else if (t > 85) { score -= 2; kR.push(`Hot ${t}° — hitter-friendly`); }
+      }
+
+      if (parkFactor.k >= 1.03) { score += 4; kR.push(`${game.home.abbr} suppresses offense (K ${parkFactor.k}x)`); }
+      else if (parkFactor.k <= 0.95) { score -= 3; kR.push(`${game.home.abbr} hitter-friendly (K ${parkFactor.k}x)`); }
+
+      const awayBatters = game.lineups?.away ?? [];
+      const withSplits  = awayBatters.filter(lb => batterSplits[lb.id]);
+      if (withSplits.length >= 3) {
+        const topAbbrs = pitcher.arsenal.slice(0, 3).map(p => p.abbr);
+        let wSum = 0, wN = 0;
+        withSplits.forEach(lb => {
+          topAbbrs.forEach(abbr => {
+            const sp = batterSplits[lb.id]?.[abbr];
+            if (sp) { wSum += parseFloat(sp.whiff) || 0; wN++; }
+          });
+        });
+        if (wN > 0) {
+          const lW = wSum / wN;
+          if      (lW > 30) { score += 5; projK += 0.4; kR.push(`Lineup whiffs ${Math.round(lW)}% vs arsenal`); }
+          else if (lW < 18) { score -= 5; projK -= 0.4; kR.push(`Lineup makes contact vs arsenal`); }
+        }
+      }
+
+      if (pitcher.arsenalLive && pitcher.arsenal.length > 0) {
+        const fbTypes = ["FF", "SI", "FC", "FS"];
+        const primaryFb = pitcher.arsenal.find(p => fbTypes.includes(p.abbr)) ?? pitcher.arsenal[0];
+        const curVelo = parseFloat(primaryFb?.velo);
+        const prvVelo = parseFloat(primaryFb?.prevVelo);
+        if (!isNaN(curVelo) && !isNaN(prvVelo) && primaryFb?.prevVelo) {
+          const veloDelta = curVelo - prvVelo;
+          const abbrLabel = primaryFb.abbr;
+          if      (veloDelta <= -1.5) { score -= 4; projK -= 0.3; kR.push(`${abbrLabel} velo down ${veloDelta.toFixed(1)} mph YoY`); }
+          else if (veloDelta <= -0.8) { score -= 2; kR.push(`${abbrLabel} velo down ${veloDelta.toFixed(1)} mph YoY`); }
+          else if (veloDelta >=  0.8) { score += 3; projK += 0.2; kR.push(`${abbrLabel} velo up +${veloDelta.toFixed(1)} mph YoY`); }
+        }
+      }
+
+      score = Math.max(38, Math.min(75, score));
+      const kLean = projK >= line ? "OVER" : "UNDER";
+      out.push({
+        label:      `${pitcher.name?.split(" ").slice(-1)[0] ?? pitcher.name} K's O/U ${line}`,
+        propType:   "K",
+        confidence: Math.round(score),
+        lean:       kLean,
+        positive:   kLean === "OVER",
+        reason:     kR.slice(0, 3).join(" · "),
+      });
+    }
+
+    {
+      const avgIPNum2 = parseFloat(pitcher.avgIP) || 0;
+      if (avgIPNum2 >= 4) {
+        const baseOuts = avgIPNum2 * 3;
+        const line     = Math.round(baseOuts) - 0.5;
+        let   score    = 50;
+        let   projOuts = baseOuts;
+        const oR       = [`Avg ${avgIPNum2.toFixed(1)} IP/start (${Math.round(baseOuts)} outs)`];
+
+        const whipNum = parseFloat(pitcher.whip);
+        if (!isNaN(whipNum)) {
+          if      (whipNum >= 1.40) { score -= 7; projOuts -= 1.0; oR.push(`High WHIP ${whipNum} — bullpen risk`); }
+          else if (whipNum >= 1.25) { score -= 3; projOuts -= 0.5; oR.push(`WHIP ${whipNum}`); }
+          else if (whipNum <= 1.05) { score += 6; projOuts += 0.7; oR.push(`Elite WHIP ${whipNum}`); }
+          else if (whipNum <= 1.15) { score += 3; projOuts += 0.3; oR.push(`Solid WHIP ${whipNum}`); }
+        }
+
+        const bbNum = parseFloat(pitcher.bbPer9 ?? pitcher.bb9);
+        if (!isNaN(bbNum)) {
+          if      (bbNum >= 3.8) { score -= 6; projOuts -= 0.8; oR.push(`High walk rate (${bbNum} BB/9)`); }
+          else if (bbNum >= 3.0) { score -= 2; oR.push(`${bbNum} BB/9`); }
+          else if (bbNum <= 1.8) { score += 5; projOuts += 0.6; oR.push(`Elite control (${bbNum} BB/9)`); }
+          else if (bbNum <= 2.3) { score += 2; oR.push(`Good control (${bbNum} BB/9)`); }
+        }
+
+        const oppBatters = game.lineups?.away ?? [];
+        if (oppBatters.length >= 6) {
+          const scores = oppBatters.map(b => batterMatchupScore(b, pitcher)).filter(s => s > 0);
+          if (scores.length >= 4) {
+            const avgSc = scores.reduce((a, b) => a + b, 0) / scores.length;
+            if      (avgSc >= 55) { score -= 7; projOuts -= 1.0; oR.push(`Tough lineup (avg score ${Math.round(avgSc)})`); }
+            else if (avgSc >= 47) { score -= 3; projOuts -= 0.4; oR.push(`Solid lineup (avg ${Math.round(avgSc)})`); }
+            else if (avgSc <= 30) { score += 5; projOuts += 0.6; oR.push(`Weak lineup (avg ${Math.round(avgSc)})`); }
+            else if (avgSc <= 38) { score += 2; projOuts += 0.3; oR.push(`Below-avg lineup`); }
+          }
+        }
+
+        if (!weather?.roof) {
+          const t = parseInt(weather?.temp) || 72;
+          if      (t < 48) { score += 3; projOuts += 0.3; oR.push(`Cold ${t}° — offense suppressed`); }
+          else if (t > 88) { score -= 3; projOuts -= 0.3; oR.push(`Hot ${t}° — hitter-friendly`); }
+        }
+
+        if      (parkFactor.hit >= 1.06) { score -= 4; projOuts -= 0.4; oR.push(`${game.home.abbr} hitter-friendly (${parkFactor.hit}x hits)`); }
+        else if (parkFactor.hit <= 0.93) { score += 4; projOuts += 0.4; oR.push(`${game.home.abbr} pitcher-friendly (${parkFactor.hit}x hits)`); }
+
+        score = Math.max(38, Math.min(74, score));
+        const outsLean = projOuts >= line ? "OVER" : "UNDER";
+        out.push({
+          label:      `${pitcher.name?.split(" ").slice(-1)[0] ?? pitcher.name} Outs O/U ${line}`,
+          propType:   "Outs",
+          confidence: Math.round(score),
+          lean:       outsLean,
+          positive:   outsLean === "OVER",
+          reason:     oR.slice(0, 3).join(" · "),
+        });
+      }
+    }
+
+    {
+      const homeSp = pitcher;
+      const awaySp = game.awayPitcher;
+      const homeEra = parseFloat(homeSp?.era);
+      const awayEra = parseFloat(awaySp?.era);
+      const hasSpData = (!isNaN(homeEra) && homeEra > 0) || (!isNaN(awayEra) && awayEra > 0);
+
+      if (hasSpData) {
+        let f5Score = 50;
+        const f5R = [];
+        const f5GameKey = `${game.away.name}|${game.home.name}`;
+        const f5LineRaw = liveOddsMap[f5GameKey]?.f5Total ?? null;
+        const f5Label   = f5LineRaw ? `F5 O/U ${f5LineRaw}` : "F5 O/U";
+
+        const eras = [homeEra, awayEra].filter(n => !isNaN(n) && n > 0);
+        if (eras.length > 0) {
+          const avgEra = eras.reduce((a, b) => a + b, 0) / eras.length;
+          if      (avgEra < 3.00) { f5Score -= 8; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)} — elite`); }
+          else if (avgEra < 3.80) { f5Score -= 4; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)}`); }
+          else if (avgEra > 5.00) { f5Score += 8; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)} — vulnerable`); }
+          else if (avgEra > 4.20) { f5Score += 4; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)}`); }
+        }
+
+        const k9s = [parseFloat(homeSp?.kPer9), parseFloat(awaySp?.kPer9)].filter(n => !isNaN(n) && n > 0);
+        if (k9s.length > 0) {
+          const avgK9 = k9s.reduce((a, b) => a + b, 0) / k9s.length;
+          if      (avgK9 >= 10.5) { f5Score -= 7; f5R.push(`Avg K/9 ${avgK9.toFixed(1)} — swing-miss arms`); }
+          else if (avgK9 >=  9.0) { f5Score -= 3; f5R.push(`Avg K/9 ${avgK9.toFixed(1)}`); }
+          else if (avgK9 <=  6.5) { f5Score += 6; f5R.push(`Avg K/9 ${avgK9.toFixed(1)} — contact-heavy`); }
+          else if (avgK9 <=  7.5) { f5Score += 2; f5R.push(`Avg K/9 ${avgK9.toFixed(1)}`); }
+        }
+
+        const pHit = parkFactor?.hit ?? 1.00;
+        if      (pHit >= 1.15) { f5Score += 7; f5R.push(`${game.home.abbr} hitter-friendly park (${pHit}x)`); }
+        else if (pHit >= 1.08) { f5Score += 3; f5R.push(`Hitter-friendly park`); }
+        else if (pHit <= 0.90) { f5Score -= 6; f5R.push(`Pitcher-friendly park (${pHit}x)`); }
+        else if (pHit <= 0.95) { f5Score -= 3; f5R.push(`Pitcher-friendly park`); }
+
+        if (!weather?.roof) {
+          const f5Temp = parseInt(weather?.temp) || 72;
+          if      (f5Temp < 48) { f5Score -= 5; f5R.push(`Cold ${f5Temp}° — suppresses scoring`); }
+          else if (f5Temp < 58) { f5Score -= 2; f5R.push(`Cool ${f5Temp}°`); }
+          else if (f5Temp > 85) { f5Score += 3; f5R.push(`Hot ${f5Temp}° — hitter-friendly`); }
+          if      (weather?.hrFavorable)                                  { f5Score += 4; f5R.push("Wind blowing OUT"); }
+          else if ((weather?.wind || "").toLowerCase().includes(" in ")) { f5Score -= 3; f5R.push("Wind blowing IN"); }
+        }
+
+        const nrfiLeanVal = game.nrfi?.lean;
+        const nrfiConfVal = parseInt(game.nrfi?.confidence) || 50;
+        if      (nrfiLeanVal === "NRFI" && nrfiConfVal >= 62) { f5Score -= 5; f5R.push(`NRFI lean ${nrfiConfVal}% — both SPs lock in early`); }
+        else if (nrfiLeanVal === "NRFI" && nrfiConfVal >= 55) { f5Score -= 2; f5R.push(`Moderate NRFI lean`); }
+        else if (nrfiLeanVal === "YRFI" && nrfiConfVal >= 62) { f5Score += 4; f5R.push(`YRFI lean ${nrfiConfVal}% — active F1`); }
+
+        f5Score = Math.max(35, Math.min(72, f5Score));
+        const f5Lean = f5Score >= 50 ? "OVER" : "UNDER";
+        out.push({
+          label:      f5Label,
+          propType:   "F5",
+          confidence: Math.round(f5Score),
+          lean:       f5Lean,
+          positive:   f5Lean === "OVER",
+          reason:     f5R.slice(0, 3).join(" · "),
+        });
+      }
+    }
+
+    const hasPinnedBatter = IS_STATS_SANDBOX || !!pinnedBatterId;
+    const batAvg = parseFloat(activeBatter?.avg) || 0;
+    if (hasPinnedBatter && batAvg >= 0.180 && activeBatter?.name) {
+      const hitProb = 1 - Math.pow(1 - batAvg, 4);
+      let hitScore  = Math.round(hitProb * 85);
+      const hR      = [`${activeBatter.avg} season AVG`];
+
+      const ms = calcMatchupScore(activeBatter.hand, activeBatter.vsPitches, activeMatchupPitcher.arsenal, activeMatchupPitcher.hand);
+      if      (ms >= 55) { hitScore += 6; hR.push(`Batter edge matchup (${ms}/100)`); }
+      else if (ms <  35) { hitScore -= 8; hR.push(`Pitcher edge matchup (${ms}/100)`); }
+      else               {               hR.push(`Neutral matchup (${ms}/100)`); }
+
+      if (Array.isArray(activeBatter.hitRate) && activeBatter.hitRate.length > 0) {
+        const last5 = activeBatter.hitRate.slice(-5);
+        const hits5 = last5.filter(h => h > 0).length;
+        if      (hits5 >= 4) { hitScore += 5; hR.push(`Hot — ${hits5}/5 recent with a hit`); }
+        else if (hits5 <= 1) { hitScore -= 5; hR.push(`Cold — ${hits5}/5 recent with a hit`); }
+      }
+
+      if (!weather?.roof && parseInt(weather?.temp) < 50) {
+        hitScore -= 3;
+        hR.push(`Cold ${weather.temp}° — suppresses offense`);
+      }
+
+      if      (parkFactor.hit >= 1.10) { hitScore += 5; hR.push(`${game.home.abbr} hit-friendly park (${parkFactor.hit}x)`); }
+      else if (parkFactor.hit >= 1.05) { hitScore += 3; hR.push(`${game.home.abbr} hitter-friendly park`); }
+      else if (parkFactor.hit <= 0.96) { hitScore -= 4; hR.push(`${game.home.abbr} suppresses hits (${parkFactor.hit}x)`); }
+
+      if (activeMatchupPitcher.arsenalLive && activeMatchupPitcher.arsenal.length > 0 && activeBatter.vsPitches) {
+        const primary = activeMatchupPitcher.arsenal[0];
+        const vsP = activeBatter.vsPitches?.[primary.abbr];
+        if (vsP) {
+          const pvAvg = parseFloat(typeof vsP === "object" ? vsP.avg : vsP) || 0;
+          const pvNote = pvAvg >= 0.280
+            ? `${activeBatter.name?.split(" ").slice(-1)[0]} hits ${typeof vsP === "object" ? vsP.avg : vsP} vs ${primary.type} (${primary.pct}% usage)`
+            : pvAvg <= 0.215
+            ? `Struggles vs ${primary.type} (${typeof vsP === "object" ? vsP.avg : vsP} avg — pitcher's primary pitch)`
+            : null;
+          if (pvNote) hR.push(pvNote);
+        }
+      }
+
+      const h2hOpposingId = activeMatchupPitcher?.id;
+      if (!IS_STATS_SANDBOX && h2hOpposingId && activeBatter?.id) {
+        const h2hEngineKey = `${activeBatter.id}_${h2hOpposingId}`;
+        const h2hData = liveH2H[h2hEngineKey];
+        if (h2hData && (h2hData.atBats ?? 0) >= 10) {
+          const h2hAvg = parseFloat(h2hData.avg) || 0;
+          const sampleTag = h2hData.atBats >= 20 ? "" : " (sm sample)";
+          if      (h2hAvg >= 0.320) { hitScore += 8; hR.push(`${h2hData.avg} career H2H avg${sampleTag}`); }
+          else if (h2hAvg >= 0.270) { hitScore += 4; hR.push(`${h2hData.avg} career H2H avg${sampleTag}`); }
+          else if (h2hAvg <= 0.170) { hitScore -= 8; hR.push(`${h2hData.avg} career H2H avg${sampleTag}`); }
+          else if (h2hAvg <= 0.210) { hitScore -= 4; hR.push(`${h2hData.avg} career H2H avg${sampleTag}`); }
+        }
+      }
+
+      hitScore = Math.max(38, Math.min(75, hitScore));
+      const hitLean = hitScore >= 50 ? "OVER" : "UNDER";
+      out.push({
+        label:      `${activeBatter.name?.split(" ").slice(-1)[0] ?? activeBatter.name} Hits O/U 0.5`,
+        propType:   "Hits",
+        confidence: hitScore,
+        lean:       hitLean,
+        positive:   hitLean === "OVER",
+        reason:     hR.slice(0, 3).join(" · "),
+      });
+
+      const batOps = parseFloat(activeBatter?.ops) || 0;
+      if (batOps >= 0.600) {
+        let tbScore = Math.round(Math.max(0, Math.min(1, (batOps - 0.600) / 0.500)) * 40) + 40;
+        const tR    = [`${activeBatter.ops} OPS`];
+
+        if (!weather?.roof) {
+          const windStr = (weather?.wind || "").toLowerCase();
+          if (weather?.hrFavorable) {
+            tbScore += 6; tR.push("Wind blowing OUT — power favorable");
+          } else if (/\bin\b/.test(windStr)) {
+            tbScore -= 5; tR.push("Wind blowing IN — suppresses XBH");
+          }
+        }
+
+        if      (parkFactor.hr >= 1.15) { tbScore += 8; tR.push(`${game.home.abbr} launches HRs (${parkFactor.hr}x HR factor)`); }
+        else if (parkFactor.hr >= 1.08) { tbScore += 4; tR.push(`${game.home.abbr} hitter-friendly park`); }
+        else if (parkFactor.hr <= 0.87) { tbScore -= 6; tR.push(`${game.home.abbr} suppresses HRs (${parkFactor.hr}x HR factor)`); }
+        else if (parkFactor.hr <= 0.93) { tbScore -= 3; tR.push(`${game.home.abbr} pitcher-friendly park`); }
+
+        if (activeBatter.vsPitches && activeMatchupPitcher.arsenal.length > 0) {
+          let slgSum = 0, slgN = 0;
+          activeMatchupPitcher.arsenal.slice(0, 3).forEach(p => {
+            const vs = activeBatter.vsPitches?.[p.abbr];
+            if (vs && typeof vs === "object" && vs.slg) { slgSum += parseFloat(vs.slg) || 0; slgN++; }
+          });
+          if (slgN > 0) {
+            const avgSlg = slgSum / slgN;
+            const slgFmt = `.${String(Math.round(avgSlg * 1000)).padStart(3, "0")}`;
+            if      (avgSlg > 0.500) { tbScore += 7; tR.push(`${slgFmt} SLG vs this arsenal`); }
+            else if (avgSlg < 0.300) { tbScore -= 6; tR.push(`Low SLG vs arsenal (${slgFmt})`); }
+          }
+        }
+
+        tbScore = Math.max(38, Math.min(75, tbScore));
+        const tbLean = tbScore >= 50 ? "OVER" : "UNDER";
+        out.push({
+          label:      `${activeBatter.name?.split(" ").slice(-1)[0] ?? activeBatter.name} TB O/U 1.5`,
+          propType:   "TB",
+          confidence: tbScore,
+          lean:       tbLean,
+          positive:   tbLean === "OVER",
+          reason:     tR.slice(0, 3).join(" · "),
+        });
+
+        let hrScore = 45;
+        const hrR = [];
+        const hrBatterLast = activeBatter.name?.split(" ").slice(-1)[0] ?? activeBatter.name;
+        const pHr = parkFactor?.hr ?? 100;
+        if      (pHr >= 115) { hrScore += 8; hrR.push(`HR park (${parkFactor?.label ?? ""})`); }
+        else if (pHr >= 108) { hrScore += 4; hrR.push(`HR-friendly park`); }
+        else if (pHr <= 85)  { hrScore -= 6; hrR.push(`HR-suppressing park (${parkFactor?.label ?? ""})`); }
+        else if (pHr <= 93)  { hrScore -= 3; hrR.push(`Below-avg HR park`); }
+
+        if (!weather?.roof) {
+          if (weather?.hrFavorable) { hrScore += 8; hrR.push(`Wind blowing out`); }
+          else {
+            const windStr = (weather?.wind || "").toLowerCase();
+            if (windStr.includes("in"))  { hrScore -= 5; hrR.push(`Wind blowing in`); }
+          }
+          const hrTemp = parseInt(weather?.temp) || 72;
+          if      (hrTemp < 50) { hrScore -= 4; hrR.push(`Cold (${hrTemp}°F)`); }
+          else if (hrTemp < 58) { hrScore -= 2; hrR.push(`Cool (${hrTemp}°F)`); }
+        }
+
+        if (activeBatter.vsPitches && activeMatchupPitcher.arsenal.length > 0) {
+          let hrSlgSum = 0, hrSlgN = 0;
+          activeMatchupPitcher.arsenal.slice(0, 3).forEach(p => {
+            const vs = activeBatter.vsPitches?.[p.abbr];
+            if (vs && typeof vs === "object" && vs.slg) { hrSlgSum += parseFloat(vs.slg) || 0; hrSlgN++; }
+          });
+          if (hrSlgN > 0) {
+            const hrAvgSlg = hrSlgSum / hrSlgN;
+            const hrSlgFmt = `.${String(Math.round(hrAvgSlg * 1000)).padStart(3, "0")}`;
+            if      (hrAvgSlg > 0.500) { hrScore += 6; hrR.push(`${hrSlgFmt} SLG vs arsenal`); }
+            else if (hrAvgSlg < 0.300) { hrScore -= 5; hrR.push(`Low SLG vs arsenal (${hrSlgFmt})`); }
+          }
+        }
+
+        const hrWhip = parseFloat(activeMatchupPitcher.whip) || 1.25;
+        if      (hrWhip > 1.40) { hrScore += 4; hrR.push(`Pitcher WHIP ${hrWhip.toFixed(2)} (hittable)`); }
+        else if (hrWhip < 1.10) { hrScore -= 3; hrR.push(`Pitcher WHIP ${hrWhip.toFixed(2)} (stingy)`); }
+
+        hrScore = Math.max(38, Math.min(72, hrScore));
+        const hrLean = hrScore >= 50 ? "OVER" : "UNDER";
+        out.push({
+          label:      `${hrBatterLast} HR O/U 0.5`,
+          propType:   "HR",
+          confidence: hrScore,
+          lean:       hrLean,
+          positive:   hrLean === "OVER",
+          reason:     hrR.slice(0, 3).join(" · "),
+        });
+
+        const rbiCtxData   = liveRbiCtx[activeBatter.id];
+        const rbiLast      = activeBatter.name?.split(" ").slice(-1)[0] ?? activeBatter.name;
+        let   rbiScore     = 45;
+        const rbiR         = [];
+        const rbiPerGame   = rbiCtxData?.rbiPerGame ?? null;
+        const batOrder     = activeBatter.battingOrder ?? null;
+
+        if (rbiPerGame !== null) {
+          rbiR.push(`${rbiPerGame.toFixed(3)} RBI/G career`);
+          if      (rbiPerGame >= 0.75) { rbiScore += 10; }
+          else if (rbiPerGame >= 0.60) { rbiScore += 6;  }
+          else if (rbiPerGame >= 0.45) { rbiScore += 2;  }
+          else if (rbiPerGame <= 0.25) { rbiScore -= 8;  }
+          else if (rbiPerGame <= 0.35) { rbiScore -= 4;  }
+        }
+
+        if (batOrder !== null) {
+          const pos = Number(batOrder);
+          if      (pos >= 3 && pos <= 5) { rbiScore += 6;  rbiR.push(`Cleanup spot (#${pos})`); }
+          else if (pos === 6 || pos === 7){ rbiScore += 2;  rbiR.push(`Mid-order (#${pos})`); }
+          else if (pos <= 2)             { rbiScore -= 5;  rbiR.push(`Leadoff (#${pos}) — fewer RBI chances`); }
+          else if (pos >= 8)             { rbiScore -= 4;  rbiR.push(`Bottom of order (#${pos})`); }
+        }
+
+        const xbh = rbiCtxData?.extraBaseHits ?? null;
+        if (xbh !== null) {
+          if      (xbh >= 400) { rbiScore += 5; rbiR.push(`${xbh} career XBH (elite power)`); }
+          else if (xbh >= 250) { rbiScore += 3; rbiR.push(`${xbh} career XBH`); }
+          else if (xbh <= 80)  { rbiScore -= 4; rbiR.push(`${xbh} career XBH (slap hitter)`); }
+        }
+
+        const rbiEra = parseFloat(activeMatchupPitcher.whip) || 1.25;
+        if      (rbiEra > 1.40) { rbiScore += 4; rbiR.push(`Pitcher WHIP ${rbiEra.toFixed(2)} — hittable`); }
+        else if (rbiEra < 1.10) { rbiScore -= 4; rbiR.push(`Pitcher WHIP ${rbiEra.toFixed(2)} — limits damage`); }
+
+        if (!weather?.roof && parseInt(weather?.temp) < 50) {
+          rbiScore -= 3; rbiR.push(`Cold ${weather.temp}° — fewer runs scored`);
+        }
+
+        rbiScore = Math.max(38, Math.min(70, rbiScore));
+        const rbiLean = rbiScore >= 50 ? "OVER" : "UNDER";
+        out.push({
+          label:      `${rbiLast} RBI O/U 0.5`,
+          propType:   "RBI",
+          confidence: Math.round(rbiScore),
+          lean:       rbiLean,
+          positive:   rbiLean === "OVER",
+          reason:     rbiR.slice(0, 3).join(" · "),
+        });
+      }
+    }
+
+    return out;
+  } catch (e) {
+    console.error("Prop engine error:", e);
+    return [];
+  }
+}
+
+function computeEraNrfiLean({ IS_STATS_SANDBOX, apiNrfi, game, weather }) {
+  if (IS_STATS_SANDBOX || apiNrfi) return null;
+  const era = parseFloat(game.pitcher?.era);
+  if (isNaN(era) || !game.pitcher?.era || game.pitcher.era === "—") return null;
+  let score = 0;
+  if      (era < 2.50) score += 15;
+  else if (era < 3.50) score += 8;
+  else if (era < 4.50) score += 2;
+  else if (era > 5.50) score -= 12;
+  else                 score -= 6;
+  if (!weather?.roof) {
+    const temp = parseInt(weather?.temp) || 72;
+    if (temp < 50) score += 10;
+    else if (temp < 60) score += 5;
+    if (weather?.hrFavorable) score -= 8;
+    else if (/\bin\b/.test((weather?.wind || "").toLowerCase())) score += 6;
+  }
+  const pf = PARK_FACTORS[game.home?.abbr];
+  if (pf) {
+    if      (pf.hr >= 1.15) score -= 10;
+    else if (pf.hr >= 1.08) score -= 5;
+    else if (pf.hr <= 0.87) score += 8;
+    else if (pf.hr <= 0.93) score += 4;
+  }
+  return { lean: score >= 0 ? "NRFI" : "YRFI", confidence: Math.min(75, Math.max(38, 50 + Math.abs(score))) };
+}
+
 // ─────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────
@@ -1901,497 +2378,25 @@ export default function App() {
   };
 
   // ── Prop Engine ─────────────────────────────────────────────────────────────
-  // Generates live confidence props from pitcher stats, Savant arsenal, umpire, weather.
-  // Runs synchronously each render — fast pure computation, no async.
-  // Falls back to mockProps (from SLATE) when live data is insufficient.
-  const liveProps = (() => {
-    try {
-    const out = [];
-    if (IS_SAVANT_SANDBOX) return out;
-
-    // ── 1. PITCHER STRIKEOUT PROP ──────────────────────────────────────────────
-    const kPer9Num = parseFloat(pitcher.kPer9) || 0;
-    const avgIPNum = parseFloat(pitcher.avgIP) || 5.5;
-    const rawAvgK  = parseFloat(pitcher.avgK);
-    // Use avgK if available (mock or future stat), else derive from kPer9 × avgIP
-    const baseK    = (!isNaN(rawAvgK) && rawAvgK > 0) ? rawAvgK : (kPer9Num / 9) * avgIPNum;
-
-    if (baseK >= 3 && kPer9Num > 0) {
-      const line = Math.ceil(baseK) - 0.5;  // 7.2 → 7.5 | 8.7 → 8.5
-      let score  = 50;
-      let projK  = baseK;
-      const kR   = [`Avg ${baseK.toFixed(1)} K/start`];
-
-      // Factor 1: Arsenal whiff quality (Savant live data)
-      if (pitcher.arsenalLive && pitcher.arsenal.length > 0) {
-        const totalPct  = pitcher.arsenal.reduce((s, p) => s + (p.pct || 0), 0) || 1;
-        const wAvgWhiff = pitcher.arsenal.reduce((s, p) => s + ((parseFloat(p.whiffPct) || 25) * (p.pct || 0)), 0) / totalPct;
-        const dW        = wAvgWhiff - 26; // 26% ≈ league avg whiff
-        if      (dW >  5) { score += 8; projK += 0.8; kR.push(`Arsenal: ${Math.round(wAvgWhiff)}% whiff (elite)`); }
-        else if (dW >  2) { score += 4; projK += 0.4; kR.push(`${Math.round(wAvgWhiff)}% arsenal whiff`); }
-        else if (dW < -4) { score -= 6; projK -= 0.6; kR.push(`Low arsenal whiff (${Math.round(wAvgWhiff)}%)`); }
-        const bestP = [...pitcher.arsenal].sort((a, b) => (parseFloat(b.whiffPct) || 0) - (parseFloat(a.whiffPct) || 0))[0];
-        if (bestP && parseFloat(bestP.whiffPct) >= 35) kR.push(`${bestP.type}: ${bestP.whiffPct}% whiff`);
-      }
-
-      // Factor 2: Umpire K rate (league avg ~22.5%)
-      const umpK = parseFloat(umpire?.kRate) || 22.5;
-      const dU   = umpK - 22.5;
-      if      (dU >  2.5) { score += 7; projK += 0.5; kR.push(`${umpire.name || "Ump"}: wide K zone (${umpire.kRate})`); }
-      else if (dU >  0.8) { score += 3; kR.push(`${umpire.name || "Ump"} favors pitchers`); }
-      else if (dU < -2.0) { score -= 5; projK -= 0.4; kR.push(`${umpire.name || "Ump"}: tight zone (${umpire.kRate})`); }
-
-      // Factor 3: Weather — cold suppresses offense (outdoor only)
-      if (!weather?.roof) {
-        const t = parseInt(weather?.temp) || 72;
-        if      (t < 48) { score += 4; kR.push(`Cold ${t}° — offense suppressed`); }
-        else if (t < 58) { score += 2; kR.push(`Cool ${t}°`); }
-        else if (t > 85) { score -= 2; kR.push(`Hot ${t}° — hitter-friendly`); }
-      }
-
-      // Factor 5: Park K factor (Petco/Oracle boost Ks; Coors/Fenway suppress)
-      if (parkFactor.k >= 1.03) { score += 4; kR.push(`${game.home.abbr} suppresses offense (K ${parkFactor.k}x)`); }
-      else if (parkFactor.k <= 0.95) { score -= 3; kR.push(`${game.home.abbr} hitter-friendly (K ${parkFactor.k}x)`); }
-
-      // Factor 4: Lineup whiff profile (3+ batters with splits loaded)
-      const awayBatters = game.lineups?.away ?? [];
-      const withSplits  = awayBatters.filter(lb => batterSplits[lb.id]);
-      if (withSplits.length >= 3) {
-        const topAbbrs = pitcher.arsenal.slice(0, 3).map(p => p.abbr);
-        let wSum = 0, wN = 0;
-        withSplits.forEach(lb => {
-          topAbbrs.forEach(abbr => {
-            const sp = batterSplits[lb.id]?.[abbr];
-            if (sp) { wSum += parseFloat(sp.whiff) || 0; wN++; }
-          });
-        });
-        if (wN > 0) {
-          const lW = wSum / wN;
-          if      (lW > 30) { score += 5; projK += 0.4; kR.push(`Lineup whiffs ${Math.round(lW)}% vs arsenal`); }
-          else if (lW < 18) { score -= 5; projK -= 0.4; kR.push(`Lineup makes contact vs arsenal`); }
-        }
-      }
-
-      // Factor 6: Fastball velocity trend (YoY delta from Savant prevVelo)
-      // Only applies when Savant arsenal is live and at least one pitch has prevVelo
-      if (pitcher.arsenalLive && pitcher.arsenal.length > 0) {
-        // Use primary fastball (FF/SI/FC/FS) first; fall back to highest-usage pitch
-        const fbTypes = ["FF", "SI", "FC", "FS"];
-        const primaryFb = pitcher.arsenal.find(p => fbTypes.includes(p.abbr)) ?? pitcher.arsenal[0];
-        const curVelo = parseFloat(primaryFb?.velo);
-        const prvVelo = parseFloat(primaryFb?.prevVelo);
-        if (!isNaN(curVelo) && !isNaN(prvVelo) && primaryFb?.prevVelo) {
-          const veloDelta = curVelo - prvVelo;
-          const abbrLabel = primaryFb.abbr;
-          if      (veloDelta <= -1.5) { score -= 4; projK -= 0.3; kR.push(`${abbrLabel} velo down ${veloDelta.toFixed(1)} mph YoY`); }
-          else if (veloDelta <= -0.8) { score -= 2; kR.push(`${abbrLabel} velo down ${veloDelta.toFixed(1)} mph YoY`); }
-          else if (veloDelta >=  0.8) { score += 3; projK += 0.2; kR.push(`${abbrLabel} velo up +${veloDelta.toFixed(1)} mph YoY`); }
-        }
-      }
-
-      score = Math.max(38, Math.min(75, score));
-      const kLean = projK >= line ? "OVER" : "UNDER";
-      out.push({
-        label:      `${pitcher.name?.split(" ").slice(-1)[0] ?? pitcher.name} K's O/U ${line}`,
-        propType:   "K",
-        confidence: Math.round(score),
-        lean:       kLean,
-        positive:   kLean === "OVER",
-        reason:     kR.slice(0, 3).join(" · "),
-      });
-    }
-
-    // ── 2. PITCHER OUTS PROP ──────────────────────────────────────────────────
-    // Fires whenever avgIP is known (live or mock). Outs = IP × 3.
-    {
-      const avgIPNum2 = parseFloat(pitcher.avgIP) || 0;
-      if (avgIPNum2 >= 4) {
-        const baseOuts = avgIPNum2 * 3;
-        const line     = Math.round(baseOuts) - 0.5;  // e.g. 18.6 IP → 18.5 line
-        let   score    = 50;
-        let   projOuts = baseOuts;
-        const oR       = [`Avg ${avgIPNum2.toFixed(1)} IP/start (${Math.round(baseOuts)} outs)`];
-
-        // Factor 1: WHIP — more baserunners = higher stress = earlier hook
-        const whipNum = parseFloat(pitcher.whip);
-        if (!isNaN(whipNum)) {
-          if      (whipNum >= 1.40) { score -= 7; projOuts -= 1.0; oR.push(`High WHIP ${whipNum} — bullpen risk`); }
-          else if (whipNum >= 1.25) { score -= 3; projOuts -= 0.5; oR.push(`WHIP ${whipNum}`); }
-          else if (whipNum <= 1.05) { score += 6; projOuts += 0.7; oR.push(`Elite WHIP ${whipNum}`); }
-          else if (whipNum <= 1.15) { score += 3; projOuts += 0.3; oR.push(`Solid WHIP ${whipNum}`); }
-        }
-
-        // Factor 2: BB/9 — walks inflate pitch count, shorten outings
-        const bbNum = parseFloat(pitcher.bbPer9 ?? pitcher.bb9);
-        if (!isNaN(bbNum)) {
-          if      (bbNum >= 3.8) { score -= 6; projOuts -= 0.8; oR.push(`High walk rate (${bbNum} BB/9)`); }
-          else if (bbNum >= 3.0) { score -= 2; oR.push(`${bbNum} BB/9`); }
-          else if (bbNum <= 1.8) { score += 5; projOuts += 0.6; oR.push(`Elite control (${bbNum} BB/9)`); }
-          else if (bbNum <= 2.3) { score += 2; oR.push(`Good control (${bbNum} BB/9)`); }
-        }
-
-        // Factor 3: Opposing lineup avg matchup score
-        // High avg score = tough lineup = pitcher likely pulled sooner
-        const oppBatters = game.lineups?.away ?? [];
-        if (oppBatters.length >= 6) {
-          const scores = oppBatters.map(b => batterMatchupScore(b, pitcher)).filter(s => s > 0);
-          if (scores.length >= 4) {
-            const avgSc = scores.reduce((a, b) => a + b, 0) / scores.length;
-            if      (avgSc >= 55) { score -= 7; projOuts -= 1.0; oR.push(`Tough lineup (avg score ${Math.round(avgSc)})`); }
-            else if (avgSc >= 47) { score -= 3; projOuts -= 0.4; oR.push(`Solid lineup (avg ${Math.round(avgSc)})`); }
-            else if (avgSc <= 30) { score += 5; projOuts += 0.6; oR.push(`Weak lineup (avg ${Math.round(avgSc)})`); }
-            else if (avgSc <= 38) { score += 2; projOuts += 0.3; oR.push(`Below-avg lineup`); }
-          }
-        }
-
-        // Factor 4: Weather — cold suppresses offense → pitcher can go deeper
-        if (!weather?.roof) {
-          const t = parseInt(weather?.temp) || 72;
-          if      (t < 48) { score += 3; projOuts += 0.3; oR.push(`Cold ${t}° — offense suppressed`); }
-          else if (t > 88) { score -= 3; projOuts -= 0.3; oR.push(`Hot ${t}° — hitter-friendly`); }
-        }
-
-        // Factor 5: Park factor — hitter-friendly parks shorten pitcher outings
-        if      (parkFactor.hit >= 1.06) { score -= 4; projOuts -= 0.4; oR.push(`${game.home.abbr} hitter-friendly (${parkFactor.hit}x hits)`); }
-        else if (parkFactor.hit <= 0.93) { score += 4; projOuts += 0.4; oR.push(`${game.home.abbr} pitcher-friendly (${parkFactor.hit}x hits)`); }
-
-        score = Math.max(38, Math.min(74, score));
-        const outsLean = projOuts >= line ? "OVER" : "UNDER";
-        out.push({
-          label:      `${pitcher.name?.split(" ").slice(-1)[0] ?? pitcher.name} Outs O/U ${line}`,
-          propType:   "Outs",
-          confidence: Math.round(score),
-          lean:       outsLean,
-          positive:   outsLean === "OVER",
-          reason:     oR.slice(0, 3).join(" · "),
-        });
-      }
-    }
-
-    // ── 3. F5 TOTAL (First 5 Innings O/U) ─────────────────────────────────────
-    // Game-level prop — fires whenever a game is open, no batter pin required.
-    // Uses both SPs' ERA + K/9, park factor, weather, and NRFI lean.
-    // F5 line from Odds API (totals_h1 market) used for label only — avoids circular
-    // logic. Gracefully shows "F5 O/U" when line isn't available.
-    {
-      const homeSp = pitcher;
-      const awaySp = game.awayPitcher;
-      const homeEra = parseFloat(homeSp?.era);
-      const awayEra = parseFloat(awaySp?.era);
-      const hasSpData = (!isNaN(homeEra) && homeEra > 0) || (!isNaN(awayEra) && awayEra > 0);
-
-      if (hasSpData) {
-        let f5Score = 50;
-        const f5R = [];
-
-        // F5 line label from Odds API (totals_h1 market)
-        const f5GameKey = `${game.away.name}|${game.home.name}`;
-        const f5LineRaw = liveOddsMap[f5GameKey]?.f5Total ?? null;
-        const f5Label   = f5LineRaw ? `F5 O/U ${f5LineRaw}` : "F5 O/U";
-
-        // Factor 1: Combined starter ERA (lower ERA → UNDER lean)
-        const eras = [homeEra, awayEra].filter(n => !isNaN(n) && n > 0);
-        if (eras.length > 0) {
-          const avgEra = eras.reduce((a, b) => a + b, 0) / eras.length;
-          if      (avgEra < 3.00) { f5Score -= 8; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)} — elite`); }
-          else if (avgEra < 3.80) { f5Score -= 4; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)}`); }
-          else if (avgEra > 5.00) { f5Score += 8; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)} — vulnerable`); }
-          else if (avgEra > 4.20) { f5Score += 4; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)}`); }
-        }
-
-        // Factor 2: Combined K/9 (higher K rate → fewer balls in play → UNDER)
-        const k9s = [parseFloat(homeSp?.kPer9), parseFloat(awaySp?.kPer9)].filter(n => !isNaN(n) && n > 0);
-        if (k9s.length > 0) {
-          const avgK9 = k9s.reduce((a, b) => a + b, 0) / k9s.length;
-          if      (avgK9 >= 10.5) { f5Score -= 7; f5R.push(`Avg K/9 ${avgK9.toFixed(1)} — swing-miss arms`); }
-          else if (avgK9 >=  9.0) { f5Score -= 3; f5R.push(`Avg K/9 ${avgK9.toFixed(1)}`); }
-          else if (avgK9 <=  6.5) { f5Score += 6; f5R.push(`Avg K/9 ${avgK9.toFixed(1)} — contact-heavy`); }
-          else if (avgK9 <=  7.5) { f5Score += 2; f5R.push(`Avg K/9 ${avgK9.toFixed(1)}`); }
-        }
-
-        // Factor 3: Park hit factor
-        const pHit = parkFactor?.hit ?? 1.00;
-        if      (pHit >= 1.15) { f5Score += 7; f5R.push(`${game.home.abbr} hitter-friendly park (${pHit}x)`); }
-        else if (pHit >= 1.08) { f5Score += 3; f5R.push(`Hitter-friendly park`); }
-        else if (pHit <= 0.90) { f5Score -= 6; f5R.push(`Pitcher-friendly park (${pHit}x)`); }
-        else if (pHit <= 0.95) { f5Score -= 3; f5R.push(`Pitcher-friendly park`); }
-
-        // Factor 4: Weather (outdoor only)
-        if (!weather?.roof) {
-          const f5Temp = parseInt(weather?.temp) || 72;
-          if      (f5Temp < 48) { f5Score -= 5; f5R.push(`Cold ${f5Temp}° — suppresses scoring`); }
-          else if (f5Temp < 58) { f5Score -= 2; f5R.push(`Cool ${f5Temp}°`); }
-          else if (f5Temp > 85) { f5Score += 3; f5R.push(`Hot ${f5Temp}° — hitter-friendly`); }
-          if      (weather?.hrFavorable)                                   { f5Score += 4; f5R.push("Wind blowing OUT"); }
-          else if ((weather?.wind || "").toLowerCase().includes(" in "))  { f5Score -= 3; f5R.push("Wind blowing IN"); }
-        }
-
-        // Factor 5: NRFI lean — if both pitchers have strong NRFI tendency lean UNDER
-        const nrfiLeanVal = game.nrfi?.lean;
-        const nrfiConfVal = parseInt(game.nrfi?.confidence) || 50;
-        if      (nrfiLeanVal === "NRFI" && nrfiConfVal >= 62) { f5Score -= 5; f5R.push(`NRFI lean ${nrfiConfVal}% — both SPs lock in early`); }
-        else if (nrfiLeanVal === "NRFI" && nrfiConfVal >= 55) { f5Score -= 2; f5R.push(`Moderate NRFI lean`); }
-        else if (nrfiLeanVal === "YRFI" && nrfiConfVal >= 62) { f5Score += 4; f5R.push(`YRFI lean ${nrfiConfVal}% — active F1`); }
-
-        f5Score = Math.max(35, Math.min(72, f5Score));
-        const f5Lean = f5Score >= 50 ? "OVER" : "UNDER";
-        out.push({
-          label:      f5Label,
-          propType:   "F5",
-          confidence: Math.round(f5Score),
-          lean:       f5Lean,
-          positive:   f5Lean === "OVER",
-          reason:     f5R.slice(0, 3).join(" · "),
-        });
-      }
-    }
-
-    // ── 3. FEATURED BATTER HIT PROP (O/U 0.5 hits) ────────────────────────────
-    // Only run batter props when a real batter is available:
-    // - In sandbox mode (mock data is self-consistent)
-    // - Or when a lineup batter is explicitly pinned (real player for this game)
-    const hasPinnedBatter = IS_STATS_SANDBOX || !!pinnedBatterId;
-    const batAvg = parseFloat(activeBatter?.avg) || 0;
-    if (hasPinnedBatter && batAvg >= 0.180 && activeBatter?.name) {
-      // Binomial: P(at least 1 hit in ~4 AB)
-      const hitProb = 1 - Math.pow(1 - batAvg, 4);
-      let hitScore  = Math.round(hitProb * 85);
-      const hR      = [`${activeBatter.avg} season AVG`];
-
-      // Matchup score adjustment
-      const ms = calcMatchupScore(activeBatter.hand, activeBatter.vsPitches, activeMatchupPitcher.arsenal, activeMatchupPitcher.hand);
-      if      (ms >= 55) { hitScore += 6; hR.push(`Batter edge matchup (${ms}/100)`); }
-      else if (ms <  35) { hitScore -= 8; hR.push(`Pitcher edge matchup (${ms}/100)`); }
-      else               {               hR.push(`Neutral matchup (${ms}/100)`); }
-
-      // Recent form (last 5 games) — only apply when hitRate is a real array
-      if (Array.isArray(activeBatter.hitRate) && activeBatter.hitRate.length > 0) {
-        const last5 = activeBatter.hitRate.slice(-5);
-        const hits5 = last5.filter(h => h > 0).length;
-        if      (hits5 >= 4) { hitScore += 5; hR.push(`Hot — ${hits5}/5 recent with a hit`); }
-        else if (hits5 <= 1) { hitScore -= 5; hR.push(`Cold — ${hits5}/5 recent with a hit`); }
-      }
-
-      // Cold weather suppresses offense
-      if (!weather?.roof && parseInt(weather?.temp) < 50) {
-        hitScore -= 3;
-        hR.push(`Cold ${weather.temp}° — suppresses offense`);
-      }
-
-      // Park hit factor
-      if      (parkFactor.hit >= 1.10) { hitScore += 5; hR.push(`${game.home.abbr} hit-friendly park (${parkFactor.hit}x)`); }
-      else if (parkFactor.hit >= 1.05) { hitScore += 3; hR.push(`${game.home.abbr} hitter-friendly park`); }
-      else if (parkFactor.hit <= 0.96) { hitScore -= 4; hR.push(`${game.home.abbr} suppresses hits (${parkFactor.hit}x)`); }
-
-      // Primary pitch matchup — use live arsenal to call out batter vs pitcher's best weapon
-      if (activeMatchupPitcher.arsenalLive && activeMatchupPitcher.arsenal.length > 0 && activeBatter.vsPitches) {
-        const primary = activeMatchupPitcher.arsenal[0]; // already sorted by usage %
-        const vsP = activeBatter.vsPitches?.[primary.abbr];
-        if (vsP) {
-          const pvAvg = parseFloat(typeof vsP === "object" ? vsP.avg : vsP) || 0;
-          const pvNote = pvAvg >= 0.280
-            ? `${activeBatter.name?.split(" ").slice(-1)[0]} hits ${typeof vsP === "object" ? vsP.avg : vsP} vs ${primary.type} (${primary.pct}% usage)`
-            : pvAvg <= 0.215
-            ? `Struggles vs ${primary.type} (${typeof vsP === "object" ? vsP.avg : vsP} avg — pitcher's primary pitch)`
-            : null;
-          if (pvNote) hR.push(pvNote);
-        }
-      }
-
-      // Career H2H vs this pitcher — strongest single-matchup signal when sample >= 10 AB
-      const h2hOpposingId = activeMatchupPitcher?.id;
-      if (!IS_STATS_SANDBOX && h2hOpposingId && activeBatter?.id) {
-        const h2hEngineKey = `${activeBatter.id}_${h2hOpposingId}`;
-        const h2hData = liveH2H[h2hEngineKey];
-        if (h2hData && (h2hData.atBats ?? 0) >= 10) {
-          const h2hAvg = parseFloat(h2hData.avg) || 0;
-          const sampleTag = h2hData.atBats >= 20 ? "" : " (sm sample)";
-          if      (h2hAvg >= 0.320) { hitScore += 8; hR.push(`${h2hData.avg} career H2H avg${sampleTag}`); }
-          else if (h2hAvg >= 0.270) { hitScore += 4; hR.push(`${h2hData.avg} career H2H avg${sampleTag}`); }
-          else if (h2hAvg <= 0.170) { hitScore -= 8; hR.push(`${h2hData.avg} career H2H avg${sampleTag}`); }
-          else if (h2hAvg <= 0.210) { hitScore -= 4; hR.push(`${h2hData.avg} career H2H avg${sampleTag}`); }
-        }
-      }
-
-      hitScore = Math.max(38, Math.min(75, hitScore));
-      const hitLean = hitScore >= 50 ? "OVER" : "UNDER";
-      out.push({
-        label:      `${activeBatter.name?.split(" ").slice(-1)[0] ?? activeBatter.name} Hits O/U 0.5`,
-        propType:   "Hits",
-        confidence: hitScore,
-        lean:       hitLean,
-        positive:   hitLean === "OVER",
-        reason:     hR.slice(0, 3).join(" · "),
-      });
-
-      // ── 3. FEATURED BATTER TOTAL BASES (O/U 1.5 TB) ────────────────────────
-      const batOps = parseFloat(activeBatter?.ops) || 0;
-      if (batOps >= 0.600) {
-        let tbScore = Math.round(Math.max(0, Math.min(1, (batOps - 0.600) / 0.500)) * 40) + 40;
-        const tR    = [`${activeBatter.ops} OPS`];
-
-        // Wind factor
-        if (!weather?.roof) {
-          const windStr = (weather?.wind || "").toLowerCase();
-          if (weather?.hrFavorable) {
-            tbScore += 6; tR.push("Wind blowing OUT — power favorable");
-          } else if (/\bin\b/.test(windStr)) {
-            tbScore -= 5; tR.push("Wind blowing IN — suppresses XBH");
-          }
-        }
-
-        // Park HR factor
-        if      (parkFactor.hr >= 1.15) { tbScore += 8; tR.push(`${game.home.abbr} launches HRs (${parkFactor.hr}x HR factor)`); }
-        else if (parkFactor.hr >= 1.08) { tbScore += 4; tR.push(`${game.home.abbr} hitter-friendly park`); }
-        else if (parkFactor.hr <= 0.87) { tbScore -= 6; tR.push(`${game.home.abbr} suppresses HRs (${parkFactor.hr}x HR factor)`); }
-        else if (parkFactor.hr <= 0.93) { tbScore -= 3; tR.push(`${game.home.abbr} pitcher-friendly park`); }
-
-        // Batter SLG vs top 3 arsenal pitches (only when slg field present — live splits only)
-        if (activeBatter.vsPitches && activeMatchupPitcher.arsenal.length > 0) {
-          let slgSum = 0, slgN = 0;
-          activeMatchupPitcher.arsenal.slice(0, 3).forEach(p => {
-            const vs = activeBatter.vsPitches?.[p.abbr];
-            if (vs && typeof vs === "object" && vs.slg) { slgSum += parseFloat(vs.slg) || 0; slgN++; }
-          });
-          if (slgN > 0) {
-            const avgSlg = slgSum / slgN;
-            const slgFmt = `.${String(Math.round(avgSlg * 1000)).padStart(3, "0")}`;
-            if      (avgSlg > 0.500) { tbScore += 7; tR.push(`${slgFmt} SLG vs this arsenal`); }
-            else if (avgSlg < 0.300) { tbScore -= 6; tR.push(`Low SLG vs arsenal (${slgFmt})`); }
-          }
-        }
-
-        tbScore = Math.max(38, Math.min(75, tbScore));
-        const tbLean = tbScore >= 50 ? "OVER" : "UNDER";
-        out.push({
-          label:      `${activeBatter.name?.split(" ").slice(-1)[0] ?? activeBatter.name} TB O/U 1.5`,
-          propType:   "TB",
-          confidence: tbScore,
-          lean:       tbLean,
-          positive:   tbLean === "OVER",
-          reason:     tR.slice(0, 3).join(" · "),
-        });
-
-        // ── 4. HR PROP ────────────────────────────────────────────────────────
-        // Base 45 (default UNDER — HRs are rare events, ~1-in-12 PA)
-        let hrScore = 45;
-        const hrR = [];
-        const hrBatterLast = activeBatter.name?.split(" ").slice(-1)[0] ?? activeBatter.name;
-
-        // Factor 1: Park HR factor (biggest signal)
-        const pHr = parkFactor?.hr ?? 100;
-        if      (pHr >= 115) { hrScore += 8; hrR.push(`HR park (${parkFactor?.label ?? ""})`); }
-        else if (pHr >= 108) { hrScore += 4; hrR.push(`HR-friendly park`); }
-        else if (pHr <= 85)  { hrScore -= 6; hrR.push(`HR-suppressing park (${parkFactor?.label ?? ""})`); }
-        else if (pHr <= 93)  { hrScore -= 3; hrR.push(`Below-avg HR park`); }
-
-        // Factor 2: Wind — blowing out favors HR, in suppresses
-        if (!weather?.roof) {
-          if (weather?.hrFavorable) { hrScore += 8; hrR.push(`Wind blowing out`); }
-          else {
-            const windStr = (weather?.wind || "").toLowerCase();
-            if (windStr.includes("in"))  { hrScore -= 5; hrR.push(`Wind blowing in`); }
-          }
-          // Factor 3: Cold temp suppresses power
-          const hrTemp = parseInt(weather?.temp) || 72;
-          if      (hrTemp < 50) { hrScore -= 4; hrR.push(`Cold (${hrTemp}°F)`); }
-          else if (hrTemp < 58) { hrScore -= 2; hrR.push(`Cool (${hrTemp}°F)`); }
-        }
-
-        // Factor 4: Batter SLG vs top-3 arsenal pitches (same data as TB)
-        if (activeBatter.vsPitches && activeMatchupPitcher.arsenal.length > 0) {
-          let hrSlgSum = 0, hrSlgN = 0;
-          activeMatchupPitcher.arsenal.slice(0, 3).forEach(p => {
-            const vs = activeBatter.vsPitches?.[p.abbr];
-            if (vs && typeof vs === "object" && vs.slg) { hrSlgSum += parseFloat(vs.slg) || 0; hrSlgN++; }
-          });
-          if (hrSlgN > 0) {
-            const hrAvgSlg = hrSlgSum / hrSlgN;
-            const hrSlgFmt = `.${String(Math.round(hrAvgSlg * 1000)).padStart(3, "0")}`;
-            if      (hrAvgSlg > 0.500) { hrScore += 6; hrR.push(`${hrSlgFmt} SLG vs arsenal`); }
-            else if (hrAvgSlg < 0.300) { hrScore -= 5; hrR.push(`Low SLG vs arsenal (${hrSlgFmt})`); }
-          }
-        }
-
-        // Factor 5: Pitcher WHIP — high WHIP = more baserunners + more pitches in zone
-        const hrWhip = parseFloat(activeMatchupPitcher.whip) || 1.25;
-        if      (hrWhip > 1.40) { hrScore += 4; hrR.push(`Pitcher WHIP ${hrWhip.toFixed(2)} (hittable)`); }
-        else if (hrWhip < 1.10) { hrScore -= 3; hrR.push(`Pitcher WHIP ${hrWhip.toFixed(2)} (stingy)`); }
-
-        hrScore = Math.max(38, Math.min(72, hrScore));
-        const hrLean = hrScore >= 50 ? "OVER" : "UNDER";
-        out.push({
-          label:      `${hrBatterLast} HR O/U 0.5`,
-          propType:   "HR",
-          confidence: hrScore,
-          lean:       hrLean,
-          positive:   hrLean === "OVER",
-          reason:     hrR.slice(0, 3).join(" · "),
-        });
-
-        // ── 5. RBI PROP ────────────────────────────────────────────────────────
-        // Base 45 — RBIs require both hitting and runners on base, so slight UNDER lean.
-        // Uses career rbiPerGame/rbiRate from /api/players/:id/rbi-context (Codex Session 24).
-        const rbiCtxData   = liveRbiCtx[activeBatter.id];
-        const rbiLast      = activeBatter.name?.split(" ").slice(-1)[0] ?? activeBatter.name;
-        let   rbiScore     = 45;
-        const rbiR         = [];
-        const rbiPerGame   = rbiCtxData?.rbiPerGame ?? null;
-        const batOrder     = activeBatter.battingOrder ?? null;
-
-        // Factor 1: Career RBI rate (primary signal — most predictive across seasons)
-        if (rbiPerGame !== null) {
-          rbiR.push(`${rbiPerGame.toFixed(3)} RBI/G career`);
-          if      (rbiPerGame >= 0.75) { rbiScore += 10; }
-          else if (rbiPerGame >= 0.60) { rbiScore += 6;  }
-          else if (rbiPerGame >= 0.45) { rbiScore += 2;  }
-          else if (rbiPerGame <= 0.25) { rbiScore -= 8;  }
-          else if (rbiPerGame <= 0.35) { rbiScore -= 4;  }
-        }
-
-        // Factor 2: Batting order position — cleanup (3–5) has most RBI opportunities
-        if (batOrder !== null) {
-          const pos = Number(batOrder);
-          if      (pos >= 3 && pos <= 5) { rbiScore += 6;  rbiR.push(`Cleanup spot (#${pos})`); }
-          else if (pos === 6 || pos === 7){ rbiScore += 2;  rbiR.push(`Mid-order (#${pos})`); }
-          else if (pos <= 2)             { rbiScore -= 5;  rbiR.push(`Leadoff (#${pos}) — fewer RBI chances`); }
-          else if (pos >= 8)             { rbiScore -= 4;  rbiR.push(`Bottom of order (#${pos})`); }
-        }
-
-        // Factor 3: Extra-base power proxy (career XBH) — big bats drive in more runs
-        const xbh = rbiCtxData?.extraBaseHits ?? null;
-        if (xbh !== null) {
-          if      (xbh >= 400) { rbiScore += 5; rbiR.push(`${xbh} career XBH (elite power)`); }
-          else if (xbh >= 250) { rbiScore += 3; rbiR.push(`${xbh} career XBH`); }
-          else if (xbh <= 80)  { rbiScore -= 4; rbiR.push(`${xbh} career XBH (slap hitter)`); }
-        }
-
-        // Factor 4: Opposing pitcher ERA — high ERA = more runners scoring = RBI chance
-        const rbiEra = parseFloat(activeMatchupPitcher.whip) || 1.25;
-        if      (rbiEra > 1.40) { rbiScore += 4; rbiR.push(`Pitcher WHIP ${rbiEra.toFixed(2)} — hittable`); }
-        else if (rbiEra < 1.10) { rbiScore -= 4; rbiR.push(`Pitcher WHIP ${rbiEra.toFixed(2)} — limits damage`); }
-
-        // Factor 5: Weather — cold suppresses run-scoring environment
-        if (!weather?.roof && parseInt(weather?.temp) < 50) {
-          rbiScore -= 3; rbiR.push(`Cold ${weather.temp}° — fewer runs scored`);
-        }
-
-        rbiScore = Math.max(38, Math.min(70, rbiScore));
-        const rbiLean = rbiScore >= 50 ? "OVER" : "UNDER";
-        out.push({
-          label:      `${rbiLast} RBI O/U 0.5`,
-          propType:   "RBI",
-          confidence: Math.round(rbiScore),
-          lean:       rbiLean,
-          positive:   rbiLean === "OVER",
-          reason:     rbiR.slice(0, 3).join(" · "),
-        });
-      }
-    }
-
-    return out;
-    } catch (e) { console.error("Prop engine error:", e); return []; }
-  })();
+  // Kept at module scope to avoid production minifier TDZ collisions in App().
+  const liveProps = computeLiveProps({
+    IS_SAVANT_SANDBOX,
+    IS_STATS_SANDBOX,
+    pitcher,
+    umpire,
+    weather,
+    parkFactor,
+    game,
+    batterSplits,
+    batterMatchupScore,
+    liveOddsMap,
+    pinnedBatterId,
+    activeBatter,
+    calcMatchupScore,
+    activeMatchupPitcher,
+    liveH2H,
+    liveRbiCtx,
+  });
 
   // Use live props when available; fall back to mock SLATE props
   const displayProps = liveProps.length > 0 ? liveProps : mockProps;
@@ -2402,32 +2407,7 @@ export default function App() {
   const apiNrfi = !IS_STATS_SANDBOX ? liveNrfiData[gamePkKey] : null;
 
   // ERA+weather fallback — used only until the API responds
-  const eraLean = (() => {
-    if (IS_STATS_SANDBOX || apiNrfi) return null;
-    const era = parseFloat(game.pitcher?.era);
-    if (isNaN(era) || !game.pitcher?.era || game.pitcher.era === "—") return null;
-    let score = 0;
-    if      (era < 2.50) score += 15;
-    else if (era < 3.50) score += 8;
-    else if (era < 4.50) score += 2;
-    else if (era > 5.50) score -= 12;
-    else                 score -= 6;
-    if (!weather?.roof) {
-      const temp = parseInt(weather?.temp) || 72;
-      if (temp < 50) score += 10;
-      else if (temp < 60) score += 5;
-      if (weather?.hrFavorable) score -= 8;
-      else if (/\bin\b/.test((weather?.wind || "").toLowerCase())) score += 6;
-    }
-    const pf = PARK_FACTORS[game.home?.abbr];
-    if (pf) {
-      if      (pf.hr >= 1.15) score -= 10;
-      else if (pf.hr >= 1.08) score -= 5;
-      else if (pf.hr <= 0.87) score += 8;
-      else if (pf.hr <= 0.93) score += 4;
-    }
-    return { lean: score >= 0 ? "NRFI" : "YRFI", confidence: Math.min(75, Math.max(38, 50 + Math.abs(score))) };
-  })();
+  const eraLean = computeEraNrfiLean({ IS_STATS_SANDBOX, apiNrfi, game, weather });
 
   // Merge: real API data > ERA fallback > mock
   const nrfi = apiNrfi
