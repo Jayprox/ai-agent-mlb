@@ -855,3 +855,196 @@ To add/change accounts: edit `USERS` array in `backend/seed-users.js`, re-run sc
 ---
 
 *Updated April 16 2026 — Session 27 complete · Pitcher Outs prop · Help page · Railway live*
+
+---
+
+## ✅ Session 28 — Live NRFI Route + Game-Level Bullpen Route
+
+Completed both open Codex backend tasks from the `🤖 Codex Task Backlog`.
+
+### Task A — Live NRFI Data
+
+Created:
+
+- `backend/routes/nrfi.js`
+
+Mounted in `backend/server.js` as:
+
+```js
+app.use("/api/nrfi", require("./routes/nrfi"));
+```
+
+#### New route
+
+```txt
+GET /api/nrfi/:gamePk
+```
+
+#### What it does
+
+For the requested `gamePk`:
+
+1. looks up away/home team IDs from MLB schedule
+2. fetches each team’s last 20 completed regular-season games
+3. fetches each game’s linescore
+4. checks 1st-inning runs for the target team
+5. computes:
+   - `scoredPct`
+   - `avgRuns`
+   - `tendency`
+6. derives `lean` and `confidence`
+
+#### Return shape
+
+```json
+{
+  "awayFirst": { "scoredPct": "34%", "avgRuns": 0.41, "tendency": "Slow starters" },
+  "homeFirst": { "scoredPct": "47%", "avgRuns": 0.63, "tendency": "Average 1st inning output" },
+  "lean": "NRFI",
+  "confidence": 61
+}
+```
+
+#### Cache
+
+- key: `nrfi:${gamePk}`
+- TTL: 1 hour
+
+#### Notes
+
+- uses `gameDate - 1 day` as the cutoff so the current game is not included in the history window
+- returns simple tendency labels:
+  - `Strong first inning team`
+  - `Average 1st inning output`
+  - `Slow starters`
+  - `Very slow starters`
+
+### Task B — Live Bullpen Data
+
+Updated:
+
+- `backend/routes/bullpen.js`
+
+Mounted in `backend/server.js` as:
+
+```js
+app.use("/api/bullpen", require("./routes/bullpen"));
+```
+
+#### Important compatibility note
+
+There was already an existing team-level bullpen route in the repo used by the current app:
+
+```txt
+GET /api/bullpen/:teamId
+```
+
+To avoid breaking the existing frontend, `bullpen.js` was extended instead of replaced.
+
+The route now supports **both**:
+
+- `teamId` (< 1000) → existing single-team bullpen payload
+- `gamePk` (> 1000) → new away/home bullpen payload for a full game
+
+So the path remains:
+
+```txt
+GET /api/bullpen/:id
+```
+
+but behavior is detected by numeric ID shape.
+
+#### New game-level return shape
+
+For a `gamePk`, the route now returns:
+
+```json
+{
+  "away": {
+    "fatigueLevel": "MODERATE",
+    "restDays": 1,
+    "pitchesLast3": 134,
+    "grade": "B",
+    "setupDepth": "avg",
+    "lrBalance": "balanced",
+    "relievers": [
+      { "name": "Clay Holmes", "hand": "R", "era": "2.84", "role": "Closer", "lastUsed": "Yesterday", "pitchesLast3": 18 }
+    ]
+  },
+  "home": { "...same shape..." : true }
+}
+```
+
+#### Implementation details
+
+- game-level route looks up away/home team IDs from MLB schedule
+- then reuses the existing team-level bullpen builder for each club
+- game-level cache:
+  - key: `bullpen:game:${gamePk}`
+  - TTL: 15 minutes
+- team-level cache remains:
+  - key: `bullpen:team:${teamId}`
+  - TTL: 30 minutes
+
+#### Preserved behavior
+
+The original richer team-level bullpen payload was preserved for backward compatibility with the current live app:
+
+- `gradeColor`
+- `note`
+- `lean`
+- original reliever card fields (`lastApp`, `pitches`, `status`, etc.)
+
+The new game-level route maps that richer data down to the simpler away/home contract needed by CW.
+
+### Verification
+
+Ran module-load verification:
+
+```bash
+node -e "require('./backend/routes/nrfi'); require('./backend/routes/bullpen'); console.log('✅ nrfi+bullpen routes load cleanly')"
+```
+
+Result:
+
+```txt
+✅ nrfi+bullpen routes load cleanly
+```
+
+Started a temporary backend on port `3002` and live-tested:
+
+- `GET /api/schedule`
+- `GET /api/nrfi/824454`
+- `GET /api/bullpen/824454`
+- `GET /api/bullpen/144`
+- repeated `GET /api/nrfi/824454` for cache hit
+- repeated `GET /api/bullpen/824454` for cache hit
+
+Observed:
+
+- `nrfi` returned live away/home first-inning scoring data and an `NRFI` lean
+- game-level bullpen returned away/home bullpen summaries in the new contract
+- existing team-level bullpen still returned the old richer shape
+- repeat requests returned `X-Cache: HIT` for both new routes
+
+### Files changed in Session 28
+
+- `backend/routes/nrfi.js`
+- `backend/routes/bullpen.js`
+- `backend/server.js`
+- `prop-scout-handoff.md`
+
+### Ready for CW
+
+This is a clean handoff point for Claude Cowork.
+
+Backend now provides:
+
+- live first-inning scoring history via `/api/nrfi/:gamePk`
+- live game-level bullpen data via `/api/bullpen/:gamePk` semantics on the existing `/api/bullpen/:id` route
+
+CW can now wire these into `buildLiveGame()` / Intel without needing more backend work first.
+
+---
+
+*Updated April 16 2026 — Session 28 complete · live NRFI + game-level bullpen backend shipped and verified*

@@ -30,6 +30,8 @@ app.use("/api/players",  require("./routes/players"));
 app.use("/api/umpires",  require("./routes/umpires"));
 app.use("/api/arsenal",  require("./routes/arsenal"));  // Baseball Savant: pitcher pitch mix
 app.use("/api/splits",   require("./routes/splits"));   // Baseball Savant: batter vs pitch type
+app.use("/api/nrfi",     require("./routes/nrfi"));     // MLB Stats: first-inning team scoring tendencies
+app.use("/api/bullpen",  require("./routes/bullpen"));  // MLB Stats: bullpen fatigue + reliever usage
 app.use("/api/auth",     authRouter);
 app.use("/api/picks",    picksRouter);
 app.use("/api/notes",    notesRouter);
@@ -75,7 +77,9 @@ app.listen(PORT, () => {
   console.log(`   /api/players/:id/stats  season stats + splits`);
   console.log(`   /api/umpires/:pk     home plate umpire`);
   console.log(`   /api/arsenal/:id     pitcher pitch mix (Baseball Savant)`);
-  console.log(`   /api/splits/:id      batter splits vs pitch type (Baseball Savant)\n`);
+  console.log(`   /api/splits/:id      batter splits vs pitch type (Baseball Savant)`);
+  console.log(`   /api/nrfi/:gamePk    first-inning scoring tendencies`);
+  console.log(`   /api/bullpen/:id     bullpen fatigue + reliever usage\n`);
   console.log(`   /api/auth/login     POST — login, returns JWT`);
   console.log(`   /api/auth/me        GET  — current user (protected)`);
   console.log(`   /api/picks          user-scoped pick log CRUD`);
