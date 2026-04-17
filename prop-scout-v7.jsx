@@ -1268,7 +1268,8 @@ export default function App() {
   const [liveHittingLog, setLiveHittingLog] = useState({});
   const [liveH2H, setLiveH2H] = useState({});               // `${batterId}_${pitcherId}` → h2h object
   const [liveRbiCtx, setLiveRbiCtx] = useState({});        // batterId → { rbiPerGame, rbiRate, slg, extraBaseHits }
-  const [liveBullpen,  setLiveBullpen]  = useState({});     // teamId    → bullpen object
+  const [liveBullpen,  setLiveBullpen]  = useState({});     // gamePk    → { away, home } bullpen object
+  const [liveNrfiData, setLiveNrfiData] = useState({});     // gamePk    → { awayFirst, homeFirst, lean, confidence }
   const [liveInjuries, setLiveInjuries] = useState([]);
   const [gameNotes, setGameNotes]       = useState({});  // gamePk → note string
   const [noteSaveState, setNoteSaveState] = useState(null); // null | "saving" | "saved"
@@ -1444,18 +1445,17 @@ export default function App() {
         .then(data => { if (data?.arsenal?.length) setPitcherArsenal(prev => ({ ...prev, [awayPitcherId]: data.arsenal })); })
         .catch(err => console.error("Away arsenal fetch:", err));
     }
-    // Fetch bullpen data for both teams
-    const awayId = sg.away?.id;
-    const homeId = sg.home?.id;
-    if (awayId && !liveBullpen[awayId]) {
-      apiFetch(`/api/bullpen/${awayId}`)
-        .then(data => setLiveBullpen(prev => ({ ...prev, [awayId]: data })))
-        .catch(err => console.error("Away bullpen:", err));
+    // Fetch bullpen data via gamePk — one call returns both away + home
+    if (!liveBullpen[gamePk]) {
+      apiFetch(`/api/bullpen/${gamePk}`)
+        .then(data => setLiveBullpen(prev => ({ ...prev, [gamePk]: data })))
+        .catch(err => console.error("Bullpen:", err));
     }
-    if (homeId && !liveBullpen[homeId]) {
-      apiFetch(`/api/bullpen/${homeId}`)
-        .then(data => setLiveBullpen(prev => ({ ...prev, [homeId]: data })))
-        .catch(err => console.error("Home bullpen:", err));
+    // Fetch live NRFI first-inning scoring tendencies
+    if (!liveNrfiData[gamePk]) {
+      apiFetch(`/api/nrfi/${gamePk}`)
+        .then(data => setLiveNrfiData(prev => ({ ...prev, [gamePk]: data })))
+        .catch(err => console.error("NRFI:", err));
     }
   }, [selectedId, view, liveSlate]);
 
@@ -1544,15 +1544,12 @@ export default function App() {
         arsenalLive: !!liveArsenal,
       };
     })(),
-    // Bullpen: overlay live data per team when fetched
+    // Bullpen: overlay live data (keyed by gamePk, shape { away, home })
     bullpen: (() => {
-      const awayId = baseGame?.away?.id;
-      const homeId = baseGame?.home?.id;
-      const liveAway = awayId ? liveBullpen[awayId] : null;
-      const liveHome = homeId ? liveBullpen[homeId] : null;
+      const liveData = liveBullpen[gamePkKey];
       return {
-        away: liveAway ?? baseGame.bullpen?.away,
-        home: liveHome ?? baseGame.bullpen?.home,
+        away: liveData?.away ?? baseGame.bullpen?.away,
+        home: liveData?.home ?? baseGame.bullpen?.home,
       };
     })(),
   };
@@ -2270,55 +2267,51 @@ export default function App() {
   // Use live props when available; fall back to mock SLATE props
   const displayProps = liveProps.length > 0 ? liveProps : mockProps;
 
-  // ── Computed live NRFI ────────────────────────────────────────────────────
-  // Derives NRFI/YRFI lean + confidence from pitcher ERA + weather.
-  // Runs after `game` is built (needs game.pitcher.era + weather).
-  // Keeps mock awayFirst/homeFirst scoredPct — we don't have live 1st-inn rates yet.
-  const liveNrfi = (() => {
-    if (IS_STATS_SANDBOX) return null;
+  // ── Live NRFI from API ───────────────────────────────────────────────────
+  // Prefers real first-inning scoring data from /api/nrfi/:gamePk.
+  // Falls back to ERA/weather-derived estimate while the fetch is in-flight.
+  const apiNrfi = !IS_STATS_SANDBOX ? liveNrfiData[gamePkKey] : null;
+
+  // ERA+weather fallback — used only until the API responds
+  const eraLean = (() => {
+    if (IS_STATS_SANDBOX || apiNrfi) return null;
     const era = parseFloat(game.pitcher?.era);
     if (isNaN(era) || !game.pitcher?.era || game.pitcher.era === "—") return null;
-
     let score = 0;
-    const reasons = [];
-    const lastName = game.pitcher.name?.split(" ").slice(-1)[0] ?? game.pitcher.name ?? "";
-
-    // ERA factor — home pitcher ERA as primary signal
-    if      (era < 2.50) { score += 15; reasons.push(`${lastName} ERA ${game.pitcher.era} — elite`); }
-    else if (era < 3.50) { score += 8;  reasons.push(`${lastName} ERA ${game.pitcher.era}`); }
-    else if (era < 4.50) { score += 2; }
-    else if (era > 5.50) { score -= 12; reasons.push(`ERA ${game.pitcher.era} — hitter-friendly`); }
-    else                 { score -= 6; }
-
-    // Weather factor (outdoor only)
+    if      (era < 2.50) score += 15;
+    else if (era < 3.50) score += 8;
+    else if (era < 4.50) score += 2;
+    else if (era > 5.50) score -= 12;
+    else                 score -= 6;
     if (!weather?.roof) {
-      const temp     = parseInt(weather?.temp) || 72;
-      const windStr  = (weather?.wind || "").toLowerCase();
-      if      (temp < 50)               { score += 10; reasons.push(`Cold ${temp}° suppresses offense`); }
-      else if (temp < 60)               { score += 5;  reasons.push(`Cool ${temp}° favors pitchers`); }
-      if      (weather?.hrFavorable)    { score -= 8;  reasons.push("Wind blowing OUT — power favorable"); }
-      else if (/\bin\b/.test(windStr))  { score += 6;  reasons.push("Wind blowing IN"); }
-    } else {
-      reasons.push("Dome — neutral conditions");
+      const temp = parseInt(weather?.temp) || 72;
+      if (temp < 50) score += 10;
+      else if (temp < 60) score += 5;
+      if (weather?.hrFavorable) score -= 8;
+      else if (/\bin\b/.test((weather?.wind || "").toLowerCase())) score += 6;
     }
-
-    // Park factor — HR-friendly parks lean YRFI, pitcher-friendly lean NRFI
     const pf = PARK_FACTORS[game.home?.abbr];
     if (pf) {
-      if      (pf.hr >= 1.15) { score -= 10; reasons.push(`${game.home.abbr} hitter-friendly park (HR ${pf.hr}x)`); }
-      else if (pf.hr >= 1.08) { score -= 5;  reasons.push(`${game.home.abbr} hitter-friendly park`); }
-      else if (pf.hr <= 0.87) { score += 8;  reasons.push(`${game.home.abbr} pitcher-friendly park (HR ${pf.hr}x)`); }
-      else if (pf.hr <= 0.93) { score += 4;  reasons.push(`${game.home.abbr} pitcher-friendly park`); }
+      if      (pf.hr >= 1.15) score -= 10;
+      else if (pf.hr >= 1.08) score -= 5;
+      else if (pf.hr <= 0.87) score += 8;
+      else if (pf.hr <= 0.93) score += 4;
     }
-
-    const lean       = score >= 0 ? "NRFI" : "YRFI";
-    const confidence = Math.min(75, Math.max(38, 50 + Math.abs(score)));
-    return { lean, confidence, tendency: reasons.slice(0, 2).join(" · "), live: true };
+    return { lean: score >= 0 ? "NRFI" : "YRFI", confidence: Math.min(75, Math.max(38, 50 + Math.abs(score))) };
   })();
 
-  // Merge live NRFI over mock if computed
-  const nrfi = liveNrfi
-    ? { ...game.nrfi, lean: liveNrfi.lean, confidence: liveNrfi.confidence, live: true, liveTendency: liveNrfi.tendency }
+  // Merge: real API data > ERA fallback > mock
+  const nrfi = apiNrfi
+    ? {
+        ...game.nrfi,
+        lean:       apiNrfi.lean,
+        confidence: apiNrfi.confidence,
+        awayFirst:  apiNrfi.awayFirst,
+        homeFirst:  apiNrfi.homeFirst,
+        live:       true,
+      }
+    : eraLean
+    ? { ...game.nrfi, lean: eraLean.lean, confidence: eraLean.confidence, live: true }
     : game.nrfi;
 
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); };
@@ -3194,9 +3187,11 @@ export default function App() {
                   })()}
                 </div>
               </div>
-              {nrfi.liveTendency && (
+              {(nrfi.awayFirst?.avgRuns !== undefined || nrfi.liveTendency) && (
                 <div style={{ fontSize: 10, color: "#9ca3af", background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)", borderRadius: 6, padding: "6px 10px", marginBottom: 10, lineHeight: 1.5 }}>
-                  📊 {nrfi.liveTendency}
+                  {nrfi.awayFirst?.avgRuns !== undefined
+                    ? `📊 ${game.away.abbr} avg ${nrfi.awayFirst.avgRuns} R/1st inn · ${game.home.abbr} avg ${nrfi.homeFirst?.avgRuns ?? "—"} R/1st inn`
+                    : `📊 ${nrfi.liveTendency}`}
                 </div>
               )}
               <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
@@ -4175,7 +4170,28 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6, marginTop: 4 }}>
+                  <div style={{ background: "rgba(34,197,94,0.07)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#86efac", fontWeight: 700, marginBottom: 4 }}>Pitcher Wins / Batter Wins boxes</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                      Below the overall score you'll see two boxes breaking it down by <strong style={{ color: "#f9fafb" }}>individual pitch type</strong>. For example:<br />
+                      <span style={{ color: "#22c55e" }}>Pitcher Wins: CH · SL</span> — the batter struggles against the changeup and slider (low AVG, high whiff rate).<br />
+                      <span style={{ color: "#ef4444" }}>Batter Wins: FF · SI</span> — the batter handles the fastball and sinker well.<br /><br />
+                      Even if the overall score is neutral, this tells you <em>why</em>. If the pitcher leans on his "wins" pitches, it boosts K and under props. If he's forced into the batter's "wins" pitches, hit and TB props get a bump.
+                    </div>
+                  </div>
+                  <div style={{ background: "rgba(251,191,36,0.07)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#fde68a", fontWeight: 700, marginBottom: 4 }}>Pitch scouting notes</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.7 }}>
+                      Each pitch card shows a one-line note describing how the batter matches up against it. These are generated from their actual stats:<br />
+                      <span style={{ color: "#f9fafb" }}>"Crushes elevated FF"</span> — high AVG + low whiff on fastballs. Batter handles it well.<br />
+                      <span style={{ color: "#f9fafb" }}>"Chases in the dirt"</span> — swings at breaking balls below the zone. High whiff rate.<br />
+                      <span style={{ color: "#f9fafb" }}>"Drives sinker well"</span> — solid contact on sinkers. Good AVG vs that pitch.<br />
+                      <span style={{ color: "#f9fafb" }}>"Chases down and away"</span> — gets fooled by sliders/changeups off the outer edge.<br />
+                      <span style={{ color: "#f9fafb" }}>"Severe weakness — high K exposure"</span> — AVG under .180 or whiff over 40%. Prime K prop pitch.<br /><br />
+                      <span style={{ color: "#818cf8" }}>💡 Tip: go to the <strong>Lineup tab</strong>, expand a batter, and pin them to the Overview tab — their notes will update with that batter's real Statcast splits against this pitcher's arsenal.</span>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
                     The <span style={{ color: "#f9fafb", fontWeight: 700 }}>Confidence Meter</span> (0–100%) on each prop shows how strongly the engine leans. <span style={{ color: "#22c55e" }}>70%+</span> is a strong signal worth considering.
                   </div>
                 </Section>
