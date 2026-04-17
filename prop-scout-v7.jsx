@@ -1214,6 +1214,93 @@ const DesktopWarning = () => (
 );
 
 // ─────────────────────────────────────────────
+// TOP SLATE PICKS — extracted to module scope so the minifier can't
+// collide its local variable names with App()'s render-body variables.
+// Receives all needed data as explicit parameters.
+// ─────────────────────────────────────────────
+function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather) {
+  const picks = [];
+  liveSlate.forEach(sg => {
+    const sgPid    = sg.probablePitchers?.home?.id;
+    const sgPs     = livePitcherStats[sgPid];
+    if (!sgPs) return;
+
+    const sgLastName = (sgPs.name ?? sg.probablePitchers?.home?.name ?? "SP")
+      .split(" ").slice(-1)[0];
+    const sgEra    = parseFloat(sgPs.era)    || 5.00;
+    const sgKPer9  = parseFloat(sgPs.kPer9)  || 6.0;
+    const sgWhip   = parseFloat(sgPs.whip)   || 1.35;
+    const sgBbPer9 = parseFloat(sgPs.bbPer9) || 3.5;
+    const sgAvgIP  = parseFloat(sgPs.avgIP)  || 5.0;
+    const sgAvgK   = parseFloat(sgPs.avgK)   || Math.round(sgKPer9 * sgAvgIP / 9 * 10) / 10;
+    const sgPf     = PARK_FACTORS[sg.home?.abbr] ?? NEUTRAL_PARK;
+    const sgWx     = liveWeather[sg.gamePk];
+    const sgGameLabel = `${sg.away?.abbr ?? "?"} @ ${sg.home?.abbr ?? "?"}`;
+
+    // ── Lineup-strength signal ──
+    const sgEntry         = liveLineups[sg.gamePk];
+    const sgBatters       = sgEntry?.away ?? [];
+    const sgConfirmed     = sgEntry?.confirmed ?? false;
+    let   sgLineupAdj     = 0;
+    if (sgConfirmed && sgBatters.length >= 7) {
+      const sgPHand      = sg.probablePitchers?.home?.hand ?? "R";
+      const sgOppCount   = sgBatters.filter(b => b.hand && b.hand !== sgPHand && b.hand !== "?").length;
+      const sgOppPct     = sgOppCount / sgBatters.length;
+      if      (sgOppPct >= 0.67) sgLineupAdj = -5;
+      else if (sgOppPct >= 0.56) sgLineupAdj = -2;
+      else if (sgOppPct <= 0.33) sgLineupAdj = +5;
+      else if (sgOppPct <= 0.44) sgLineupAdj = +2;
+    }
+
+    // ── K prop ──
+    let sgKScore = 50;
+    if      (sgEra  < 3.00) sgKScore += 8;  else if (sgEra  < 3.50) sgKScore += 5;
+    else if (sgEra  > 5.00) sgKScore -= 8;  else if (sgEra  > 4.50) sgKScore -= 4;
+    if      (sgKPer9 >= 10) sgKScore += 14; else if (sgKPer9 >= 8.5) sgKScore += 8;
+    else if (sgKPer9 >= 7)  sgKScore += 3;  else if (sgKPer9 < 6)    sgKScore -= 10;
+    if (sgWhip < 1.1) sgKScore += 3; else if (sgWhip > 1.45) sgKScore -= 5;
+    sgKScore += Math.round((sgPf.k - 1.0) * 50);
+    if (sgWx && !sgWx.roof && parseInt(sgWx.temp) < 55) sgKScore += 5;
+    sgKScore += sgLineupAdj;
+    sgKScore = Math.max(38, Math.min(75, sgKScore));
+    const sgKLine = Math.max(0.5, Math.round(sgAvgK) - 0.5);
+    picks.push({
+      label: `${sgLastName} K O/U ${sgKLine}`,
+      lean: sgKScore >= 50 ? "OVER" : "UNDER",
+      positive: sgKScore >= 50,
+      confidence: sgKScore,
+      propType: "K",
+      gamePk: sg.gamePk,
+      game: sgGameLabel,
+      lineupConfirmed: sgConfirmed,
+    });
+
+    // ── Outs prop ──
+    let sgOScore = 50;
+    if      (sgEra  < 3.00) sgOScore += 10; else if (sgEra  < 3.50) sgOScore += 6;
+    else if (sgEra  > 5.00) sgOScore -= 10; else if (sgEra  > 4.50) sgOScore -= 5;
+    if      (sgWhip < 1.10) sgOScore += 12; else if (sgWhip < 1.25) sgOScore += 6;
+    else if (sgWhip > 1.50) sgOScore -= 12; else if (sgWhip > 1.38) sgOScore -= 6;
+    if      (sgBbPer9 < 2.5) sgOScore += 8; else if (sgBbPer9 < 3.0) sgOScore += 3;
+    else if (sgBbPer9 > 4.5) sgOScore -= 8; else if (sgBbPer9 > 3.5) sgOScore -= 4;
+    sgOScore += sgLineupAdj;
+    sgOScore = Math.max(38, Math.min(75, sgOScore));
+    const sgOLine = Math.max(0.5, Math.round(sgAvgIP * 3) - 0.5);
+    picks.push({
+      label: `${sgLastName} Outs O/U ${sgOLine}`,
+      lean: sgOScore >= 50 ? "OVER" : "UNDER",
+      positive: sgOScore >= 50,
+      confidence: sgOScore,
+      propType: "Outs",
+      gamePk: sg.gamePk,
+      game: sgGameLabel,
+      lineupConfirmed: sgConfirmed,
+    });
+  });
+  return picks.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
+}
+
+// ─────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────
 export default function App() {
@@ -2357,91 +2444,11 @@ export default function App() {
     : game.nrfi;
 
   // ── Cross-slate Best Bets ────────────────────────────────────────────────
-  // Computes K + Outs props for every game that has home pitcher stats loaded.
-  // Returns the top 3 by confidence — shown on the Slate view landing screen.
-  const topSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length ? (() => {
-    const picks = [];
-    liveSlate.forEach(sg => {
-      const pid = sg.probablePitchers?.home?.id;
-      const ps  = livePitcherStats[pid];
-      if (!ps) return;
-
-      const lastName = (ps.name ?? sg.probablePitchers?.home?.name ?? "SP")
-        .split(" ").slice(-1)[0];
-      const era   = parseFloat(ps.era)   || 5.00;
-      const kPer9 = parseFloat(ps.kPer9) || 6.0;
-      const whip  = parseFloat(ps.whip)  || 1.35;
-      const bbPer9= parseFloat(ps.bbPer9)|| 3.5;
-      const avgIP = parseFloat(ps.avgIP) || 5.0;
-      const avgK  = parseFloat(ps.avgK)  || Math.round(kPer9 * avgIP / 9 * 10) / 10;
-      const pf    = PARK_FACTORS[sg.home?.abbr] ?? NEUTRAL_PARK;
-      const wx    = liveWeather[sg.gamePk];
-      const gameLabel = `${sg.away?.abbr ?? "?"} @ ${sg.home?.abbr ?? "?"}`;
-
-      // ── Lineup-strength signal (updates when lineups confirm) ──
-      // Opposite-hand batters hit the pitcher better → tougher outing.
-      // Note: renamed to sgAwayBatters to avoid shadowing outer awayLineup variable.
-      const sgLineupEntry   = liveLineups[sg.gamePk];
-      const sgAwayBatters   = sgLineupEntry?.away ?? [];
-      const lineupConfirmed = sgLineupEntry?.confirmed ?? false;
-      let lineupAdj = 0;  // applied to both K and Outs scores
-      if (lineupConfirmed && sgAwayBatters.length >= 7) {
-        const pitcherHand  = sg.probablePitchers?.home?.hand ?? "R";
-        const oppHandCount = sgAwayBatters.filter(b => b.hand && b.hand !== pitcherHand && b.hand !== "?").length;
-        const oppHandPct   = oppHandCount / sgAwayBatters.length;
-        if      (oppHandPct >= 0.67) lineupAdj = -5; // platoon-heavy lineup — tough for this pitcher
-        else if (oppHandPct >= 0.56) lineupAdj = -2;
-        else if (oppHandPct <= 0.33) lineupAdj = +5; // pitcher-friendly handedness matchup
-        else if (oppHandPct <= 0.44) lineupAdj = +2;
-      }
-
-      // ── K prop ──
-      let kScore = 50;
-      if      (era  < 3.00) kScore += 8;  else if (era  < 3.50) kScore += 5;
-      else if (era  > 5.00) kScore -= 8;  else if (era  > 4.50) kScore -= 4;
-      if      (kPer9 >= 10) kScore += 14; else if (kPer9 >= 8.5) kScore += 8;
-      else if (kPer9 >= 7)  kScore += 3;  else if (kPer9 < 6)   kScore -= 10;
-      if (whip < 1.1) kScore += 3; else if (whip > 1.45) kScore -= 5;
-      kScore += Math.round((pf.k - 1.0) * 50);
-      if (wx && !wx.roof && parseInt(wx.temp) < 55) kScore += 5;
-      kScore += lineupAdj;
-      kScore = Math.max(38, Math.min(75, kScore));
-      const kLine = Math.max(0.5, Math.round(avgK) - 0.5);
-      picks.push({
-        label: `${lastName} K O/U ${kLine}`,
-        lean: kScore >= 50 ? "OVER" : "UNDER",
-        positive: kScore >= 50,
-        confidence: kScore,
-        propType: "K",
-        gamePk: sg.gamePk,
-        game: gameLabel,
-        lineupConfirmed,
-      });
-
-      // ── Outs prop ──
-      let oScore = 50;
-      if      (era  < 3.00) oScore += 10; else if (era  < 3.50) oScore += 6;
-      else if (era  > 5.00) oScore -= 10; else if (era  > 4.50) oScore -= 5;
-      if      (whip < 1.10) oScore += 12; else if (whip < 1.25) oScore += 6;
-      else if (whip > 1.50) oScore -= 12; else if (whip > 1.38) oScore -= 6;
-      if      (bbPer9 < 2.5) oScore += 8; else if (bbPer9 < 3.0) oScore += 3;
-      else if (bbPer9 > 4.5) oScore -= 8; else if (bbPer9 > 3.5) oScore -= 4;
-      oScore += lineupAdj;
-      oScore = Math.max(38, Math.min(75, oScore));
-      const oLine = Math.max(0.5, Math.round(avgIP * 3) - 0.5);
-      picks.push({
-        label: `${lastName} Outs O/U ${oLine}`,
-        lean: oScore >= 50 ? "OVER" : "UNDER",
-        positive: oScore >= 50,
-        confidence: oScore,
-        propType: "Outs",
-        gamePk: sg.gamePk,
-        game: gameLabel,
-        lineupConfirmed,
-      });
-    });
-    return picks.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
-  })() : [];
+  // Delegates to module-level computeTopSlatePicks() to avoid minifier
+  // variable-name collisions (TDZ) with render-body locals.
+  const topSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length
+    ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather)
+    : [];
 
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); setPinnedBatterId(null); };
 
