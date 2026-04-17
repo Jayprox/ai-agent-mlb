@@ -1777,6 +1777,81 @@ function computeEraNrfiLean({ IS_STATS_SANDBOX, apiNrfi, game, weather }) {
   return { lean: score >= 0 ? "NRFI" : "YRFI", confidence: Math.min(75, Math.max(38, 50 + Math.abs(score))) };
 }
 
+function computePitchMatchupGood(avg, whiff) {
+  const a = parseFloat(avg) || 0;
+  const w = parseFloat(whiff) || 0;
+  if (a >= 0.280 && w < 25) return true;
+  if (a <= 0.215 || w >= 35) return false;
+  return null;
+}
+
+function computePitchMatchupNote(abbr, avg, whiff) {
+  const a = parseFloat(avg) || 0;
+  const w = parseFloat(whiff) || 0;
+  if (a >= 0.300 && w < 20) return `Elite contact vs ${abbr}`;
+  if (a >= 0.280)            return `Solid contact rate vs ${abbr}`;
+  if (a <= 0.180 || w >= 40) return `Severe weakness vs ${abbr} — high K exposure`;
+  if (a <= 0.215)            return `Weak contact vs ${abbr}`;
+  if (w >= 30)               return `High whiff rate (${whiff}) — chases out of zone`;
+  return `Average results vs ${abbr}`;
+}
+
+function calcMatchupScoreForPitchSet(batterHand, vsPitches, arsenal, pitcherHand) {
+  const handPenalty = (pitcherHand === batterHand) ? 0.92 : 1.0;
+
+  let weightedSum = 0;
+  let totalWeight = 0;
+
+  arsenal.forEach(({ abbr, pct }) => {
+    const p = vsPitches?.[abbr];
+    if (!p) return;
+
+    const capPct = Math.min(pct, 40);
+    const weight = capPct / 100;
+
+    const avg   = parseFloat(typeof p === "object" ? p.avg   : p) || 0;
+    const whiff = parseFloat(typeof p === "object" ? p.whiff : "20") || 20;
+    const slg   = parseFloat(typeof p === "object" ? p.slg   : String(avg * 1.6)) || avg * 1.6;
+
+    const avgScore   = Math.max(0, Math.min(1, (avg - 0.150) / 0.250));
+    const whiffScore = Math.max(0, Math.min(1, 1 - (whiff / 50)));
+    const slgScore   = Math.max(0, Math.min(1, (slg - 0.200) / 0.500));
+    const pitchScore = (avgScore * 0.45) + (whiffScore * 0.35) + (slgScore * 0.20);
+
+    weightedSum += pitchScore * weight * handPenalty;
+    totalWeight += weight;
+  });
+
+  if (totalWeight === 0) return 50;
+  const normalized = (weightedSum / totalWeight) * 100;
+  return Math.round(normalized * 10) / 10;
+}
+
+function augmentBatterWithSplits(batter, batterSplits) {
+  if (!batter?.id) return batter;
+  const liveSplits = batterSplits[batter.id];
+  if (!liveSplits) return batter;
+  const enriched = {};
+  Object.entries(liveSplits).forEach(([abbr, split]) => {
+    enriched[abbr] = {
+      ...split,
+      good: computePitchMatchupGood(split.avg, split.whiff),
+      note: computePitchMatchupNote(abbr, split.avg, split.whiff),
+    };
+  });
+  return { ...batter, vsPitches: enriched, splitsLive: true };
+}
+
+function batterMatchupScoreForPitcher(batter, matchupPitcher, batterSplits) {
+  const augmentedBatter = augmentBatterWithSplits(batter, batterSplits);
+  return calcMatchupScoreForPitchSet(
+    augmentedBatter.hand,
+    augmentedBatter.vsPitches,
+    matchupPitcher.arsenal,
+    matchupPitcher.hand
+  );
+}
+
 // ─────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────
@@ -2176,7 +2251,7 @@ export default function App() {
     : null;
   const activeBatter = pinnedLineupBatter
     ? (() => {
-        const lb = augmentBatter(pinnedLineupBatter);
+        const lb = augmentBatterWithSplits(pinnedLineupBatter, batterSplits);
         // Lineup batters lack `ops` — estimate from avg + slg profile so TB prop can fire
         const avgNum = parseFloat(lb.avg) || 0;
         const estOps = lb.ops ?? String(((avgNum + 0.07) + (avgNum * 1.65)).toFixed(3));
@@ -2218,47 +2293,9 @@ export default function App() {
   // Handedness multiplier: same-hand matchup is harder for batter
   // Output: 0–100 where < 35 = pitcher edge, 35–55 = neutral, 56+ = batter edge
 
-  const calcMatchupScore = (batterHand, vsPitches, arsenal, pitcherHand) => {
-    // Same-hand matchups favor pitcher (e.g. RHP vs RHB for breaking balls)
-    const handPenalty = (pitcherHand === batterHand) ? 0.92 : 1.0;
-
-    let weightedSum = 0;
-    let totalWeight = 0;
-
-    arsenal.forEach(({ abbr, pct }) => {
-      const p = vsPitches?.[abbr];
-      if (!p) return;
-
-      const capPct = Math.min(pct, 40); // cap usage influence at 40%
-      const weight = capPct / 100;
-
-      const avg   = parseFloat(typeof p === "object" ? p.avg   : p) || 0;
-      const whiff = parseFloat(typeof p === "object" ? p.whiff : "20") || 20;
-      const slg   = parseFloat(typeof p === "object" ? p.slg   : String(avg * 1.6)) || avg * 1.6;
-
-      // Component scores (all normalized 0–1):
-      // avg component: 0.400 ceiling is elite, 0.150 floor is brutal
-      const avgScore   = Math.max(0, Math.min(1, (avg - 0.150) / 0.250));
-      // whiff component: 0% whiff = best, 50%+ = worst
-      const whiffScore = Math.max(0, Math.min(1, 1 - (whiff / 50)));
-      // slg component: 0.700 ceiling, 0.200 floor
-      const slgScore   = Math.max(0, Math.min(1, (slg - 0.200) / 0.500));
-
-      // Weighted blend: avg 45%, whiff 35%, slg 20%
-      const pitchScore = (avgScore * 0.45) + (whiffScore * 0.35) + (slgScore * 0.20);
-
-      weightedSum += pitchScore * weight * handPenalty;
-      totalWeight += weight;
-    });
-
-    if (totalWeight === 0) return 50;
-    const normalized = (weightedSum / totalWeight) * 100;
-    return Math.round(normalized * 10) / 10;
-  };
-
   const overviewBatter = activeBatter ?? batter;
   const overviewVsPitches = activeBatterVsPitches ?? batter.vsPitches;
-  const score = calcMatchupScore(
+  const score = calcMatchupScoreForPitchSet(
     overviewBatter.hand, overviewVsPitches, activeMatchupPitcher.arsenal, activeMatchupPitcher.hand
   );
 
@@ -2271,25 +2308,6 @@ export default function App() {
 
   // ── Savant splits helpers ─────────────────────────────────
   // Derive HANDLES / NEUTRAL / WEAK SPOT from live split numbers
-  const computeGood = (avg, whiff) => {
-    const a = parseFloat(avg) || 0;
-    const w = parseFloat(whiff) || 0;
-    if (a >= 0.280 && w < 25) return true;
-    if (a <= 0.215 || w >= 35) return false;
-    return null;
-  };
-
-  const autoNote = (abbr, avg, whiff) => {
-    const a = parseFloat(avg) || 0;
-    const w = parseFloat(whiff) || 0;
-    if (a >= 0.300 && w < 20) return `Elite contact vs ${abbr}`;
-    if (a >= 0.280)            return `Solid contact rate vs ${abbr}`;
-    if (a <= 0.180 || w >= 40) return `Severe weakness vs ${abbr} — high K exposure`;
-    if (a <= 0.215)            return `Weak contact vs ${abbr}`;
-    if (w >= 30)               return `High whiff rate (${whiff}) — chases out of zone`;
-    return `Average results vs ${abbr}`;
-  };
-
   const parseIpToOuts = (ip) => {
     if (!ip) return 0;
     const [whole, frac = "0"] = String(ip).split(".");
@@ -2310,38 +2328,19 @@ export default function App() {
       return {
         avg,
         whiff: null,
-        good: computeGood(avg, null),
-        note: autoNote(abbr, avg, null),
+        good: computePitchMatchupGood(avg, null),
+        note: computePitchMatchupNote(abbr, avg, null),
       };
     }
     if (typeof rawVs === "object") {
       if ("good" in rawVs) return rawVs;
       return {
         ...rawVs,
-        good: computeGood(rawVs.avg, rawVs.whiff),
-        note: autoNote(abbr, rawVs.avg, rawVs.whiff),
+        good: computePitchMatchupGood(rawVs.avg, rawVs.whiff),
+        note: computePitchMatchupNote(abbr, rawVs.avg, rawVs.whiff),
       };
     }
     return null;
-  };
-
-  // Augment a batter object with live Savant splits when available.
-  // Preserves mock vsPitches as fallback.
-  const augmentBatter = (b) => {
-    if (!b?.id) return b;
-    const liveSplits = batterSplits[b.id];
-    if (!liveSplits) return b;
-    // Build enriched vsPitches: add computed `good` and `note` to each live split
-    const enriched = {};
-    Object.entries(liveSplits).forEach(([abbr, s]) => {
-      enriched[abbr] = { ...s, good: computeGood(s.avg, s.whiff), note: autoNote(abbr, s.avg, s.whiff) };
-    });
-    return { ...b, vsPitches: enriched, splitsLive: true };
-  };
-
-  const batterMatchupScore = (b, matchupPitcher = pitcher) => {
-    const aug = augmentBatter(b);
-    return calcMatchupScore(aug.hand, aug.vsPitches, matchupPitcher.arsenal, matchupPitcher.hand);
   };
 
   // Lazily fetch Savant splits for a batter when their drawer opens
@@ -2388,11 +2387,11 @@ export default function App() {
     parkFactor,
     game,
     batterSplits,
-    batterMatchupScore,
+    batterMatchupScore: (b, matchupPitcher = pitcher) => batterMatchupScoreForPitcher(b, matchupPitcher, batterSplits),
     liveOddsMap,
     pinnedBatterId,
     activeBatter,
-    calcMatchupScore,
+    calcMatchupScore: calcMatchupScoreForPitchSet,
     activeMatchupPitcher,
     liveH2H,
     liveRbiCtx,
@@ -2928,8 +2927,8 @@ export default function App() {
                     <div style={{ fontSize: 11, color: "#6b7280" }}>Check back closer to first pitch.</div>
                   </div>
                 ) : lineup.map((rawB, i) => {
-                  const b = augmentBatter(rawB);
-                  const sc = batterMatchupScore(b, facingPitcher);
+                  const b = augmentBatterWithSplits(rawB, batterSplits);
+                  const sc = batterMatchupScoreForPitcher(b, facingPitcher, batterSplits);
                   const scColor = scoreColor(sc);
                   const isExpanded = expandedBatter === i;
                   const recentHits = (b.hitRate || []).reduce((a, v) => a + v, 0);
