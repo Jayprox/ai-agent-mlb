@@ -1,6 +1,7 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const requireAuth = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -30,31 +31,39 @@ function writeStore(store) {
   fs.writeFileSync(PICKS_FILE, JSON.stringify(store, null, 2));
 }
 
-router.get("/", (_req, res) => {
+router.use(requireAuth);
+
+router.get("/", (req, res) => {
   const store = readStore();
-  res.json({ picks: store.picks });
+  return res.json({ picks: store.picks.filter((pick) => pick.userId === req.userId) });
 });
 
 router.post("/", (req, res) => {
   const store = readStore();
-  const entry = req.body ?? {};
-  const existing = store.picks.find(p => p.id === entry.id);
+  const entry = { ...(req.body ?? {}), userId: req.userId };
+  const existing = store.picks.find((pick) => pick.id === entry.id);
 
   if (existing) {
+    if (existing.userId !== req.userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
     return res.json(existing);
   }
 
   store.picks.push(entry);
   writeStore(store);
-  res.status(201).json(entry);
+  return res.status(201).json(entry);
 });
 
 router.patch("/:id", (req, res) => {
   const store = readStore();
-  const index = store.picks.findIndex(p => p.id === req.params.id);
+  const index = store.picks.findIndex((pick) => pick.id === req.params.id);
 
   if (index === -1) {
     return res.status(404).json({ error: "Pick not found" });
+  }
+  if (store.picks[index].userId !== req.userId) {
+    return res.status(403).json({ error: "Forbidden" });
   }
 
   store.picks[index] = {
@@ -67,10 +76,13 @@ router.patch("/:id", (req, res) => {
 
 router.delete("/:id", (req, res) => {
   const store = readStore();
-  const index = store.picks.findIndex(p => p.id === req.params.id);
+  const index = store.picks.findIndex((pick) => pick.id === req.params.id);
 
   if (index === -1) {
     return res.status(404).json({ error: "Pick not found" });
+  }
+  if (store.picks[index].userId !== req.userId) {
+    return res.status(403).json({ error: "Forbidden" });
   }
 
   store.picks.splice(index, 1);

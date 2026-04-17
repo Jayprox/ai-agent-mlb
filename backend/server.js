@@ -2,11 +2,13 @@ require("dotenv").config();
 const express = require("express");
 const cors    = require("cors");
 const cache   = require("./services/cache");
+const authRouter = require("./routes/auth");
 const picksRouter = require("./routes/picks");
 const notesRouter = require("./routes/notes");
-const digest = require("./routes/digest");
-const injuriesRouter = require("./routes/injuries");
+const digestRouter = require("./routes/digest");
 
+// Required env vars: ODDS_API_KEY, JWT_SECRET
+// Optional: DATABASE_URL (falls back to flat JSON)
 const app  = express();
 const PORT = process.env.PORT ?? 3001;
 
@@ -27,11 +29,10 @@ app.use("/api/players",  require("./routes/players"));
 app.use("/api/umpires",  require("./routes/umpires"));
 app.use("/api/arsenal",  require("./routes/arsenal"));  // Baseball Savant: pitcher pitch mix
 app.use("/api/splits",   require("./routes/splits"));   // Baseball Savant: batter vs pitch type
-app.use("/api/bullpen",  require("./routes/bullpen"));  // MLB Stats: bullpen fatigue + reliever list
-app.use("/api/picks",    picksRouter);                  // Local JSON-backed pick log
-app.use("/api/notes",    notesRouter);                  // Local JSON-backed game notes
-app.use("/api/digest",   digest);                       // Local JSON-backed 7-day pick digest
-app.use("/api/injuries", injuriesRouter);               // MLB Stats: recent IL / DL placements
+app.use("/api/auth",     authRouter);
+app.use("/api/picks",    picksRouter);
+app.use("/api/notes",    notesRouter);
+app.use("/api/digest",   digestRouter);
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {
@@ -63,13 +64,12 @@ app.listen(PORT, () => {
   console.log(`   /api/schedule        today's games + probable pitchers`);
   console.log(`   /api/lineups/:pk     confirmed batting order`);
   console.log(`   /api/players/:id/stats  season stats + splits`);
-  console.log(`   /api/players/:id/gamelog recent pitching/hitting logs`);
   console.log(`   /api/umpires/:pk     home plate umpire`);
   console.log(`   /api/arsenal/:id     pitcher pitch mix (Baseball Savant)`);
-  console.log(`   /api/splits/:id      batter splits vs pitch type (Baseball Savant)`);
-  console.log(`   /api/bullpen/:id     bullpen fatigue + reliever list`);
-  console.log(`   /api/picks           local pick log CRUD`);
-  console.log(`   /api/notes/:gamePk   local game notes CRUD`);
-  console.log(`   /api/digest          7-day pick digest summary`);
-  console.log(`   /api/injuries        recent injured-list placements\n`);
+  console.log(`   /api/splits/:id      batter splits vs pitch type (Baseball Savant)\n`);
+  console.log(`   /api/auth/login     POST — login, returns JWT`);
+  console.log(`   /api/auth/me        GET  — current user (protected)`);
+  console.log(`   /api/picks          user-scoped pick log CRUD`);
+  console.log(`   /api/notes/:gamePk  user-scoped game notes`);
+  console.log(`   /api/digest         user-scoped 7-day pick digest\n`);
 });

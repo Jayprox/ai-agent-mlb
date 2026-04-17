@@ -202,19 +202,36 @@ const IS_STATS_SANDBOX = false; // flip to false to enable live MLB stats
 // set false when backend is running so Savant routes are active too.
 const IS_SAVANT_SANDBOX = IS_STATS_SANDBOX;
 
+// Module-level auth token — set by App on login/logout so every fetch auto-includes it
+let _authToken = null;
+
 const apiFetch = async (path) => {
-  const res = await fetch(`${API_BASE}${path}`);
+  const headers = {};
+  if (_authToken) headers["Authorization"] = `Bearer ${_authToken}`;
+  const res = await fetch(`${API_BASE}${path}`, { headers });
+  if (res.status === 401) {
+    _authToken = null;
+    window.dispatchEvent(new Event("propscout:unauthorized"));
+    throw new Error("Unauthorized");
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 };
 
 // POST / PATCH / DELETE helper (fire-and-forget safe)
 const apiMutate = async (path, method, body) => {
+  const headers = { "Content-Type": "application/json" };
+  if (_authToken) headers["Authorization"] = `Bearer ${_authToken}`;
   const res = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401) {
+    _authToken = null;
+    window.dispatchEvent(new Event("propscout:unauthorized"));
+    throw new Error("Unauthorized");
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 };
@@ -1194,6 +1211,21 @@ const DesktopWarning = () => (
 // MAIN APP
 // ─────────────────────────────────────────────
 export default function App() {
+  // ── Auth state ────────────────────────────────────────────────────────────
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem("propscout_token") || null);
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const t = localStorage.getItem("propscout_token");
+      if (!t) return null;
+      const payload = JSON.parse(atob(t.split(".")[1]));
+      return { userId: payload.userId, username: payload.username };
+    } catch { return null; }
+  });
+  const [loginUser,    setLoginUser]    = useState("");
+  const [loginPass,    setLoginPass]    = useState("");
+  const [loginError,   setLoginError]   = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+
   const [selectedId, setSelectedId] = useState(1);
   const [view, setView] = useState("slate"); // "slate" | "game" | "picks"
   const [picksFilter, setPicksFilter] = useState("all"); // "all" | "pending" | "hit" | "miss"
@@ -1306,6 +1338,49 @@ export default function App() {
       .then(d => setGameNotes(prev => ({ ...prev, [key]: d.note ?? "" })))
       .catch(() => setGameNotes(prev => ({ ...prev, [key]: "" })));
   }, [view, selectedId]);
+
+  // Keep module-level _authToken in sync with React state
+  useEffect(() => { _authToken = authToken; }, [authToken]);
+
+  // Listen for 401s dispatched by apiFetch/apiMutate — bounce to login
+  useEffect(() => {
+    const handler = () => {
+      localStorage.removeItem("propscout_token");
+      setAuthToken(null);
+      setCurrentUser(null);
+    };
+    window.addEventListener("propscout:unauthorized", handler);
+    return () => window.removeEventListener("propscout:unauthorized", handler);
+  }, []);
+
+  // ── Auth helpers ─────────────────────────────────────────────────────────
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    setLoginError("");
+    try {
+      const data = await apiMutate("/api/auth/login", "POST", { username: loginUser.trim(), password: loginPass });
+      _authToken = data.token;
+      localStorage.setItem("propscout_token", data.token);
+      setAuthToken(data.token);
+      setCurrentUser({ userId: data.userId, username: data.username });
+      setLoginPass("");
+    } catch (err) {
+      setLoginError(err.message === "Unauthorized" || err.message?.includes("401")
+        ? "Invalid username or password."
+        : "Connection error — is the server running?");
+    }
+    setLoginLoading(false);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("propscout_token");
+    _authToken = null;
+    setAuthToken(null);
+    setCurrentUser(null);
+    setPropLog([]);
+    setLiveDigest(null);
+  };
 
   // Fetch 7-day digest when Picks view opens (lazy — only if not already loaded)
   useEffect(() => {
@@ -2272,6 +2347,64 @@ export default function App() {
       setSyncMessage("✗ Failed");
     }
   };
+
+  // ── Login screen — shown before the app when not authenticated ─────────
+  if (!authToken) {
+    return (
+      <>
+        <style>{`* { box-sizing: border-box; margin: 0; padding: 0; } body { background: #0e0f1a; }`}</style>
+        <div style={{ background: "#0e0f1a", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, fontFamily: "monospace" }}>
+          <div style={{ width: "100%", maxWidth: 360 }}>
+            {/* Logo / branding */}
+            <div style={{ textAlign: "center", marginBottom: 28 }}>
+              <div style={{ fontSize: 28, marginBottom: 6 }}>⚾</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: "#f9fafb", letterSpacing: "0.05em" }}>PROP SCOUT</div>
+              <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4, textTransform: "uppercase", letterSpacing: "0.1em" }}>MLB Research</div>
+            </div>
+
+            {/* Login card */}
+            <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 12, padding: "24px 20px" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#9ca3af", marginBottom: 18, textTransform: "uppercase", letterSpacing: "0.08em" }}>Sign In</div>
+              <form onSubmit={handleLogin}>
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", marginBottom: 5, letterSpacing: "0.07em" }}>Username</div>
+                  <input
+                    type="text"
+                    value={loginUser}
+                    onChange={e => setLoginUser(e.target.value)}
+                    autoComplete="username"
+                    placeholder="username"
+                    style={{ width: "100%", background: "#0e0f1a", border: `1px solid ${loginError ? "rgba(239,68,68,0.5)" : "#2d3148"}`, borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#f9fafb", fontFamily: "monospace", outline: "none" }}
+                  />
+                </div>
+                <div style={{ marginBottom: 18 }}>
+                  <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", marginBottom: 5, letterSpacing: "0.07em" }}>Password</div>
+                  <input
+                    type="password"
+                    value={loginPass}
+                    onChange={e => setLoginPass(e.target.value)}
+                    autoComplete="current-password"
+                    placeholder="••••••••"
+                    style={{ width: "100%", background: "#0e0f1a", border: `1px solid ${loginError ? "rgba(239,68,68,0.5)" : "#2d3148"}`, borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#f9fafb", fontFamily: "monospace", outline: "none" }}
+                  />
+                </div>
+                {loginError && (
+                  <div style={{ fontSize: 10, color: "#ef4444", marginBottom: 14, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 6, padding: "7px 10px" }}>{loginError}</div>
+                )}
+                <button
+                  type="submit"
+                  disabled={loginLoading || !loginUser || !loginPass}
+                  style={{ width: "100%", background: loginLoading || !loginUser || !loginPass ? "#1e2030" : "#22c55e", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 12, fontWeight: 800, color: loginLoading || !loginUser || !loginPass ? "#4b5563" : "#000", fontFamily: "monospace", cursor: loginLoading || !loginUser || !loginPass ? "default" : "pointer", textTransform: "uppercase", letterSpacing: "0.08em", transition: "background 0.15s" }}
+                >
+                  {loginLoading ? "Signing in…" : "Sign In"}
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -3865,23 +3998,38 @@ export default function App() {
         })()}
 
         {/* Footer */}
-        <div style={{ fontSize: 10, color: "#374151", textAlign: "center", marginTop: 10, lineHeight: 1.8 }}>
-          {(() => {
-            const allMock  = IS_SANDBOX && IS_ODDS_SANDBOX && IS_STATS_SANDBOX;
-            const allLive  = !IS_SANDBOX && !IS_ODDS_SANDBOX && !IS_STATS_SANDBOX;
-            if (allMock)  return "⚠ Demo mode — all mock data · Flip IS_SANDBOX / IS_ODDS_SANDBOX / IS_STATS_SANDBOX to go live";
-            if (allLive)  return "⚡ Full live mode — weather · odds · MLB stats · Savant arsenal & splits";
-            const parts = [];
-            if (!IS_SANDBOX)        parts.push("Weather: LIVE");
-            if (!IS_ODDS_SANDBOX)   parts.push("Odds: LIVE");
-            if (!IS_STATS_SANDBOX)  parts.push("MLB Stats: LIVE");
-            if (!IS_SAVANT_SANDBOX) parts.push("Savant: LIVE");
-            if (IS_SANDBOX)         parts.push("Weather: demo");
-            if (IS_ODDS_SANDBOX)    parts.push("Odds: demo");
-            if (IS_STATS_SANDBOX)   parts.push("Stats: demo");
-            if (IS_SAVANT_SANDBOX)  parts.push("Savant: demo");
-            return `⚡ ${parts.join(" · ")}`;
-          })()}
+        <div style={{ marginTop: 10 }}>
+          {/* User row */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <div style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace" }}>
+              👤 <span style={{ color: "#6b7280" }}>{currentUser?.username ?? "—"}</span>
+            </div>
+            <button
+              onClick={handleLogout}
+              style={{ background: "none", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 9px", fontSize: 9, color: "#6b7280", fontFamily: "monospace", cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.06em" }}
+            >
+              Sign Out
+            </button>
+          </div>
+          {/* Data source line */}
+          <div style={{ fontSize: 10, color: "#374151", textAlign: "center", lineHeight: 1.8 }}>
+            {(() => {
+              const allMock  = IS_SANDBOX && IS_ODDS_SANDBOX && IS_STATS_SANDBOX;
+              const allLive  = !IS_SANDBOX && !IS_ODDS_SANDBOX && !IS_STATS_SANDBOX;
+              if (allMock)  return "⚠ Demo mode — all mock data · Flip IS_SANDBOX / IS_ODDS_SANDBOX / IS_STATS_SANDBOX to go live";
+              if (allLive)  return "⚡ Full live mode — weather · odds · MLB stats · Savant arsenal & splits";
+              const parts = [];
+              if (!IS_SANDBOX)        parts.push("Weather: LIVE");
+              if (!IS_ODDS_SANDBOX)   parts.push("Odds: LIVE");
+              if (!IS_STATS_SANDBOX)  parts.push("MLB Stats: LIVE");
+              if (!IS_SAVANT_SANDBOX) parts.push("Savant: LIVE");
+              if (IS_SANDBOX)         parts.push("Weather: demo");
+              if (IS_ODDS_SANDBOX)    parts.push("Odds: demo");
+              if (IS_STATS_SANDBOX)   parts.push("Stats: demo");
+              if (IS_SAVANT_SANDBOX)  parts.push("Savant: demo");
+              return `⚡ ${parts.join(" · ")}`;
+            })()}
+          </div>
         </div>
       </div>
     </>

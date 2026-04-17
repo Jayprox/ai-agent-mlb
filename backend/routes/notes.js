@@ -1,6 +1,7 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const requireAuth = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -16,9 +17,13 @@ function ensureStore() {
 
 function readStore() {
   ensureStore();
-  const raw = fs.readFileSync(NOTES_FILE, "utf8");
-  const parsed = JSON.parse(raw);
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  try {
+    const raw = fs.readFileSync(NOTES_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_err) {
+    return {};
+  }
 }
 
 function writeStore(store) {
@@ -26,11 +31,14 @@ function writeStore(store) {
   fs.writeFileSync(NOTES_FILE, JSON.stringify(store, null, 2));
 }
 
+router.use(requireAuth);
+
 router.get("/:gamePk", (req, res) => {
   try {
     const store = readStore();
     const { gamePk } = req.params;
-    return res.json({ gamePk, note: store[gamePk] ?? "" });
+    const storeKey = `${req.userId}:${gamePk}`;
+    return res.json({ gamePk, note: store[storeKey] ?? "" });
   } catch (err) {
     return res.status(500).json({ error: "Failed to read notes", detail: err.message });
   }
@@ -40,13 +48,11 @@ router.post("/:gamePk", (req, res) => {
   try {
     const store = readStore();
     const { gamePk } = req.params;
+    const storeKey = `${req.userId}:${gamePk}`;
     const note = String(req.body?.note ?? "").trim().slice(0, 500);
 
-    if (note === "") {
-      delete store[gamePk];
-    } else {
-      store[gamePk] = note;
-    }
+    if (note === "") delete store[storeKey];
+    else store[storeKey] = note;
 
     writeStore(store);
     return res.json({ gamePk, note });

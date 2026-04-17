@@ -130,7 +130,7 @@ ai-agent-mlb/
 | Odds | The Odds API | Key in `.env`. `IS_ODDS_SANDBOX = false` to enable |
 | MLB Stats | MLB Stats API (statsapi.mlb.com) | Free, no key. CORS-blocked from browser → backend proxy |
 | Backend | Node/Express on port 3001 | 4 routes, TTL cache, open CORS |
-| Arsenal/Splits | Baseball Savant Statcast CSV | ✅ Live. CSV-only strategy (JSON endpoint removed — returned 404). BOM-safe parser, `player_id` param, year-1 fallback. |
+| Arsenal | Baseball Savant/Statcast | Pending — CSV-based, lowest urgency |
 | Database | PostgreSQL | Planned, not started |
 
 ---
@@ -263,99 +263,18 @@ The mock SLATE array is always present as a fallback scaffold. Live data overlay
 
 ---
 
-## Feature Backlog (Prioritized by Impact)
+## Future Enhancements (Logged, Not Started)
 
-Items are ordered highest-to-lowest impact. Revisit priority at the start of each session. ✅ = done, 🔧 = in progress / queued for Codex, 📋 = not started.
-
----
-
-### 🔥 Tier 1 — High Impact (core betting research value)
-
-**✅ Trends Full UI** — Done. Structured `propType` field, per-player accuracy, pitcher K splits, park K splits. `typeGroups` K/Hits/TB/HR/Other, `getPropType` regex fallback.
-
-**✅ Bullpen dedicated tab** — Done Session 19. 6th tab, quick-glance grade/fatigue summary + full BullpenCards. Removed from Intel tab.
-
-**✅ Injury flags** — Done (Codex Session 16). `liveInjuries` state, `injuredIds` Set, `⚠ IL` chip on lineup batter rows.
-
-**✅ localStorage → backend pick migration** — Done (Codex Session 16). "☁ Sync to server" button in Picks view, `syncStatus` state, upsert-by-id on backend POST.
-
-**✅ NRFI as loggable prop** — Done Session 18. ＋ button on Intel NRFI card, `propType: "NRFI"`, green ✓ when logged, keyed by gamePk + propType.
-
-**✅ Pitcher recent form trend** — Done (Session 20 Codex + CW). `liveGameLog` state, `last3EraSummary()` helper, recent starts chips + "Last 3 ERA vs season ERA" row in Overview tab.
-
-**✅ Batter hot/cold streak badge** — Done (Session 20 Codex + CW). `liveHittingLog` state, ▲ HOT / ▼ COLD `streakTone` chip on lineup batter rows.
-
-**✅ Career vs pitcher (batter H2H)** — Done. Frontend: `liveH2H` state, lazy-fetch in `onBatterExpand`, display row in batter drawer (AVG/HR/K/OBP), wired into Hits prop engine (±4/8 when atBats ≥ 10). Backend: `GET /api/players/:batterId/vs/:pitcherId` (Codex).
-
----
-
-### ⚡ Tier 2 — Medium Impact (meaningful upgrades)
-
-**✅ HR props** — Done this session. HR O/U 0.5 as 4th prop type. Park HR factor, wind, temp, SLG vs arsenal, pitcher WHIP. Score 38–72. `propType: "HR"` added to `isBatterProp`, `typeGroups`, `getPropType` regex, and Trends Full batterPicks filter.
-
-**✅ Confidence calibration in Trends** — Done. Insight row below "By Confidence" tier cards. Shows "✅ Calibrated", "⚠️ Not predictive", or "📊 Unclear" based on whether High picks outperform Mid/Low. Gated by ≥2 tiers with ≥3 picks each.
-
-**✅ Pitch velocity trend** — Done. Backend (Codex): `prevVelo` added to each arsenal pitch object in `arsenal.js` (separate 24h-cached prev-season Savant fetch, key `arsenal:${pitcherId}:prev`). Frontend: ▲/▼ YoY chip on each pitch card subtitle (green up, amber/red down, hidden if delta < 0.4 mph). K prop Factor 6: primary fastball veloDelta — ≤−1.5 mph → −4/−0.3K, ≤−0.8 → −2, ≥+0.8 → +3/+0.2K.
-
-**✅ First 5 Innings O/U prop** — Done. Game-level prop (no batter pin required). Fires alongside the K prop on any open game. `propType: "F5"`, added to `typeGroups` and `getPropType` regex. Engine: 5 factors — combined SP ERA, combined K/9, park hit factor, weather (temp + wind), NRFI lean. Score capped 35–72. Label shows actual F5 line when available from Odds API (`totals_h1` market added to `markets=h2h,totals,totals_h1` — gracefully falls back to "F5 O/U" if market not available). `f5Total` field added to `extractBook` and stored in `liveOddsMap`.
-
-**✅ Color-coded slate card borders** — Done. Left 3px accent: green = NRFI conf ≥62 + solid prop lean, red = YRFI lean, amber = moderate NRFI, grey = no clear read. Selected card always green. Derived from `game.nrfi` + `game.props[0]`.
-
-**✅ Yesterday's picks reminder banner** — Done. Amber banner above slate when `propLog` has entries with no result and timestamp >12h ago. Shows count, taps to Picks view.
-
-**✅ RBI props** — Done. Backend (Codex Session 24): `GET /api/players/:batterId/rbi-context` returns `{ rbiPerGame, rbiRate, slg, extraBaseHits }`, 6h cache. Frontend (CW): `liveRbiCtx` state (keyed by batterId), lazy-fetch in `onBatterExpand` alongside H2H. Prop engine: 5 factors — career rbiPerGame (primary), batting order position (cleanup 3–5 = +6, leadoff = −5), career XBH power proxy, pitcher WHIP, cold weather. Score 38–70. `propType: "RBI"` added to `isBatterProp`, `typeGroups`, `getPropType`, `batterPicks` Trends filter.
-
----
-
-### 🎨 Tier 3 — Polish & Workflow
-
-**📋 Quick-log from slate** — Long-press or secondary button on slate card surfaces the top prop lean for quick-add without opening the full game card. Workflow shortcut for experienced users who already know the matchup.
-
-**✅ Game notes** — Done. `gameNotes` state (keyed by gamePk), lazy-fetch on game open via `GET /api/notes/:gamePk`, `saveNote()` helper calls `POST` on textarea blur. "saving…" / "✓ saved" indicator. Disabled until fetched. Intel tab, bottom of page.
-
-**✅ Sparklines on pitcher card** — Done. ERA bar chart for last 5 starts (oldest→newest, left→right) above the ER chips. Bar height scaled to ERA (0–9 range), color-coded green/amber/red. Most recent start gets a dot indicator. Gated on `recentStarts.length >= 2`, uses existing `liveGameLog` data.
-
-**✅ Parlay builder** — Done. `🔗` toggle on each prop card adds it to a parlay (max 3 legs). Parlay slip card appears at top of Props tab when ≥1 leg selected. Math: `raw = legs.reduce((acc, p) => acc * (p.confidence/100), 1)` then `* 0.92^(n-1)` correlation discount. Copy button formats a multi-line slip: "🔗 N-Leg Parlay · X% confidence\n  1. Label — LEAN (XX%)\n  ...\nAWAY @ HOME". `parlayLabels` state (array, max 3), `parlaySlipCopied` state for 2-second feedback. Both reset on `openGame`.
-
-**✅ Share a pick** — Done. `⎘` copy button on each pick card (next to delete). Formats "Label · LEAN · XX% confidence · AWAY @ HOME [result]". Clipboard API, 2-second "✓" feedback via `copiedPickId` state.
-
-**📋 Full desktop layout** — Currently shows a warning screen over 520px. Responsive two-column layout is future work. Low priority — app is designed for mobile-first research.
-
----
-
-### 🏗️ Tier 4 — Infrastructure & Platform
-
-**📋 Prediction market odds (Kalshi / Polymarket)** — OddsPapi (oddspapi.io) aggregates Kalshi + Polymarket + sportsbooks in one normalized response. Would add a prediction market row to the multi-book odds table. Requires new API key + backend route.
-
-**✅ Daily digest** — Done. Backend (Codex): `GET /api/digest` (7-day graded summary), `POST /api/digest/refresh` (cache bust). Frontend (CW): collapsible "📅 7-Day Digest" card in Picks view, sits between Trends and filter buttons. Shows graded/hits/misses, accuracy bar, best hit + worst miss cards, per-type chips. `liveDigest`, `digestLoading`, `showDigest` states. Lazy-fetch on `view === "picks"`. Auto-invalidates (`setLiveDigest(null)` + `/api/digest/refresh`) after `logPick` and `markResult`.
-
-**📋 PostgreSQL** — Replace `picks.json` flat file with proper DB. Pre-aggregated splits, arsenal snapshots, historical logs, park factors, umpire history. Worth doing once pick volume makes JSON unwieldy (rough threshold: ~500 picks).
-
-**📋 Multi-sport** — The architecture (mock/live overlay, prop engine, pick tracker) is largely sport-agnostic. NBA player props in October would reuse most of the stack. Worth keeping in mind as a future milestone.
-
----
-
-### ✅ Completed
-
-- Park factors (Session 6)
-- Prop result tracker / Picks view (Session 7)
-- Both pitchers on Overview tab (Session 8)
-- Both pitchers on Arsenal tab (Session 8)
-- UI consistency fixes — pinned batter flow (Sessions 9–11)
-- Trends Lite analytics (Session 12)
-- `/api/picks` backend route (Session 13, verified Session 14)
-- Frontend wired to `/api/picks` — Option A backend-first (Session 15)
-- Injury flags + localStorage sync button (Codex Session 16)
-- Baseball Savant arsenal + batter splits (earlier sessions)
-- Prop engine — K / Hits / TB props (earlier sessions)
-- NRFI as loggable prop (Session 18)
-- Bullpen dedicated tab (Session 19)
-- Pitcher recent form trend + batter HOT/COLD badges (Session 20)
-- Trends Full UI — per-player, per-pitcher, per-park (CW)
-- HR props — 4th prop type (CW)
-- Career H2H batter vs pitcher — full stack (CW + Codex)
-- Live bullpen data (Session 5)
-- Live NRFI computation (Session 5)
+- **Prediction market odds (Kalshi / Polymarket)** — The Odds API does not cover prediction markets. OddsPapi (oddspapi.io) aggregates Kalshi + Polymarket + sportsbooks in one normalized response. Could add a prediction market row to the multi-book odds table.
+- **Baseball Savant arsenal feed** — ✅ DONE. Backend routes `/api/arsenal/:pitcherId` and `/api/splits/:batterId` fetch from Savant's Statcast search CSV. Arsenal overlays into pitcher object on game open. Batter splits fetched lazily when lineup drawer opens. `good`/`note` auto-computed from live stats. Column names logged on first fetch for debugging.
+- **Prop engine** — Once arsenal data lands, generate prop confidence scores from pitcher matchup data, park factors, weather, umpire zone.
+- **Trends layer** — Prop hit rate on specific lines (e.g. Judge OVER 1.5 TB last 10 games), pitcher K prop home vs away hit rate, NRFI streaks
+- **Injury flags** — Manual flag system to mark players questionable/out
+- **Park factors** — HR factor, hit factor, K factor per stadium integrated into game card
+- **Prop tracker** — Log picks, track hit rate over time
+- **Full desktop layout** — Currently shows warning screen over 520px; responsive layout is future enhancement
+- **Bullpen dedicated tab** — Currently in Intel tab; full dedicated tab discussed
+- **PostgreSQL** — Pre-aggregated splits, arsenal snapshots, historical logs, park factors, umpire history
 
 ---
 
@@ -375,2497 +294,391 @@ Items are ordered highest-to-lowest impact. Revisit priority at the start of eac
 
 ## Baseball Savant Integration Notes
 
-### Strategy: Statcast CSV (CSV-only)
+### Strategy: JSON first, CSV fallback
+Both `arsenal.js` and `splits.js` use a two-strategy approach:
+1. **Primary (Strategy 1):** `https://baseballsavant.mlb.com/player-services/arsenal-scores?playerId={id}&year={year}&type=pitcher|batter` — Savant's internal JSON API. Lightweight, fast, 10s timeout. Browser-like headers required.
+2. **Fallback (Strategy 2):** `https://baseballsavant.mlb.com/statcast_search/csv?...` — Raw Statcast CSV. The route aggregates it by pitch type. 15s timeout. **Warning:** this endpoint has been observed hanging for server-side requests without proper headers — Strategy 1 was added specifically to avoid this.
 
-Both `arsenal.js` and `splits.js` use `https://baseballsavant.mlb.com/statcast_search/csv` as the sole data source. The `player-services/arsenal-scores` JSON endpoint was removed after it began returning 404.
-
-Key CSV request params that were required to make it work:
-- `player_id=<id>` — required by Savant's current export flow (was missing in original implementation)
-- `group_by=pitch-type` — matches Savant's live site export behavior
-- `type=details` — raw pitch-level rows (aggregated manually by the route)
-- 15s timeout + browser-like `SAVANT_HEADERS`
-
-If the current season returns no usable rows (common early April), the route automatically retries with `year - 1`.
-
-If both years fail, route returns `502`. 6-hour cache via `cache.js`.
+If both fail, route returns `502`. 6-hour cache via `cache.js`.
 
 ### How Arsenal Fetch Works
 1. When a game card opens, `useEffect` fires and calls `GET /api/arsenal/:pitcherId`
-2. Backend fetches Statcast CSV (pitcher perspective), BOM-stripped, parsed row-by-row
-3. Aggregated by `pitch_type`: counts pitches, swings, whiffs, AB outcomes per type
-4. Filtered to pitches with `>= 10` instances, shaped to `{ abbr, type, pct, velo, whiffPct, ba, slg, color }`
-5. Cached 6 hours. Response includes `season` and `source` fields (`statcast_csv` or `statcast_csv_prev_season`)
-6. Frontend stores in `pitcherArsenal[pitcherId]`, overlays into `game.pitcher.arsenal`
-7. `pitcher.arsenalLive = true` triggers **SAVANT LIVE** badge in Arsenal tab
+2. Backend tries `arsenal-scores` JSON first (Strategy 1), CSV fallback (Strategy 2)
+3. Result shaped to `{ abbr, type, pct, velo, whiffPct, ba, slg, color }` per pitch
+4. Cached 6 hours. State stored in `pitcherArsenal[pitcherId]`
+5. Arsenal overlaid into `game.pitcher.arsenal` via the existing overlay pattern
+6. `pitcher.arsenalLive = true` when real data is present
 
 Backend log pattern when working:
 ```
-→ Savant CSV  https://baseballsavant.mlb.com/statcast_search/csv?...
-✓ Savant CSV  pitcherId=554430 rows=312 cols=pitch_type|release_speed|...
-✓ Arsenal cached  pitcherId=554430 source=statcast_csv season=2026 pitches=5
+→ Savant arsenal-scores  https://baseballsavant.mlb.com/player-services/arsenal-scores?playerId=701542&year=2026&type=pitcher
+✓ Savant arsenal-scores  pitcherId=701542 rows=5 fields=pitch_type|pitch_percent|...
+✓ Arsenal cached  pitcherId=701542 source=arsenal_scores_json pitches=5
 ```
 
-If current year is empty: `· Savant CSV returned no usable rows  pitcherId=554430 year=2026` then retries with `year=2025`.
+If Strategy 1 fails: `⚠ arsenal-scores failed: ...` then CSV attempt logged.
+If both fail: `✗ CSV fallback also failed: ...` and 502 returned.
 
 ### How Batter Splits Work
 1. When a lineup batter drawer is expanded, `onBatterExpand` fires
-2. Calls `GET /api/splits/:batterId` (same CSV approach, `player_type=batter`)
+2. Calls `GET /api/splits/:batterId`
 3. Returns `{ splits: { FF: { avg, whiff, slg, pitches }, SL: {...}, ... } }`
-   - `avg` formatted as `".285"` (dot-prefixed string)
-   - `whiff` formatted as `"25%"` (percent string)
-   - `slg` formatted as `".450"` (dot-prefixed string)
-4. Frontend stores in `batterSplits[batterId]`
-5. `augmentBatter(b)` merges splits into `b.vsPitches`, computes `good`/`note` fields
-6. `calcMatchupScore` uses `parseFloat()` on all values — handles both formats correctly
+4. Stored in `batterSplits[batterId]`
+5. `augmentBatter(b)` merges splits into `b.vsPitches` + adds computed `good`/`note` fields
+6. `calcMatchupScore` works with the enriched data automatically
 
 ### `computeGood(avg, whiff)` helper
 Since live Savant data has no pre-computed `good` field, `computeGood` derives it:
-- `avg >= .280 && whiff < 25` → `true` ("HANDLES")
-- `avg <= .215 || whiff >= 35` → `false` ("WEAK SPOT")
-- else → `null` ("NEUTRAL")
-
-Whiff thresholds are in **percent units** (25 = 25%), not decimal. `parseFloat("25%")` = 25, which is what the engine expects.
+- `avg >= .270 && whiff <= 0.22` → `"handles"`
+- `avg <= .230 || whiff >= 0.30` → `"weakspot"`
+- else → `"neutral"`
 
 ### Known Limitation
-Batter splits in the Arsenal tab (Featured Batter) still use mock `vsPitches` from SLATE data — the featured batter doesn't have a live MLB ID until player selection logic is built. Lineup Tab batters get live splits when their drawer is opened.
+Batter splits in the Arsenal tab (Featured Batter) still use mock `vsPitches` from SLATE data, since the featured batter doesn't have a live MLB ID until player selection logic is built. Lineup Tab batters get live splits when their drawer is opened.
 
 ### SAVANT_HEADERS (required on all Savant requests)
 ```js
 {
-  "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept":           "application/json, text/javascript, */*; q=0.01",
-  "Accept-Language":  "en-US,en;q=0.9",
-  "Referer":          "https://baseballsavant.mlb.com/",
-  "X-Requested-With": "XMLHttpRequest"
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Referer': 'https://baseballsavant.mlb.com/',
+  'X-Requested-With': 'XMLHttpRequest'
 }
 ```
 
 ---
 
----
+## 🔴 Current Debug State (April 13 2026 — start here next session)
 
-## Prop Engine Notes
+The Baseball Savant integration was just deployed. The fix to use the JSON `arsenal-scores` endpoint (instead of the hanging CSV) was written but **not yet confirmed working** by the user.
 
-### Architecture
-The prop engine is a synchronous IIFE inside the App component body (not a separate hook or file). It runs on every render — it's fast and pure, no async. Wrapped in try/catch so errors fall back to `mockProps` gracefully.
+### What the user needs to do:
+1. Restart backend: `cd ai-agent-mlb/backend && npm start`
+2. Open a game card in the Arsenal tab
+3. Paste the backend terminal output into the chat
 
-```js
-const liveProps = (() => {
-  try {
-    // ... compute props ...
-    return out;
-  } catch (e) { console.error("Prop engine error:", e); return []; }
-})();
-const displayProps = liveProps.length > 0 ? liveProps : mockProps;
-```
+### What to look for:
+- **If working:** Arsenal tab shows **SAVANT LIVE** badge and real pitch mix
+- **If still failing:** Backend console will show `⚠ arsenal-scores failed:` or `✗ CSV fallback also failed:` with the actual error message
 
-`mockProps` is destructured from the game object (`props: mockProps`). In sandbox mode `liveProps` is always `[]`, so mock SLATE props show. In live mode, real props replace mock ones.
-
-### Four Prop Types
-
-**1. Pitcher K O/U**
-- `baseK`: uses `pitcher.avgK` if valid, else derives from `(kPer9 / 9) * avgIP` (defaults avgIP to 5.5)
-- Line: `Math.ceil(baseK) - 0.5` (e.g. 6.2 → 6.5, 8.7 → 8.5)
-- Factors (each ±points to score, ±K to projected total):
-  - Arsenal weighted whiff% vs 26% league avg
-  - Umpire kRate vs 22.5% league avg
-  - Weather temp (cold boosts K, hot reduces)
-  - Lineup avg whiff% vs top 3 pitches (requires 3+ batters with splits loaded)
-- Fastball velo trend YoY (≤−1.5 mph → −4, ≤−0.8 → −2, ≥+0.8 → +3; needs `arsenalLive` + `prevVelo`)
-- Score capped 28–82
-
-**2. Batter Hits O/U 0.5**
-- Base: binomial probability `1 - (1 - AVG)^4` → scaled to confidence
-- Adjustments: `calcMatchupScore` result, recent form (only if `hitRate` is an array — featured batter uses string format, so this factor is skipped)
-- Weather: cold temp penalty
-- Score capped 28–82
-
-**3. Batter TB O/U 1.5**
-- Base: OPS scaled from 0.600 floor to 1.100 ceiling
-- Adjustments: wind/park HR factor, batter SLG vs top 3 arsenal pitches
-- Score capped 28–78
-
-**4. Batter HR O/U 0.5** *(added this session)*
-- Base: 45 (default UNDER — HRs are rare events, ~1-in-12 PA)
-- Factor 1: `PARK_FACTORS.hr` — ≥115 → +8, ≥108 → +4, ≤85 → -6, ≤93 → -3
-- Factor 2: Wind out (hrFavorable) → +8; wind string contains "in" → -5 (outdoor only)
-- Factor 3: Cold temp — <50°F → -4, <58°F → -2 (outdoor only)
-- Factor 4: Batter SLG vs top-3 arsenal pitches — avgSlg >0.500 → +6, <0.300 → -5
-- Factor 5: Pitcher WHIP — >1.40 → +4 (hittable), <1.10 → -3 (stingy)
-- Score capped 38–72
-- `propType: "HR"`, logged as batter prop (isBatterProp = true), hydrated with playerName/playerId
-
-### Career H2H (batter vs pitcher)
-- **State:** `liveH2H` — keyed by `${batterId}_${pitcherId}`
-- **Fetch:** Lazy in `onBatterExpand`, calls `GET /api/players/:batterId/vs/:pitcherId`. Silent `catch` — if backend not yet deployed, nothing breaks.
-- **Display:** Compact row in batter drawer between season stats and "vs Arsenal" section. Shows AVG (color-coded), hits/AB, HR, K, OBP. "small sample" tag when atBats < 20, "No H2H history" when atBats = 0.
-- **Prop engine:** Hits prop uses H2H avg when atBats ≥ 10 as an additional factor (±4/8 points). ≥.320 → +8, ≥.270 → +4, ≤.210 → -4, ≤.170 → -8.
-- **Backend:** `GET /api/players/:batterId/vs/:pitcherId` — Codex task. MLB `vsPlayer` career splits endpoint. 24-hour cache.
-
-### Known Limitation
-The featured batter (`game.batter`) is still the mock SLATE[0] batter (Aaron Judge). Player selection logic not yet built. Batter props use real pitcher data (arsenal, matchup score) but mock batter stats.
-
-### `hitRate` Format Gotcha
-Lineup batters use `hitRate: [1,0,1,1,...]` (array). Featured batter uses `hitRate: "7/10"` (string). Prop engine guards: `Array.isArray(batter.hitRate)` before using array methods.
+### Most likely failure modes at this point:
+- **HTTP 429 / 403** — Savant rate-limiting the server IP. Fix: add retry-after delay or try different headers.
+- **JSON shape mismatch** — `arsenal-scores` returned a shape the parser didn't expect. Fix: log `res.data` raw and adjust the mapper.
+- **Empty rows (rows=0)** — Pitcher has too few appearances in current season. Fix: try prior year as fallback (`year - 1`).
+- **ECONNREFUSED / timeout** — Network issue. Check if Savant is reachable from the server machine.
 
 ---
 
-## ✅ Fixes Applied — April 13 2026 (Session 3)
-
-### 1. Lineup Empty State Added
-**Was:** Batter rows rendered nothing when `lineup = []` (pre-game or unconfirmed). Vulnerability card and legend still showed, but the batter list was a blank card — no user-facing message.
-
-**Fix (prop-scout-v7.jsx):** Added a ternary guard around the batter `.map()`. When `lineup.length === 0`, renders a centered "📋 Lineups Not Yet Posted / Check back closer to first pitch." state instead of mapping nothing.
-
-**Root cause context:** `lineups.js` uses the boxscore endpoint. Pre-game, the MLB API does not populate `battingOrder`, so `confirmed = false`. Frontend falls back to `baseGame.lineups = { away: [], home: [] }` from `buildLiveGame`. Empty state now handles this gracefully.
-
-### 2. `schedule.js` `id` Field Added
-**Was:** `backend/routes/schedule.js` returned each game with `gamePk` but no `id`. Frontend's `activeSlate.find(g => g.id === selectedId)` would always fall back to `activeSlate[0]` for live games.
-
-**Fix (backend/routes/schedule.js):** Added `id: g.gamePk` alongside `gamePk` in the transformed game object. Now the frontend `find()` matches correctly without relying on `buildLiveGame`'s own `id` assignment.
-
-### 3. Odds API Key Persistence (Documented Fix)
-**Symptom:** Error persists after updating `.env`.
-
-**Fix:** Vite bakes `VITE_*` env vars at startup. After any `.env` change you **must** fully restart both servers (Ctrl+C on both, then restart), then hard-refresh the browser (Cmd+Shift+R). No code change needed — just a restart workflow issue.
+*Updated April 2026 — Prop Scout v7 (full live mode: weather + odds + MLB stats + Baseball Savant arsenal & splits)*
 
 ---
 
-## ✅ Lineup Fix Confirmed Working
-Empty state renders correctly when lineups are pending, and live batter rows populate once `confirmed = true`. No further action needed.
+## 🔧 Session 25 — JWT Auth + User-Scoped Picks / Notes / Digest (Backend Only)
 
----
+Built the backend authentication and private data layer on top of the `Finalized MVP version` baseline on `main`.
 
-## 🔴 Codex Task — Game Notes Backend Route
+This is **backend done / frontend pending CW**.
 
-### `GET /api/notes/:gamePk` and `POST /api/notes/:gamePk`
+### Summary
 
-**What it does:** Persists free-text notes per game (keyed by `gamePk`). Used by the frontend Game Notes feature in the Intel tab.
+Added simple JWT-based auth for a fixed set of 10 pre-created accounts, then scoped all personal data routes by `userId`:
 
-**File to create:** `backend/routes/notes.js` — follow the exact same pattern as `backend/routes/picks.js` (synchronous flat-file JSON store).
+- `POST /api/auth/login`
+- `GET /api/auth/me`
+- `GET/POST/PATCH/DELETE /api/picks`
+- `GET/POST /api/notes/:gamePk`
+- `GET /api/digest`
+- `POST /api/digest/refresh`
 
-**Data store:** `backend/data/notes.json` — a flat JSON object keyed by `gamePk`:
+Public MLB reference routes remain unauthenticated:
+- schedule
+- lineups
+- players
+- umpires
+- arsenal
+- splits
+
+### New dependencies
+
+Added to `backend/package.json`:
+
+- `jsonwebtoken`
+- `bcrypt`
+
+Installed successfully in `backend/`.
+
+### User store
+
+Created:
+
+- `backend/data/users.json`
+
+Seeded with the 10 fixed user slots:
+
 ```json
-{
-  "717465": "Wheeler velocity looked down in warmups. Monitor.",
-  "717502": "Rain delay likely — check weather closer to first pitch."
-}
+[
+  { "id": "user1", "username": "user1", "passwordHash": "" },
+  ...
+  { "id": "user10", "username": "user10", "passwordHash": "" }
+]
 ```
 
-**Routes to implement:**
+Also created empty local stores:
 
-`GET /api/notes/:gamePk`
-- Read `notes.json`, return `{ gamePk, note: notes[gamePk] ?? "" }`
-- If file doesn't exist yet, return `{ gamePk, note: "" }` (don't 404)
-
-`POST /api/notes/:gamePk`
-- Body: `{ note: "string" }` — max 500 chars, trim whitespace
-- Write/overwrite `notes[gamePk]` in `notes.json`
-- Return `{ gamePk, note }` confirming what was saved
-- If `note` is empty string, delete the key from the object (keep file clean)
-
-**Register in `backend/server.js`:**
-```js
-const notesRouter = require('./routes/notes');
-app.use('/api/notes', notesRouter);
-```
-
-**Error handling:** Same pattern as `picks.js` — synchronous `fs.readFileSync`/`fs.writeFileSync`, wrapped in try/catch returning 500 on failure. Create `backend/data/` directory and `notes.json` if they don't exist (`ensureStore()` pattern).
-
-**No cache needed** — notes are user-written, always read fresh.
-
----
-
-## 🔴 Codex Task — Pitch Velocity Trend (`prevVelo`)
-
-### Add `prevVelo` field to `backend/routes/arsenal.js`
-
-**Goal:** For each pitch type in the arsenal response, return `prevVelo` (prior-season avg velocity) so the frontend can show year-over-year velo delta (e.g. "FF −1.2 mph").
-
-**How to implement:**
-
-After the current-season arsenal is built, fire a second Savant CSV fetch for `year - 1` (best effort — don't fail the request if this errors). Use the same `SAVANT_HEADERS`, BOM-stripping, CSV parsing, and same params (`player_id`, `player_type=pitcher`, `group_by=pitch-type`, `type=details`) but with `year=${currentYear - 1}`.
-
-Build a `prevVeloMap` keyed by `pitch_type` abbr (e.g. `{ FF: 94.2, SL: 87.1 }`): average of all `release_speed` values for that pitch_type in the prior-season rows.
-
-For each pitch object in the current-season array, add `prevVelo: prevVeloMap[abbr] ?? null`. If prior-season fetch fails or has no rows, `prevVelo` is `null` — no error thrown.
-
-**Cache:** separate key `arsenal:${pitcherId}:prev`, 24-hour TTL (prior season is stable). Current-season cache key + 6-hour TTL unchanged.
-
-**No envelope changes** — just add `prevVelo: <number|null>` to each pitch object:
-```json
-{ "abbr": "FF", "velo": 93.1, "prevVelo": 94.3, ... }
-```
-
-**Do not touch** the existing current→prev-year retry fallback logic — that is separate.
-
----
-
-## 🔴 Codex Task — Career H2H Backend Route
-
-### `GET /api/players/:batterId/vs/:pitcherId`
-
-**What it does:** Returns a batter's career stats against a specific pitcher using the MLB Stats API `vsPlayer` endpoint.
-
-**MLB endpoint to call:**
-```
-https://statsapi.mlb.com/api/v1/people/{batterId}/stats?stats=vsPlayer&opposingPlayerId={pitcherId}&group=hitting
-```
-
-**Response shape to return (normalize from MLB response):**
-```json
-{
-  "batterId": "592450",
-  "pitcherId": "477132",
-  "atBats": 18,
-  "hits": 5,
-  "avg": ".278",
-  "homeRuns": 1,
-  "strikeOuts": 4,
-  "obp": ".350",
-  "slg": ".444",
-  "season": "career"
-}
-```
-
-**If no splits found or atBats = 0**, return `{ "atBats": 0 }` — NOT a 404. The frontend handles zero-AB gracefully.
-
-**Cache:** 24 hours (career stats don't change intra-day). Use the existing `cache.js` pattern with key `h2h:${batterId}:${pitcherId}`.
-
-**Where to add:** Create `backend/routes/players.js` already exists — add the new route there as:
-```js
-router.get('/:batterId/vs/:pitcherId', async (req, res) => { ... });
-```
-Place it before the existing catch-all or wildcard routes.
-
-**Error handling:** If the MLB API call fails or returns an unexpected shape, return `{ "atBats": 0 }` (not a 500) so the frontend degrades silently.
-
-**How the data path works in the MLB response:**
-```js
-const splits = data?.stats?.[0]?.splits;
-if (!splits || splits.length === 0) return res.json({ atBats: 0 });
-const s = splits[0].stat;
-// s.atBats, s.hits, s.avg, s.homeRuns, s.strikeOuts, s.obp, s.slg
-```
-
----
-
-## 🔴 Still Open — Hand Off to Codex
-
-### Odds API Key Error Persisting
-**Symptom:** `Odds API error: Error: API key is missing` appears in the browser console even after updating `.env` with a valid `VITE_ODDS_API_KEY`.
-
-**What's known:**
-- Vite bakes `VITE_*` env vars at startup — editing `.env` while the dev server is running has no effect until a full restart
-- Full restart procedure (kill both servers, `npm run dev`, `npm start`, then `Cmd+Shift+R` hard refresh) has been attempted and the error persists
-- This means the key is either still not being read correctly, or the odds fetch logic has a separate validation issue
-
-**For Codex to investigate:**
-1. Add `console.log("ODDS KEY:", import.meta.env.VITE_ODDS_API_KEY)` at the top of `prop-scout-v7.jsx` to confirm the key is actually being picked up by Vite after restart
-2. Check `backend/routes/odds.js` — the backend also uses `ODDS_API_KEY` via `process.env`. Confirm the backend `.env` is in the right directory (`ai-agent-mlb/` root, not `ai-agent-mlb/backend/`)
-3. Search for where the "API key is missing" string is thrown — it may be a validation check in the odds route that's triggering even when the key is present (e.g., checking key length or format)
-4. Confirm `IS_ODDS_SANDBOX = false` in `prop-scout-v7.jsx` — if it's `true`, the live odds fetch never runs and any key is irrelevant
-
-**Key files:**
-- `prop-scout-v7.jsx` — top of file, sandbox flags + `VITE_ODDS_API_KEY` usage
-- `backend/routes/odds.js` — where the API key is read and the "missing" error is thrown
-- `.env` in `ai-agent-mlb/` root — must contain both `ODDS_API_KEY` and `VITE_ODDS_API_KEY`
-
----
-
-## ✅ Session 4 Additions — April 13 2026
-
-### Batter Drawer — SLG + Note Surfaced
-**Was:** The batter expanded drawer showed AVG and whiff% per pitch type. SLG was computed from live splits but hidden. The `note` field from `autoNote()` ("Elite contact vs FF", "Severe weakness vs CH — high K exposure") was computed but never rendered.
-
-**Fix (prop-scout-v7.jsx, batter drawer pitch rows):**
-- Added `SLG {p.slg}` next to AVG in the right-hand stat cluster, color-coded (green ≥ .450 / yellow / red < .320)
-- Added `note` line below the AVG progress bar when `typeof p === "object"` (live data only — no note shown for mock data which is just a string)
-- SLG/note only render when `p` is the full live object — mock string values are untouched
-
-### Lineup Confirmed Indicator
-**Was:** No visual signal that lineup data was real vs pending.
-
-**Fix (prop-scout-v7.jsx, lineup tab toggle buttons):**
-- Added `lineupConfirmed = liveLineups[gamePkKey]?.confirmed === true` at lineup tab render time
-- When `true`, a small "LIVE" chip appears inside both toggle buttons
-- Chip inherits the button's active color (black on green when selected, green on dark when deselected)
-
----
-
-## ✅ Session 4 (cont.) — Pinned Batter Feature
-
-### Tap-to-pin lineup batter → Props tab
-**Was:** `game.batter` (the featured batter driving hit/TB props) was always `tpl.batter` from SLATE[0] mock data in live games. Real lineup batters were never used in the prop engine.
-
-**Fix:**
-- Added `pinnedBatterId` state (null = use mock featured batter)
-- Each lineup batter row now has a 📌 pin button (right of matchup score, stops row expand propagation). Tap to pin, tap again to unpin.
-- `pinnedLineupBatter` derived by searching `game.lineups.away + home` for the pinned id
-- `activeBatter` = pinned lineup batter (with Savant splits merged via `augmentBatter`) or `game.batter` fallback
-- Lineup batters lack `ops` — estimated as `(avg + 0.07) + (avg × 1.65)` so the TB prop can fire
-- Prop engine now uses `activeBatter` throughout (all `batter.*` references replaced)
-- Props tab header shows `📌 [LastName] ✕` when a batter is pinned; ✕ unpins
-
-**Key variables (prop-scout-v7.jsx):**
-- `pinnedBatterId` — state, batter `id` or null
-- `pinnedLineupBatter` — derived, raw lineup batter object or null
-- `activeBatter` — final augmented batter used by prop engine
-
----
-
-## ✅ Session 4 (cont.) — Prop Engine Refinement
-
-### Confidence range tightened
-All three props (K O/U, Hits O/U 0.5, TB O/U 1.5) were capped at 28–82. Changed to **38–75** across the board. Eliminates misleadingly extreme values at both ends.
-
-### Primary pitch matchup added to hit prop reason
-When `pitcher.arsenalLive` is true and `batter.vsPitches` has a match for the pitcher's primary pitch (arsenal[0] = highest usage), the reason string now surfaces it:
-- Good matchup: `"[Batter] hits .312 vs Four-Seam (38% usage)"`
-- Bad matchup: `"Struggles vs Four-Seam (.198 avg — pitcher's primary pitch)"`
-Falls back silently when arsenal isn't live or avg is neutral (.215–.280).
-
-### LIVE / DEMO indicator on Props tab
-Small badge next to "Prop Confidence Meters" label — green **LIVE** when `liveProps.length > 0` (real stats driving props), amber **DEMO** when falling back to SLATE mock props.
-
----
-
-## Roadmap — What's Next
-
-1. ✅ **Prop engine: Featured batter upgrade — DONE.** See below.
-
-2. ✅ **Both pitchers on Overview — DONE.** See session 8 notes below.
-
-3. ✅ **Bullpen data — DONE.** See session 5 notes below.
-
-3. ✅ **NRFI accuracy — DONE.** See session 5 (cont.) notes below.
-
-4. **Historical prop result tracking** — A lightweight log (JSON file or localStorage) that records each generated prop + line + lean, then lets you mark hit/miss. Would enable accuracy tracking over the season.
-
----
-
-### Bug fixes (same session)
-
-**Mock batter showing for live games** — `buildLiveGame` always falls back to `SLATE[0]` batter (Aaron Judge). In live mode with no pinned batter, the prop engine was generating "Judge Hits O/U 0.5" for unrelated games. Fixed by gating hit/TB props on `hasPinnedBatter = IS_STATS_SANDBOX || !!pinnedBatterId`. In live mode with no pin: only K prop generates; a dashed "📌 Pin a Batter" prompt card guides the user to the Lineup tab.
-
-**SLG .000 bug** — Mock `vsPitches` objects don't have a `slg` field. `parseFloat(undefined)` → 0 → ".000" in the reason string. Fixed: SLG computation now requires `vs && typeof vs === "object" && vs.slg` — skips silently when slg not present (i.e., mock data).
-
-**Correct live workflow now:**
-1. Props tab loads → K prop generates from live pitcher stats → "📌 Pin a Batter" prompt shows
-2. User goes to Lineup tab → taps 📌 on a batter → returns to Props tab
-3. Hit & TB props generate with real splits, correct player name, correct game context
-
----
-
-**Overview tab mock batter fix** — Overview was also rendering `game.batter` (Aaron Judge) for live games. Fixed: when `!IS_STATS_SANDBOX && !pinnedBatterId`, batter card shows a "📌 Go to Lineup tab and pin a batter" prompt instead of mock player. When pinned, overview shows `activeBatter` stats (with `??` fallbacks for fields lineup batters lack: `number→order`, `team→pos`, `avgH/avgHR/avgTB→tb`). Hit Rates card hidden in live mode (lineup batters have array `hitRate`, not string `"8/10"`). Arsenal section shows "Featured Batter" label when no pin.
-
----
-
----
-
-## ✅ Session 5 — Live Bullpen Data
-
-### New backend route: `/api/bullpen/:teamId`
-**File:** `backend/routes/bullpen.js` (new)
-**Registered in:** `backend/server.js`
-
-**What it does:**
-1. Fetches active roster for the team, filters to position `RP` / `CL` (up to 8)
-2. For each reliever, parallel-fetches: season stats (ERA, WHIP, saves, holds) + game log (recent appearances + pitches)
-3. Derives per-reliever: `role` (CL/SU/MR), `status` (TIRED/MODERATE/FRESH), `lastApp` ("1d ago"), `pitches` from last outing
-4. Derives team-level: `fatigueLevel`, `grade`/`gradeColor`, `setupDepth`, `lrBalance`, `note`, `lean`
-5. Cached 30 min. Returns `{ live: true, relievers[], fatigueLevel, grade, ... }` — same shape as `BullpenCard` mock data
-
-**Frontend wiring (`prop-scout-v7.jsx`):**
-- `liveBullpen` state keyed by `teamId`
-- Fetched in the game-open useEffect alongside lineups/umpires/arsenal — both away and home team IDs from `sg.away.id` / `sg.home.id`
-- Overlaid in the `game` object: `bullpen.away = liveBullpen[awayId] ?? baseGame.bullpen.away`
-- LIVE badge on the "Bullpen Strength & Fatigue" section header when `bullpen.away?.live === true`
-
-**Known limitation:** `vsL` / `vsR` (platoon splits per reliever) are `"—"` — platoon splits require additional API calls per arm. Can add later.
-
-**Bug fixed (April 14 / 15):** The original bullpen route filtered the active roster for `RP` / `CL`, but MLB's roster feed currently labels active bullpen arms as generic `P`. That caused `/api/bullpen/:teamId` to return `404 No relievers found` for real teams, which made the frontend fall back to mock SLATE bullpen data.
-
-**Fix:** `backend/routes/bullpen.js` now:
-- starts from all active pitchers (`position.abbreviation === "P"`)
-- fetches season stats + game logs for each pitcher
-- classifies likely relievers using season usage (`gamesStarted === 0`, `gamesFinished > 0`, `saves > 0`, `holds > 0`, or `inheritedRunners > 0`)
-- falls back to pitchers with `gamesStarted < gamesPlayed` if the strict reliever heuristic yields none
-- sorts the resulting bullpen arms by leverage/use and caps to 8
-
-**Verification:** Tested on a temporary backend at `localhost:3002`:
-- `GET /api/bullpen/116` (DET) → live reliever payload returned
-- `GET /api/bullpen/118` (KC) → live reliever payload returned
-- `GET /api/bullpen/144` (ATL) → live reliever payload returned
-
-**Important:** restart the backend on port `3001` to pick up the bullpen fix in the app UI.
-
----
-
----
-
-## ✅ Session 5 (cont.) — Live NRFI Computation
-
-### Live NRFI lean + confidence from pitcher ERA + weather
-
-**Was:** NRFI lean/confidence was purely mock SLATE data for all games.
-
-**Fix (`prop-scout-v7.jsx`):**
-
-Added `liveNrfi` IIFE (synchronous, no async) that runs after the `game` object is built:
-- Reads `game.pitcher.era` (live when `IS_STATS_SANDBOX = false`) and `weather`
-- Skips computation if ERA is missing or mock (`IS_STATS_SANDBOX = true`) → returns `null`
-- Scoring logic:
-  - ERA < 2.50 → +15 (elite), < 3.50 → +8, < 4.50 → +2, > 5.50 → -12, else -6
-  - Cold temp (< 50°) → +10, cool (< 60°) → +5
-  - Wind blowing OUT (hrFavorable) → -8; blowing IN → +6
-  - Dome: neutral, no weather factor
-- `lean = score >= 0 ? "NRFI" : "YRFI"`
-- `confidence = clamp(50 + |score|, 38, 75)`
-- `tendency`: up to 2 human-readable reason strings joined with " · "
-
-Final `nrfi` const merges live over mock:
-```js
-const nrfi = liveNrfi
-  ? { ...game.nrfi, lean: liveNrfi.lean, confidence: liveNrfi.confidence, live: true, liveTendency: liveNrfi.tendency }
-  : game.nrfi;
-```
-
-**CRITICAL BUG FIXED (same session):** `nrfi` was being destructured from `game` at the top of the render body AND redeclared as `const nrfi = liveNrfi ? ...` — causing a JavaScript `SyntaxError` (cannot redeclare block-scoped variable). Fixed by removing `nrfi` from the destructuring: `const { pitcher, batter, props: mockProps, umpire, bullpen } = game;` — `nrfi` is now only declared once as the merged live version.
-
-**UI changes:**
-- "First Inning Tendencies" section label now has a green **LIVE** chip when `nrfi.live === true` (styled same as the Bullpen LIVE chip)
-- When `nrfi.liveTendency` is set, a teal-tinted note card renders below the lean badge: `📊 [reason1] · [reason2]`
-- Mock team 1st-inn scoring boxes (`awayFirst.scoredPct` / `homeFirst.scoredPct`) still show; live overrides only lean/confidence/tendency
-
-**Note:** 1st-inning scoring rate per team (awayFirst/homeFirst) remains mock — would require historical play-by-play aggregation to compute live. The liveNrfi computation focuses on the current game's pitcher and conditions, which are already available.
-
----
-
----
-
-## ✅ Session 6 — Park Factors
-
-### PARK_FACTORS lookup table + prop engine integration
-
-**`prop-scout-v7.jsx` changes:**
-
-**1. `PARK_FACTORS` constant** (module-level, above sandbox flags):
-- 30-team keyed lookup by home team abbreviation (`COL`, `PHI`, `SF`, etc.)
-- Each entry: `{ hr, hit, k, label }` — multi-year FanGraphs averages
-- `NEUTRAL_PARK = { hr: 1.0, hit: 1.0, k: 1.0, label: "Neutral" }` fallback for unknown teams
-- Notable extremes: COL hr 1.35 (Coors), SF hr 0.83 (Oracle), SD hr 0.87 (Petco), BOS hit 1.09 (Fenway)
-
-**2. `parkFactor` derivation** (after `nrfi` const):
-```js
-const parkFactor = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
-```
-
-**3. Prop engine adjustments:**
-- **K prop (Factor 5)**: `parkFactor.k >= 1.03` → +4 score, `<= 0.95` → -3 score. Surfaces in reason string.
-- **Hit prop**: `hit >= 1.10` → +5, `>= 1.05` → +3, `<= 0.96` → -4. Surfaces in reason string.
-- **TB prop**: `hr >= 1.15` → +8, `>= 1.08` → +4, `<= 0.87` → -6, `<= 0.93` → -3. Surfaces in reason string.
-
-**4. `liveNrfi` park adjustment** (before lean/confidence calc):
-- `hr >= 1.15` → score -10 (YRFI lean), `>= 1.08` → -5
-- `hr <= 0.87` → score +8 (NRFI lean), `<= 0.93` → +4
-- Surfaces in tendency reasons when significant
-
-**5. Intel tab — Park Factors card** (between Weather and Umpire):
-- Shows park label ("Hitter Haven", "Pitcher-Friendly", etc.) + HITTER PARK / PITCHER PARK / NEUTRAL badge
-- 3-column grid: HR Factor, Hit Factor, K Factor — color-coded (yellow = hitter-friendly, green = pitcher-friendly)
-- Footer note: "Multi-year FanGraphs avg · >1.0 = hitter-friendly · affects Hit, TB & NRFI props"
-
-**Color coding convention:**
-- HR/Hit factor: yellow = hitter-friendly (≥1.10/1.05), green = pitcher-friendly (≤0.90/0.97), white = neutral
-- K factor: green = pitcher-friendly (≥1.02 → more Ks), yellow = hitter-friendly (≤0.96 → fewer Ks)
-
----
-
----
-
-## ✅ Session 7 — Prop Result Tracker
-
-### Pick logging + hit/miss tracking persisted to localStorage
-
-**New state:**
-- `propLog` — array of logged picks, initialized from `localStorage.getItem("propscout_log")`, falls back to `[]`
-- `picksFilter` — "all" | "pending" | "hit" | "miss", controls which picks show in PICKS view
-
-**Pick entry shape:**
-```js
-{ id, timestamp, date, game, gamePk, label, lean, confidence, result }
-// result: null (pending) | "hit" | "miss"
-```
-
-**Helper functions (defined after `openGame`):**
-- `logPick(prop)` — creates entry from current game + prop, prepends to log, writes to localStorage
-- `markResult(id, result)` — sets result field, writes to localStorage
-- `deletePick(id)` — removes entry, writes to localStorage
-- `isLogged(prop)` — checks if gamePk + label already in log (prevents double-logging)
-
-**Props tab changes:**
-- Each prop card now has a ＋ button (right of lean badge)
-- Turns green ✓ when already logged (prevents re-logging the same prop for the same game)
-- Styling: subtle border, transitions on hover
-
-**App nav changes:**
-- Added purple **Picks** button alongside Slate / Game
-- Shows badge count (purple circle) when `propLog.length > 0`
-- Active state: purple (#a78bfa) instead of green
-
-**PICKS view layout:**
-- Stats bar: Total / Pending / Hits / Misses in 4-column grid + accuracy % + accuracy bar
-- Filter tabs: ALL / PENDING / HIT / MISS
-- Pick cards: game + date header, prop label, lean badge, confidence bar, HIT ✓ / MISS ✗ buttons
-- After grading: shows result chip + "undo" link to revert
-- Delete button (✕) on each card
-- Empty state with instructions when no picks match filter
-- Card border color: green tint for hits, red tint for misses, default for pending
-
----
-
----
-
-## ✅ Session 8 — Both Pitchers on Overview
-
-### Away + Home SP toggle on the Overview tab
-
-**`buildLiveGame` changes:**
-- Added `mkPitcher(p)` helper (DRY — builds same pitcher shape for both starters)
-- Added `awayPitcher: mkPitcher(ap)` field using `sg.probablePitchers?.away`
-- `pitcher` remains home SP (faces away lineup), `awayPitcher` is away SP (faces home lineup)
-
-**Game-open useEffect:**
-- Now also fetches `/api/players/:awayPitcherId/stats?group=pitching` for the away starter
-- Stores in same `livePitcherStats` map keyed by pitcher ID
-
-**Game object overlay:**
-- Added `awayPitcher` block (same structure as `pitcher`) — overlays ERA, WHIP, K/9, BB/9 from live stats when available
-
-**New state:** `pitcherSide` ("home" | "away") — resets to "home" on `openGame()`
-
-**Overview tab UI:**
-- Pitcher card now has AWAY SP / HOME SP toggle buttons (matching lineup tab's away/home pattern)
-- Active side shows: name, team, hand, "vs {facing team}" subtitle, ERA/WHIP/K9/BB9/Avg IP stat row — color-coded ERA and WHIP
-- ERA color: green <3.5, red >4.5, white otherwise
-- Home SP still shows the K LEAN OVER badge (prop engine only runs on home pitcher for now)
-- Away SP avatar uses reversed gradient (blue→red) to visually distinguish
-
-**Note:** Arsenal tab still shows home pitcher's arsenal only. Away pitcher arsenal could be added as a future enhancement (fetching away arsenal requires `pitcherArsenal[awayPitcherId]` and a second arsenal tab toggle).
-
----
-
----
-
-## ✅ Session 8 (cont.) — Both Pitchers on Arsenal Tab
-
-### AWAY SP / HOME SP toggle added to Arsenal tab
-
-**useEffect:** Now also fetches `/api/arsenal/:awayPitcherId` for the away starter on game open (same pattern as home arsenal fetch).
-
-**Game object:** `awayPitcher` overlay now includes `arsenal` and `arsenalLive` fields (same as `pitcher`).
-
-**New state:** `arsenalSide` ("home" | "away") — resets to "home" on `openGame()`.
-
-**Arsenal tab UI:**
-- Toggle buttons (AWAY SP / HOME SP) at the top, matching Lineup and Overview tab patterns
-- `arsPitcher` derived from `arsenalSide` — either `pitcher` (home) or `game.awayPitcher`
-- Header label dynamically updates: "[Pitcher Name]'s Arsenal vs [Facing Team] Lineup" or vs pinned batter name
-- Fetching… / SAVANT LIVE badge reflects the active pitcher's live state
-- Pitch cards, matchup scores, HANDLES/WEAK SPOT/NEUTRAL badges all work the same — just switched pitcher
-
-**Note:** Batter matchup data still uses `activeBatter.vsPitches` (pinned batter or mock batter). The away pitcher's arsenal shows pitch types without batter splits if no batter is pinned — cards without a matching `vsPitches` key return `null` and are filtered out silently. Users should pin a home-side batter when viewing the away pitcher's arsenal for full matchup data.
-
----
-
-## ✅ Session 9 — UI Consistency Fixes
-
-### Pinned batter + both-pitcher flows made internally consistent
-
-After Session 8, a few screens were still mixing old mock/featured batter state with the new pinned-batter and away-pitcher logic. These were patched in `prop-scout-v7.jsx`.
-
-**1. Overview tab matchup chips**
-- **Was:** "PITCHER WINS" / "BATTER WINS" still read from `batter.vsPitches`, even when a lineup batter was pinned
-- **Fix:** Added `activeBatterVsPitches` derived from `activeBatter?.vsPitches ?? {}` and switched those chip lists to use it
-- **Result:** Overview now reflects the actual pinned/current batter instead of stale featured-batter data
-
-**2. Lineup tab home-side matchup context**
-- **Was:** Home lineup rows were still evaluated against the home pitcher or a placeholder "Home Starter", which made the home lineup's vulnerability summary, drawer pitch rows, and matchup framing incorrect
-- **Fix:** Added `facingPitcher` in the Lineup tab:
-  - away lineup → `pitcher` (home SP)
-  - home lineup → `game.awayPitcher`
-- **Result:** The Lineup tab now uses the correct opposing starter for both sides
-
-**3. Lineup row score badges**
-- **Was:** `batterMatchupScore()` always used the home pitcher, so score badges for the home lineup were wrong even after the rest of the Lineup tab was fixed
-- **Fix:** Updated `batterMatchupScore(b, matchupPitcher = pitcher)` to accept the active opposing pitcher and passed `facingPitcher` from the row renderer
-- **Result:** Lineup matchup score badges are now correct for both away and home batting orders
-
-**4. Arsenal tab pinned batter mismatch**
-- **Was:** Arsenal cards still pulled `rawVs` from `batter.vsPitches`, so pinning a lineup batter did not actually change the Arsenal matchup cards
-- **Fix:** Switched Arsenal card split lookup to `activeBatterVsPitches?.[a.abbr]`
-- **Result:** The Arsenal tab now honors the pinned batter and stays in sync with the header label and Props tab
-
-**Verification:**
-- `npm run build` passes after all Session 9 fixes
-
----
-
-## ✅ Session 10 — Runtime Review Follow-Up
-
-### Overview + Arsenal split handling tightened up
-
-After Session 9, a focused runtime review of NRFI, Props, and Picks surfaced two smaller UI logic issues in `prop-scout-v7.jsx`. Neither was a build-time failure, but both could leave the game view internally inconsistent.
-
-**1. Overview H2H score still used stale featured-batter state**
-- **Was:** The main Overview matchup score was still computed from `batter.hand` + `batter.vsPitches`, even after the rest of the app was updated to respect `activeBatter`
-- **Fix:** Added `overviewBatter` / `overviewVsPitches` derived from `activeBatter` and `activeBatterVsPitches`, then switched the score calculation to use those values
-- **Result:** The large Overview matchup score now updates when a lineup batter is pinned instead of staying tied to the original featured batter
-
-**2. Arsenal matchup cards were fragile with mock string splits**
-- **Was:** Arsenal cards assumed non-live split values were objects, but mock lineup data often stores pitch splits as simple AVG strings like `".271"`. Spreading those values as objects could create malformed matchup data and misleading HANDLES / WEAK SPOT labels
-- **Fix:** Added `normalizePitchMatchup(abbr, rawVs)` helper:
-  - strings / numbers → normalized to `{ avg, whiff: null, good, note }`
-  - live objects without derived fields → enriched with computed `good` + `note`
-  - pre-enriched objects → passed through unchanged
-- **Result:** Arsenal cards now render safely for both mock and live pitch splits
-
-**Runtime review result:**
-- NRFI logic reviewed again — no new obvious issues found
-- Props engine reviewed again — no new obvious issues found beyond the already-fixed pinned-batter/parkFactor issues
-- PICKS view reviewed again — no new obvious issues found
-
-**Verification:**
-- `npm run build` passes after Session 10 fixes
-
----
-
-## ✅ Session 11 — Pinned Batter Browser QA Follow-Up
-
-### Goal of this pass
-
-Run a final sanity review of the pinned-batter flow across:
-- Overview
-- Arsenal
-- Props
-
-The intent was to make sure that when a lineup batter is pinned, every tab is evaluating that batter against the **correct opposing pitcher**, not just the correct split data.
-
-### What was reviewed
-
-Code paths traced in `prop-scout-v7.jsx`:
-- pinned batter state + derivation
-- batter-side detection
-- Overview H2H score
-- Overview "PITCHER WINS / BATTER WINS" chips
-- Props hit prop matchup logic
-- Props TB prop arsenal/SLG logic
-- existing Arsenal tab pinned-batter flow
-
-### New issue found
-
-**Pinned home-lineup batters were still being evaluated against the home starter in parts of the app.**
-
-This showed up because the pinned-batter work from Sessions 9 and 10 correctly switched the batter object and split data, but several calculations still implicitly used `pitcher` (the home SP) as the matchup source.
-
-That meant:
-- pinning an **away** batter behaved correctly by coincidence, because away batters do face the home SP
-- pinning a **home** batter could still produce the wrong matchup score and wrong batter prop reasoning, because those hitters should be evaluated against `game.awayPitcher`
-
-### Root cause
-
-The app had no single "active opposing pitcher" abstraction for pinned batters.
-
-It already had:
-- `activeBatter`
-- `activeBatterVsPitches`
-
-But it did **not** yet have:
-- a derived pitcher chosen from the pinned batter's lineup side
-
-So multiple calculations still referenced `pitcher` directly.
-
-### Fix applied
-
-Added a new derivation block near the top of the game-view computation:
-
-**1. Detect pinned batter side**
-- `awayLineup = game.lineups?.away ?? []`
-- `homeLineup = game.lineups?.home ?? []`
-- `pinnedBatterSide` resolves to:
-  - `"away"` if the pinned batter is in the away lineup
-  - `"home"` if the pinned batter is in the home lineup
-  - `null` if no pinned batter is active
-
-**2. Add single source of truth for matchup pitcher**
-- `activeMatchupPitcher`
-- logic:
-  - pinned home batter → `game.awayPitcher ?? pitcher`
-  - otherwise → `pitcher`
-
-This creates one consistent opponent source for pinned-batter analysis.
-
-### Code paths updated
-
-**1. Overview H2H score**
-- **Was:** `calcMatchupScore(..., pitcher.arsenal, pitcher.hand)`
-- **Fix:** switched to `activeMatchupPitcher.arsenal` and `activeMatchupPitcher.hand`
-- **Result:** Overview score now reflects the actual opposing starter for both away and home pinned batters
-
-**2. Overview "PITCHER WINS / BATTER WINS" chips**
-- **Was:** chip lists filtered `pitcher.arsenal`
-- **Fix:** chip lists now filter `activeMatchupPitcher.arsenal`
-- **Result:** the pitch-type edge lists now align with the same pitcher used by the H2H score
-
-**3. Batter Hits prop**
-- **Was:** batter matchup score used `pitcher.arsenal` / `pitcher.hand`
-- **Fix:** switched to `activeMatchupPitcher.arsenal` / `activeMatchupPitcher.hand`
-- **Result:** hit prop confidence and matchup reasoning now use the correct opposing starter
-
-**4. Batter Hits prop primary-pitch note**
-- **Was:** used the home starter's primary pitch (`pitcher.arsenal[0]`)
-- **Fix:** now uses `activeMatchupPitcher.arsenal[0]`
-- **Result:** pitch-note text now references the correct opposing pitcher's top weapon
-
-**5. Batter TB prop arsenal SLG check**
-- **Was:** SLG vs top 3 pitches was based on `pitcher.arsenal`
-- **Fix:** switched to `activeMatchupPitcher.arsenal`
-- **Result:** TB prop power context now uses the right opponent arsenal when a home batter is pinned
-
-### Files changed in this pass
-
-- `prop-scout-v7.jsx`
-- `prop-scout-handoff.md`
-
-### Verification completed
-
-**Build verification**
-- `npm run build` passes after Session 11 changes
-
-**Code-level QA conclusion**
-- Overview pinned-batter flow now uses:
-  - correct batter
-  - correct batter splits
-  - correct opposing pitcher
-- Props pinned-batter flow now uses:
-  - correct batter
-  - correct batter splits
-  - correct opposing pitcher for hit/TB calculations
-- Arsenal tab remained aligned from earlier sessions and did not need additional changes here
-
-### Manual verification still recommended
-
-No live browser session was attached to this Codex thread during Session 11, so this pass was completed by code-path tracing + build verification rather than click-through UI testing.
-
-Best next manual QA:
-1. Open a game with both probable starters loaded
-2. Pin an away-lineup batter
-3. Confirm Overview score/chips, Arsenal cards, and Props hit/TB cards all update
-4. Unpin, then pin a home-lineup batter
-5. Confirm those same screens update again and clearly reflect the away starter as the matchup pitcher
-
-If anything still looks off in the browser after that, the next most likely place to inspect is not state selection anymore, but the wording/labeling layer around the displayed prop reasons.
-
----
-
----
-
-## ✅ Session 12 — Trends Lite (Picks View Analytics)
-
-### Derived analytics card added to the Picks view
-
-**No new APIs or backend changes.** All analytics are derived purely from existing `propLog` state (localStorage-persisted pick log).
-
-**New state (component level):**
-- `showTrends` — boolean, default `true`. Controls collapse/expand of the Trends card. Must live at component level (not inside the IIFE) to satisfy React's Rules of Hooks.
-
-**Trends card renders between the stats bar and filter tabs** (only visible when `graded > 0` — hides itself when no graded picks exist).
-
-**Four analytics computed inside a nested IIFE (`graded2 = propLog.filter(p => p.result !== null)`):**
-
-**1. Last 10 + form delta:**
-- Visual green/red dot strip showing last 10 graded picks left-to-right
-- Large accuracy % (color-coded: ≥60% green / ≥45% amber / <45% red)
-- Delta vs all-time: "▲ +8 vs all-time" (green) or "▼ -5 vs all-time" (red) or "= flat"
-
-**2. Current streak:**
-- Iterates `graded2` from newest, counts consecutive same-result picks
-- Shows count in large text + label: "3 HITS in a row" / "2 MISSES in a row"
-- Color-coded green (hit streak) or red (miss streak)
-
-**3. By prop type:**
-- Groups by regex: `/\bK\b|strikeout/i` → K, `/hit/i` → Hits, `/TB|total base/i` → TB, else Other
-- Progress bar + % + fraction per type
-- Only shows types that have ≥1 graded pick
-
-**4. By confidence tier:**
-- High (≥65%), Mid (50–64%), Low (<50%)
-- 3-column grid with hit rate per tier
-- Tier label uses purple (High) / amber (Mid) / gray (Low)
-- Only shows tiers that have ≥1 graded pick
-
-**Collapsible header:** tapping "📈 Trends" header shows/hides the body. Arrow indicator ▲/▼. Border-radius adjusts (square bottom when expanded, rounded when collapsed).
-
-**`trendAccColor(pct)` helper** (inline, inside the IIFE):
-- `pct >= 60` → `#22c55e` (green)
-- `pct >= 45` → `#f59e0b` (amber)
-- else → `#ef4444` (red)
-
----
-
----
-
-## 🔜 Next Up: Trends Full (For Codex + Next CW Session)
-
-### What Trends Lite does NOT cover (intentional — needs backend)
-
-Trends Lite is derived entirely from the current browser's `propLog`. It resets if localStorage is cleared and doesn't persist across different browsers/devices. The full version needs:
-
-1. **Backend persistence** — `/api/picks` endpoint (read/write) that saves the pick log to a JSON file (or SQLite) on the server. This makes picks device-agnostic and survives localStorage clears.
-
-2. **Richer propLog entry schema** — current shape:
-   ```js
-   { id, timestamp, date, game, gamePk, label, lean, confidence, result }
-   ```
-   Full version needs to add:
-   ```js
-   { ...current, playerId, playerName, propType, line, pitcherName, pitcherId, homeTeam, awayTeam }
-   ```
-   `propType` = `"K"` | `"Hits"` | `"TB"` (structured, not regex-derived from label)
-   `playerId` = MLB player ID (already available at prop-generation time)
-
-3. **Per-player trends** — "Judge OVER 1.5 TB last 10 games" — requires `playerId` in schema + backend aggregation endpoint.
-
-4. **Pitcher K prop split** — home vs away hit rate for K O/U — requires `pitcherId` + `homeTeam` fields.
-
-5. **NRFI streak tracking** — would need each NRFI pick logged with its game result (requires a separate result source since NRFI results aren't in the MLB Stats API easily).
-
-### Instructions for Codex (backend work)
-
-**File: `backend/routes/picks.js`** — new route:
-```
-GET  /api/picks         → reads picks.json, returns { picks: [] }
-POST /api/picks         → appends or upserts a pick entry, writes picks.json
-PATCH /api/picks/:id    → updates result field (hit/miss/null) for a pick
-DELETE /api/picks/:id   → removes pick by id
-```
-Storage: simple `picks.json` in `backend/data/` (create dir). No DB needed yet.
-
-**File: `backend/server.js`** — register the picks route (`app.use("/api/picks", picksRouter)`).
-
-**Schema upgrade in `prop-scout-v7.jsx`:**
-- Update `logPick(prop)` helper to include `propType`, `playerId`, `playerName`, `pitcherId`, `pitcherName`, `homeTeam`, `awayTeam` when available
-- Add `propType` field: derive at prop-generation time in `liveProps` IIFE, attach to each prop object before it's rendered in the Props tab
-- Wire frontend to POST to `/api/picks` on log, PATCH on mark result, DELETE on delete (keep localStorage as local cache for offline fallback)
-
-**CW will handle on next session:**
-- Trends Full UI (per-player breakdowns, richer charts, pitcher K home/away split)
-- Wire frontend state to `/api/picks` endpoint
-
-### Manual QA still recommended (from Session 11)
-No live browser session was attached to Sessions 11 or 12. Best first step on next session:
-1. Open a game, pin an away-lineup batter → verify Overview/Arsenal/Props all update
-2. Unpin, pin a home-lineup batter → confirm away starter is used as matchup pitcher
-3. Log a few props → go to Picks → verify Trends card appears and analytics look correct
-4. Grade some picks → verify streak + delta update
-
----
-
-## ✅ Session 13 — Trends Full Backend Scaffold
-
-### Scope of this session
-
-This session intentionally covered only:
-- backend route scaffolding for persisted picks
-- flat-file storage schema
-- `propType` schema enrichment in generated prop objects
-- handoff documentation
-
-This session intentionally did **not** wire the frontend to `/api/picks` yet.
-
-The existing frontend helpers remain localStorage-only for now:
-- `logPick`
-- `markResult`
-- `deletePick`
-
-That wiring is still reserved for the next CW session.
-
-### 1. New backend route: `backend/routes/picks.js`
-
-Created a new Express router backed by a JSON flat file:
-- file: `backend/routes/picks.js`
-- storage: `backend/data/picks.json`
-
-The route uses **synchronous** file operations on purpose:
-- `fs.readFileSync`
-- `fs.writeFileSync`
-
-This matches the intended app model:
-- single-user
-- local development
-- no concurrency complexity needed yet
-
-### Storage behavior
-
-Added:
-- `backend/data/` directory
 - `backend/data/picks.json`
-
-Initial file shape:
-```json
-{ "picks": [] }
-```
-
-The route ensures the storage exists before reading or writing:
-- creates `backend/data/` if missing
-- creates `picks.json` with `{ picks: [] }` if missing
-
-### CRUD operations added
-
-**GET `/api/picks`**
-- reads `picks.json`
-- returns:
-```js
-{ picks: [...] }
-```
-
-**POST `/api/picks`**
-- reads current file
-- appends `req.body` as a new pick entry
-- writes updated file
-- returns the newly added entry
-- response status: `201`
-
-**PATCH `/api/picks/:id`**
-- finds pick by `id`
-- updates only the `result` field from `req.body.result`
-- supports:
-  - `"hit"`
-  - `"miss"`
-  - `null`
-- writes updated file
-- returns updated entry
-- returns `404` if `id` not found
-
-**DELETE `/api/picks/:id`**
-- finds pick by `id`
-- removes that entry
-- writes updated file
-- returns:
-```js
-{ ok: true }
-```
-- returns `404` if `id` not found
-
-### 2. Registered route in `backend/server.js`
-
-Added:
-```js
-const picksRouter = require("./routes/picks");
-```
-
-Registered:
-```js
-app.use("/api/picks", picksRouter);
-```
-
-Also updated the startup banner to list:
-```js
-/api/picks           local pick log CRUD
-```
-
-### 3. `propType` field added to generated live props
-
-Updated the prop engine IIFE in `prop-scout-v7.jsx` so each generated live prop now includes a structured `propType` field.
-
-Added values:
-- pitcher strikeout prop → `propType: "K"`
-- batter hits prop → `propType: "Hits"`
-- batter total bases prop → `propType: "TB"`
-
-This was added directly at prop-generation time so future logging code can rely on structured metadata instead of regex-matching the label text.
-
-### Important non-changes
-
-Per request, this session did **not**:
-- wire frontend fetches to `/api/picks`
-- change `logPick`
-- change `markResult`
-- change `deletePick`
-- alter Picks view UI
-
-The app still uses localStorage for the current live pick log flow.
-
-### Files changed in Session 13
-
-- `backend/routes/picks.js` — new JSON-backed CRUD route
-- `backend/data/picks.json` — new flat-file store
-- `backend/server.js` — route registration
-- `prop-scout-v7.jsx` — added `propType` to live generated props
-- `prop-scout-handoff.md` — Session 13 documentation
-
-### Verification
-
-Required verification for this session:
-- `npm run build` from repo root
-
-Result:
-- build passes after Session 13 changes
-
-### Next likely step
-
-Next CW session should connect the current local pick actions to the new backend route:
-- POST on log
-- PATCH on grading
-- DELETE on removal
-
-At that point, Trends Full can stop depending solely on browser localStorage and begin using persisted server-backed picks.
-
----
-
-## ✅ Session 14 — Live `/api/picks` Verification
-
-### Goal of this pass
-
-Verify that the new JSON-backed picks route works on a real local backend instance, not just by code inspection and build success.
-
-### What was tested
-
-Backend was started on `localhost:3001` and the new route was exercised end-to-end.
-
-Verified operations:
-- `GET /api/picks`
-- `POST /api/picks`
-- `PATCH /api/picks/:id`
-- `DELETE /api/picks/:id`
-
-### Important testing note
-
-An initial automated check produced a false negative because the CRUD requests were fired in parallel:
-- `PATCH` and `DELETE` raced ahead of `POST`
-- this temporarily made it look like the route could not find the test id
-
-After rerunning the requests **sequentially**, the route behaved correctly.
-
-### Sequential verification result
-
-Using a temporary test entry:
-- initial `GET /api/picks` returned `{"picks":[]}`
-- `POST /api/picks` created the test record successfully
-- follow-up `GET /api/picks` returned the saved entry
-- `PATCH /api/picks/test_pick_1` updated `result` to `"hit"`
-- `DELETE /api/picks/test_pick_1` returned `{"ok":true}`
-- final `GET /api/picks` returned `{"picks":[]}`
-
-### User-side confirmation
-
-The same full sequence was also run successfully from the user's own terminal, confirming the route works outside the Codex sandbox as expected.
-
-### Conclusion
-
-The backend scaffold introduced in Session 13 is now verified working in live local development:
-- file-backed storage is readable/writable
-- CRUD semantics are correct
-- `404` behavior remains intact for missing ids
-
-### Files changed in Session 14
-
-- `prop-scout-handoff.md`
-
-### Next step for Claude Cowork
-
-Frontend wiring is now the real next task:
-- keep or phase localStorage as fallback/cache
-- POST on pick log
-- PATCH on grading
-- DELETE on remove
-- decide whether initial Picks view should hydrate from `/api/picks` or merge localStorage + backend during transition
-
----
-
----
-
----
-
-## ✅ Session 15 — Frontend Wiring to `/api/picks` (Option A: Backend-first, localStorage fallback)
-
-### Design decision
-**Option A** chosen: backend is the source of truth when available; localStorage is the local cache and fallback when the backend is unreachable. UI never blocks on backend calls — all mutations are fire-and-forget.
-
-### New helper: `apiMutate` (module-level, alongside `apiFetch`)
-```js
-const apiMutate = async (path, method, body) => {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-};
-```
-Used for POST, PATCH, and DELETE. The existing `apiFetch` remains GET-only.
-
-### Picks hydration `useEffect` (on mount)
-```js
-useEffect(() => {
-  fetch(`${API_BASE}/api/picks`)
-    .then(r => r.ok ? r.json() : null)
-    .then(data => {
-      if (!data?.picks?.length) return; // backend empty or down → keep localStorage
-      setPropLog(data.picks);
-      localStorage.setItem("propscout_log", JSON.stringify(data.picks));
-    })
-    .catch(() => {}); // silent — localStorage already loaded as initial state
-}, []);
-```
-**Hydration logic:**
-- Backend has picks → use them (overwrites localStorage with backend truth)
-- Backend empty + localStorage has picks → keep localStorage (first-run or cleared backend)
-- Backend unreachable → silent fallback, localStorage remains in use
-- `propLog` `useState` still initializes from localStorage for instant first render — hydration only fires after mount
-
-### `logPick` — enriched schema + background POST
-Entry now includes the full Trends Full schema:
-```js
-{
-  id, timestamp, date, game, gamePk, label, lean, confidence,  // existing
-  propType,    // "K" | "Hits" | "TB" (from prop engine)
-  homeTeam,    // game.home.abbr
-  awayTeam,    // game.away.abbr
-  pitcherId,   // pitcher.id (always home SP — K props only run on home pitcher)
-  pitcherName, // pitcher.name
-  playerId,    // activeBatter.id (only for Hits/TB props, null for K)
-  playerName,  // activeBatter.name (only for Hits/TB props, null for K)
-  result,      // null on creation
-}
-```
-`isBatterProp = prop.propType === "Hits" || prop.propType === "TB"` gates `playerId`/`playerName` — K props log null for those fields.
-
-Background POST: `apiMutate("/api/picks", "POST", entry).catch(() => {})` — fires after state update, never awaited.
-
-### `markResult` — background PATCH
-```js
-apiMutate(`/api/picks/${id}`, "PATCH", { result }).catch(() => {});
-```
-State + localStorage still update synchronously before the PATCH fires.
-
-### `deletePick` — background DELETE
-```js
-apiMutate(`/api/picks/${id}`, "DELETE").catch(() => {});
-```
-State + localStorage still update synchronously before the DELETE fires.
-
-### Migration note
-No one-time migration was built. If picks exist in localStorage but not in the backend (i.e., picks logged before Session 15), those picks will continue to render correctly from localStorage. Once the backend is restarted and new picks are logged, the backend will become the source of truth going forward. Old localStorage picks won't auto-migrate to the backend — they'll stay in localStorage until localStorage is cleared.
-
-If migration is needed in the future: a one-time "sync to backend" button could POST all current `propLog` entries to `/api/picks` in sequence.
-
-### Verification
-All 7 wiring sites confirmed present via Node file scan:
-- `apiMutate("/api/picks", "POST", entry)` ✓
-- `apiMutate(\`/api/picks/\${id}\`, "PATCH", { result })` ✓
-- `apiMutate(\`/api/picks/\${id}\`, "DELETE")` ✓
-- `fetch(\`\${API_BASE}/api/picks\`)` (hydration) ✓
-- `propType`, `pitcherId`, `playerName` in logPick entry ✓
-
-### Files changed in Session 15
-- `prop-scout-v7.jsx` — `apiMutate` helper, hydration `useEffect`, enriched `logPick`, wired `markResult` + `deletePick`
-- `prop-scout-handoff.md` — Session 15 documentation
-
-### What's next — Trends Full UI
-The backend is wired. Next CW session should build the Trends Full analytics UI using the richer pick data:
-- Per-player accuracy (requires `playerName` + `playerId` grouping)
-- Pitcher K prop hit rate (requires `pitcherName` grouping)
-- Home vs away K prop split (requires `homeTeam`/`awayTeam`)
-- The `propType` field is now structured — swap regex matching in Trends Lite card to use `propType` directly
-- After Trends Full: promote Bullpen out of Intel tab into its own dedicated 6th tab (data already exists in `game.bullpen`, pure frontend rearrangement)
-
----
-
----
-
-## 🔜 Codex Tasks (Before Next CW Session)
-
-### Task 1 — localStorage → Backend Migration Utility
-
-**Why:** Picks logged before Session 15 exist only in localStorage (old schema, no `propType`/`pitcherId`/etc). The backend `/api/picks` starts empty for those users. Need a one-time sync path.
-
-**What to build (prop-scout-v7.jsx):**
-- Add a "☁ Sync to server" button in the Picks view stats bar (right side, next to "My Pick Log" header)
-- Button only shows when: `propLog.length > 0` AND backend is reachable
-- On click: POST each entry in `propLog` to `/api/picks` sequentially (not parallel — avoids race on file write)
-- Guard: skip entries whose `id` already exists in backend (do a GET first, collect existing ids, diff)
-- Show inline feedback: "Syncing… 3/8" → "✓ Synced" or "✗ Failed"
-- Button state: `syncStatus` = `null | "syncing" | "done" | "error"` (component-level state)
-
-**Files:** `prop-scout-v7.jsx` only — no backend changes needed, `/api/picks` already handles POST deduplication via `id` field (it appends, so duplicate ids would stack — add a check: if `store.picks.some(p => p.id === entry.id)` in `backend/routes/picks.js` POST handler, skip and return the existing entry instead of pushing).
-
-Actually update `backend/routes/picks.js` POST to upsert by id (check if id exists, skip append if so). Then the frontend can safely POST all localStorage entries without worrying about dupes.
-
-### Task 2 — Injury Web Scraper (Backend)
-
-**Why:** Surface questionable/out players in the Lineup tab automatically. Currently no injury awareness.
-
-**What to build:**
-- New file: `backend/routes/injuries.js`
-- Fetch `https://statsapi.mlb.com/api/v1/transactions?sportId=1&limit=100` — this is the official MLB transactions endpoint (free, no auth, same domain as rest of stats API). Filter to `typeCode: "IL"` (injured list placements) + `typeCode: "DL"` entries from the last 14 days.
-- Shape each injury to: `{ playerId, playerName, team, status, date, description }`
-- Cache 30 min (use existing `cache.js`)
-- Register in `server.js`: `GET /api/injuries` → returns `{ injuries: [...] }`
-
-**Frontend wiring (prop-scout-v7.jsx):**
-- Add `liveInjuries` state: `useState([])`, fetch on mount alongside schedule fetch
-- `injuredIds` = Set of playerIds from `liveInjuries`
-- In Lineup tab batter rows: if `injuredIds.has(b.id)`, show a small red `⚠ IL` chip next to the batter name
-- No prop engine changes needed yet — just visual flag in lineup
-
-**Files:** `backend/routes/injuries.js` (new), `backend/server.js` (register route), `prop-scout-v7.jsx` (state + lineup row flag)
-
-### Task 3 — Build Verification
-After completing Tasks 1 and 2, run `npm run build` from `ai-agent-mlb/` and confirm it passes. Update `prop-scout-handoff.md` with a Session 16 section.
-
----
-
-*Updated April 15 2026 — Prop Scout v7 · Session 15 complete · Codex tasks queued for Session 16*
-
----
-
-## Session 16 — Pick Sync Utility + Injury Feed
-
-### Scope completed
-Completed both queued Codex tasks from Session 15:
-- Task 1: localStorage → backend pick sync utility
-- Task 2: injury scraper backend + Lineup tab IL badges
-
-No broader UI redesign was done. Changes were kept to backend routes, minimal state wiring, and small inline indicators.
-
-### Task 1 — `/api/picks` POST now upserts by `id`
-
-**File:** `backend/routes/picks.js`
-
-Updated the POST handler so it no longer blindly appends duplicate picks. It now:
-- reads the current store
-- checks `store.picks.find(p => p.id === entry.id)`
-- if found: returns the existing entry and skips `writeStore`
-- if not found: appends and writes as before
-
-This makes the sync button safe even if the frontend retries or if some picks were already background-posted during Session 15.
-
-### Task 1 — Picks view manual sync button
-
-**File:** `prop-scout-v7.jsx`
-
-Added three new component-level states near `propLog`:
-- `syncStatus` → `null | "syncing" | "done" | "error"`
-- `syncMessage` → inline status text such as `Syncing… 3/8`
-- `picksServerReachable` → controls whether the sync button is shown
-
-### Backend reachability logic
-
-The existing mount hydration effect for `/api/picks` was extended:
-- successful JSON response sets `picksServerReachable = true`
-- failed fetch sets `picksServerReachable = false`
-- backend-first hydration behavior remains the same:
-  - backend has picks → overwrite localStorage + state
-  - backend empty → keep localStorage as-is
-  - backend down → silent fallback
-
-### New sync flow
-
-Added `syncPicksToServer()` in `prop-scout-v7.jsx`.
-
-Behavior:
-1. set `syncStatus = "syncing"`
-2. GET `/api/picks`
-3. collect existing backend ids into a `Set`
-4. diff against current `propLog`
-5. POST only missing picks, sequentially, with `await apiMutate("/api/picks", "POST", pick)`
-6. update inline progress text during the loop
-7. finish with:
-   - `✓ Synced` on success
-   - `✗ Failed` on error
-
-Important details:
-- posts are sequential, not parallel, to avoid flat-file write races
-- if all picks already exist on the backend, sync resolves immediately with `✓ Synced`
-- the button only renders when:
-  - `propLog.length > 0`
-  - `picksServerReachable === true`
-
-### Picks view UI placement
-
-The new `☁ Sync to server` button was added to the Picks stats-bar header row on the right side, alongside the existing accuracy label.
-
-Inline feedback appears next to the button:
-- `Syncing… x/y`
-- `✓ Synced`
-- `✗ Failed`
-
-This was intentionally kept small and non-blocking so it fits the current mobile layout without reworking the Picks page.
-
-### Task 2 — New backend injury route
-
-**New file:** `backend/routes/injuries.js`
-
-Added a cached Express route:
-- `GET /api/injuries`
-
-Data source:
-- MLB Stats API transactions endpoint:
-  - `/api/v1/transactions?sportId=1&limit=100`
-
-Filtering logic:
-- keep only IL / DL placement-style transactions from the last 14 days
-- direct `typeCode === "IL" || "DL"` passes
-- fallback description matching requires:
-  - mentions `injured list` or `disabled list`
-  - and placement language such as `placed` / `transfer`
-  - while excluding activation language like `activated`, `returned`, or `reinstated`
-
-Output shape:
-```js
-{
-  playerId,
-  playerName,
-  team,
-  status,
-  date,
-  description
-}
-```
-
-Route behavior:
-- cache key: `injuries:recent`
-- cache TTL: 30 minutes
-- returns `{ injuries: [...] }`
-- sets `X-Cache: HIT|MISS`
-- returns `502` if the MLB API call fails
-
-### Injury dedupe detail
-
-The route sorts results newest-first and deduplicates by `playerId`, keeping only the most recent IL/DL transaction per player. This avoids duplicate lineup chips when a player has multiple injury-list-related transactions within the same 14-day window.
-
-### Task 2 — Frontend injury wiring
-
-**File:** `prop-scout-v7.jsx`
-
-Added:
-- `liveInjuries` state with `useState([])`
-- mount-time fetch via `apiFetch("/api/injuries")`
-- derived `injuredIds = new Set(liveInjuries.map(i => String(i.playerId)))`
-
-### Lineup tab IL chip
-
-In lineup batter rows, the batter name now shows a small red `⚠ IL` pill when:
-```js
-injuredIds.has(String(b.id))
-```
-
-Placement:
-- directly next to the batter name in the name row
-- does not alter row expansion, pinning, or matchup logic
-
-No prop-engine logic was changed here yet. This is purely a lineup visibility flag for now.
-
-### Verification
-
-Build verification completed from repo root:
-```bash
-npm run build
-```
-
-Result:
-- `vite build` passed successfully
-
-### Runtime verification follow-up
-
-After Session 16 was implemented, a live backend verification pass surfaced one issue in the new injuries route:
-- MLB's `/transactions` endpoint rejected the original request with `400` because it now requires at least one query scope such as `date`, `startDate`, or `endDate`
-
-Fix applied:
-- `backend/routes/injuries.js` now sends:
-  - `startDate = today - 14 days`
-  - `endDate = today`
-  - along with `sportId=1` and `limit=100`
-
-Post-fix runtime checks:
-- `GET /health` → `200 OK`
-- `GET /api/picks` → `200 OK`
-- `POST /api/picks` twice with the same `id` → only one stored row (upsert guard works)
-- `DELETE /api/picks/:id` cleanup succeeded
-- `GET /api/injuries` → `200 OK`, live injury payload returned
-- second `GET /api/injuries` → `200 OK` with `X-Cache: HIT`
-
-### Files changed in Session 16
-- `backend/routes/picks.js`
-- `backend/routes/injuries.js` (new)
-- `backend/server.js`
-- `prop-scout-v7.jsx`
-- `prop-scout-handoff.md`
-
-### Notes for next CW session
-
-Likely next follow-ups:
-- wire `logPick` / `markResult` / `deletePick` fully to backend as primary state if desired, rather than keeping the current backend-first hydration + localStorage mutation mix
-- expand injury handling beyond IL flags (questionable/day-to-day/scratches if a reliable source is added)
-- use the new backend sync state to show a softer “server unavailable” hint when `/api/picks` is down
-
----
-
----
-
----
-
-## ✅ Session 17 — Trends Full UI
-
-### What changed
-Upgraded the existing Trends card (`prop-scout-v7.jsx`, Picks view IIFE) from Lite to Full. The block is now labeled `TRENDS` (was `TRENDS LITE`). All original analytics are preserved and unchanged. Three new sections added below a divider.
-
-### 1. `propType` resolver — structured field + regex fallback
-Replaced the inline regex grouping with a `getPropType(p)` helper:
-```js
-const getPropType = (p) => {
-  if (p.propType) return p.propType;           // new schema (Session 15+)
-  const lbl = p.label || "";
-  if (/\bK\b|strikeout/i.test(lbl)) return "K";
-  if (/hit/i.test(lbl))              return "Hits";
-  if (/TB|total base/i.test(lbl))    return "TB";
-  return "Other";
-};
-```
-Old picks without `propType` continue to work via regex. New picks use the structured field directly.
-
-### 2. Full sections gating
-The three new sections render inside a nested IIFE with an early-exit guard:
-```js
-const enriched = graded2.filter(p => p.propType);
-if (enriched.length < 2) return null;
-```
-The sections only appear once ≥2 enriched picks (logged after Session 15) are graded. Before that threshold, the Lite sections (last 10, streak, prop type, confidence tier) continue to show normally.
-
-### 3. By Batter (Hit · TB Props)
-- Filters enriched picks where `propType` is `"Hits"` or `"TB"` AND `playerName` is set
-- Groups by `playerName`, computes hit rate per player
-- Only shows players with ≥2 graded picks (avoids misleading 0/1 data)
-- Sorted by pick volume (most picks first)
-- Rendered as progress bar rows with pct + fraction
-
-### 4. K Prop by Pitcher
-- Filters enriched picks where `propType === "K"` AND `pitcherName` is set
-- Groups by `pitcherName`, computes K prop hit rate per starter
-- Min 2 K picks per pitcher to render
-- Same progress bar row layout
-
-### 5. K Prop by Park
-- Filters enriched K picks with `homeTeam` set
-- Groups by `homeTeam` (the venue — since K props only fire for home SP, park is the meaningful split)
-- Min 2 K picks at a venue to render
-- Same progress bar row layout
-
-### Shared `FullRow` component (inline)
-All three sections use a shared inline component defined inside the IIFE:
-```jsx
-const FullRow = ({ label, pct, hits, total }) => (...)
-```
-Name/label truncates with ellipsis if too long, `title` attribute shows full name on hover.
-
-### Placeholder state
-When enriched picks exist (≥2) but no single batter/pitcher/park has accumulated ≥2 picks yet, a centered note renders:
-> "Log and grade more picks to unlock per-player · per-pitcher · per-park breakdowns."
-
-### Files changed in Session 17
-- `prop-scout-v7.jsx` — Trends block upgraded
-
-### Verification
-- Parens balanced: 139/139 ✓
-- Braces balanced: 210/210 ✓
-- All 9 key strings confirmed present ✓
-- Total file: 3083 lines
-
-### What's next
-From the backlog (Tier 1):
-- **NRFI as loggable prop** — add Log NRFI/YRFI button to Intel tab NRFI card (`propType: "NRFI"`). Low effort, closes the most obvious pick tracker gap.
-- **Bullpen dedicated tab** — promote bullpen cards from Intel into a 6th tab. Pure frontend rearrangement.
-- **Pitcher recent form trend** — last 3–5 starts ERA on pitcher card. Backend work (`/api/players/:id/gamelog`).
-- **Batter hot/cold streak badge** — last 7-day avg vs season on Lineup batter rows.
-
----
-
----
-
----
-
-## ✅ Session 18 — NRFI as Loggable Prop
-
-### What changed
-Added a ＋ log button to the NRFI card in the Intel tab (`prop-scout-v7.jsx`). Closes the most obvious pick tracker gap — NRFI confidence was already computed live but had no way to be logged.
-
-### Implementation
-**Location:** Intel tab, inside the NRFI `<Card>`, header row (lines ~2488–2509).
-
-The LeanBadge is now wrapped in a flex row alongside a new log button:
-```jsx
-{(() => {
-  const nrfiLogged = propLog.some(p => p.gamePk === selectedId && p.propType === "NRFI");
-  return (
-    <button
-      onClick={() => !nrfiLogged && logPick({
-        label:      `NRFI · ${game.away.abbr} @ ${game.home.abbr}`,
-        lean:       nrfi.lean,       // "NRFI" or "YRFI"
-        confidence: nrfi.confidence,
-        propType:   "NRFI",
-      })}
-      title={nrfiLogged ? "Already logged" : "Log this pick"}
-      style={{ ... }}>
-      {nrfiLogged ? "✓" : "＋"}
-    </button>
-  );
-})()}
-```
-
-**`nrfiLogged` check:** `propLog.some(p => p.gamePk === selectedId && p.propType === "NRFI")` — keyed by `gamePk` + `propType` rather than label, so it's robust even if the label string changes.
-
-**Button states:** purple ＋ (unlogged) → green ✓ (logged). Matches Props tab pattern exactly.
-
-**`logPick` compatibility:** `propType: "NRFI"` is not `"Hits"` or `"TB"` so `isBatterProp = false` — `playerId`/`playerName` are correctly logged as `null`. `pitcherName`/`pitcherId` are populated from the home SP (same as K props).
-
-**Trends Full:** The new `propType: "NRFI"` picks will appear in the "By Prop Type" row in the Trends card once graded. They won't appear in the Batter or Pitcher K sections (correctly gated by `propType`).
-
-### Files changed in Session 18
-- `prop-scout-v7.jsx` — NRFI log button in Intel tab
-- `prop-scout-handoff.md` — Session 18 documentation
-
-### Backlog updated
-Marked **NRFI as loggable prop** ✅ in the feature backlog.
-
-### What's next (Tier 1 backlog)
-- **Bullpen dedicated tab** — promote bullpen cards from Intel into a 6th tab (pure frontend rearrangement, data already live)
-- **Pitcher recent form trend** — last 3–5 starts ERA on pitcher card (needs backend gamelog route)
-- **Batter hot/cold streak badge** — last 7-day avg vs season on Lineup batter rows (needs gamelog data)
-
----
-
----
-
----
-
-## ✅ Session 19 — Bullpen Dedicated Tab
-
-### What changed
-Promoted the Bullpen section out of the Intel tab into its own dedicated 6th tab. Pure frontend rearrangement — no new data fetching, no new state, no backend changes.
-
-### TABS array
-```js
-const TABS = ["overview", "lineup", "arsenal", "intel", "props", "bullpen"];
-```
-The tab row auto-renders all entries in TABS, so "bullpen" appears as the 6th button automatically.
-
-### Intel tab
-Removed the `{/* Bullpen Strength */}` block and both `<BullpenCard>` calls. Intel tab now ends at Odds & Line Movement. No other Intel changes.
-
-### Bullpen tab render block (`tab === "bullpen"`)
-Inserted after the Props tab closing block, before the Picks view comment.
-
-**Header row:** "Bullpen Strength & Fatigue" label + green LIVE chip when `bullpen.away?.live === true`.
-
-**Quick-glance summary row** (new, didn't exist in Intel): a 2-column mini card per team showing:
-- Team abbreviation label
-- **Grade** (A/B/C) in large color-coded text (`data.gradeColor`)
-- **Fatigue** level (LOW green / HIGH red / MODERATE amber)
-- `data.note` shown below a divider when present
-
-This gives an at-a-glance read before scrolling into the full BullpenCard detail.
-
-**Full BullpenCard components:** both away and home `<BullpenCard>` rendered below the summary, identical to how they appeared in Intel.
-
-### Files changed in Session 19
-- `prop-scout-v7.jsx` — TABS array, Intel tab (removed bullpen), new Bullpen tab block
-
-### Backlog updated
-Marked **Bullpen dedicated tab** ✅ in the feature backlog.
-
-### Verification
-- All 8 spot-checks pass ✓
-- `BullpenCard` confirmed absent from Intel tab block ✓
-- File: 3135 lines
-
-### What's next (Tier 1 backlog)
-- **Pitcher recent form trend** — last 3–5 starts ERA on pitcher card. Needs new backend route `GET /api/players/:id/gamelog` — good Codex task.
-- **Batter hot/cold streak badge** — last 7-day avg vs season on Lineup batter rows. Same gamelog backend route.
-- **Career vs pitcher H2H** — batter historical AVG/HR against specific starter. MLB Stats API `vsPlayer` career splits.
-
----
-
----
-
----
-
-## 🔜 Codex Tasks — Session 20
-
-### Overview
-Both tasks share one new backend route. Build the backend first, then wire both frontend features.
-
----
-
-### Task 1 — Backend: `GET /api/players/:id/gamelog`
-
-**File:** `backend/routes/players.js` (extend existing file — add a second route handler)
-
-**MLB Stats API endpoint:**
-```
-https://statsapi.mlb.com/api/v1/people/{id}/stats?stats=gameLog&group={group}&season={year}
-```
-- `group` = `"pitching"` or `"hitting"` (passed as query param from frontend)
-- `season` = current year (derive from `new Date().getFullYear()`)
-- If current season returns 0 splits, retry with `year - 1` (same pattern as Savant routes)
-
-**Route:** `GET /api/players/:id/gamelog?group=pitching|hitting`
-
-**Cache:** 30 min via existing `cache.js`. Cache key: `gamelog:${id}:${group}`
-
-**Pitching response shape** (last 5 starts, newest first):
-```js
-{
-  group: "pitching",
-  games: [
-    { date, opponent, ip, k, er, era, result },  // result = "W" | "L" | "ND"
-    ...  // up to 5 entries
-  ],
-  seasonEra: "3.45"   // season ERA as string for display
-}
-```
-Filter to `game.isStarter === true` (or `game.gamesStarted > 0` if isStarter not present). Sort newest first. Cap at 5.
-
-**Hitting response shape** (last 10 games, newest first):
-```js
-{
-  group: "hitting",
-  games: [
-    { date, opponent, ab, h, hr, rbi, avg },
-    ...  // up to 10 entries
-  ],
-  seasonAvg: ".285",   // season AVG as string
-  last7Avg:  ".310"    // AVG over most recent 7 games that have at-bats
-}
-```
-`last7Avg` — compute from games where `ab > 0`, take the 7 most recent, sum `h / ab`.
-
-Register the new route in `backend/server.js` startup banner comment only (the route handler lives in the existing `players.js` file, no new file needed).
-
----
-
-### Task 2 — Frontend: Pitcher Recent Form (Overview tab)
-
-**File:** `prop-scout-v7.jsx`
-
-**New state:** `liveGameLog` — `useState({})`, keyed by `pitcherId`. Fetch in the game-open `useEffect` alongside existing pitcher stats fetch:
-```js
-apiFetch(`/api/players/${pitcherId}/gamelog?group=pitching`)
-  .then(d => setLiveGameLog(prev => ({ ...prev, [pitcherId]: d })))
-  .catch(() => {});
-```
-Do the same for `awayPitcherId`.
-
-**UI — pitcher card (Overview tab), below the ERA/WHIP stat row:**
-
-Show only when `liveGameLog[activePitcher.id]?.games?.length > 0`.
-
-Layout: a compact "Last starts" row with up to 5 mini chips — one per start:
-- Chip color: green if `er <= 2`, amber if `er <= 4`, red if `er > 4`
-- Chip text: ERA for that start (e.g. `1.80`) or ER count (`0 ER`, `3 ER`)
-- Below chips: `"Last 3 ERA: 6.50 vs season 3.20"` in small text, color-coded (red if last-3 ERA > season ERA + 1.5, green if better)
-
-Keep it compact — this sits inside the existing pitcher card, not a new card.
-
----
-
-### Task 3 — Frontend: Batter Hot/Cold Streak Badge (Lineup tab)
-
-**File:** `prop-scout-v7.jsx`
-
-**New state:** `liveHittingLog` — `useState({})`, keyed by `batterId`. Fetch lazily in `onBatterExpand` (same pattern as `batterSplits` — only fetch when a batter drawer opens):
-```js
-if (!liveHittingLog[b.id]) {
-  apiFetch(`/api/players/${b.id}/gamelog?group=hitting`)
-    .then(d => setLiveHittingLog(prev => ({ ...prev, [b.id]: d })))
-    .catch(() => {});
-}
-```
-
-**UI — lineup batter name row:**
-
-Show a small chip directly after the batter name (same row as the `⚠ IL` chip):
-- Derive `last7Avg` from `liveHittingLog[b.id]?.last7Avg` and `seasonAvg` from `liveHittingLog[b.id]?.seasonAvg`
-- Parse both as floats
-- If `last7Avg >= seasonAvg + 0.035` → green `▲ HOT` chip
-- If `last7Avg <= seasonAvg - 0.035` → red `▼ COLD` chip
-- Otherwise: no chip (neutral — don't add noise)
-- Only show when `liveHittingLog[b.id]` is loaded (don't show placeholder)
-
-Threshold of `.035` avoids noise from small sample variance.
-
----
-
-### Task 4 — Build Verification + Handoff Update
-
-Run `npm run build` from `ai-agent-mlb/`. Update `prop-scout-handoff.md` with a Session 20 section covering what was done and confirming the build passed.
-
----
-
-*Updated April 15 2026 — Prop Scout v7 · Session 19 complete · Codex tasks queued for Session 20*
-
----
-
-## ✅ Session 20 — Game Logs, Pitcher Recent Form, Hot/Cold Badges
-
-### Scope completed
-Completed all four Session 20 Codex tasks:
-- backend `GET /api/players/:id/gamelog`
-- Overview tab pitcher recent-form strip
-- Lineup tab batter hot/cold badge
-- build verification + handoff update
-
----
-
-### Task 1 — Backend game-log route
-
-**File:** `backend/routes/players.js`
-
-Extended the existing players router with:
-```txt
-GET /api/players/:id/gamelog?group=pitching|hitting
-```
-
-**Data source**
-- MLB Stats API:
-  - `/api/v1/people/{id}/stats?stats=gameLog&group={group}&season={year}`
-
-**Cache**
-- TTL: 30 minutes
-- cache key: `gamelog:${id}:${group}`
-
-**Season fallback**
-- route first requests the current season
-- if `gameLog` returns no splits, it retries with `year - 1`
-- season-level summary fields (`seasonEra` / `seasonAvg`) are fetched for the same season that ultimately produced the game log
-
-This mirrors the early-season fallback strategy already used elsewhere in the app.
-
-#### Pitching response shape
-
-Returns the most recent 5 starts, newest first:
-```js
-{
-  group: "pitching",
-  games: [
-    { date, opponent, ip, k, er, era, result }
-  ],
-  seasonEra: "3.45"
-}
-```
-
-**Implementation details**
-- filters starts via `stat.gamesStarted > 0`
-- sorts by descending game date
-- caps to 5 entries
-- `opponent` is normalized to team abbreviation when possible
-- `result` is derived from the game-log stat line:
-  - `wins > 0` → `"W"`
-  - `losses > 0` → `"L"`
-  - otherwise → `"ND"`
-
-Important nuance: this avoids using the game-level `isWin` flag, which reflects team result rather than pitcher decision.
-
-#### Hitting response shape
-
-Returns the most recent 10 games, newest first:
-```js
-{
-  group: "hitting",
-  games: [
-    { date, opponent, ab, h, hr, rbi, avg }
-  ],
-  seasonAvg: ".285",
-  last7Avg: ".310"
-}
-```
-
-**`last7Avg` computation**
-- filters to games with `atBats > 0`
-- takes the 7 most recent such games
-- computes:
-  - `sum(hits) / sum(atBats)`
-
-#### Startup banner
-
-Updated `backend/server.js` startup output to include:
-```txt
-/api/players/:id/gamelog recent pitching/hitting logs
-```
-
----
-
-### Task 2 — Pitcher recent form in Overview tab
-
-**File:** `prop-scout-v7.jsx`
-
-#### New state
-Added:
-- `liveGameLog` — object keyed by `pitcherId`
-
-#### Fetch wiring
-In the game-open live-data `useEffect`, the app now fetches:
-- home SP pitching gamelog
-- away SP pitching gamelog
-
-Pattern used:
-```js
-apiFetch(`/api/players/${pitcherId}/gamelog?group=pitching`)
-  .then(d => setLiveGameLog(prev => ({ ...prev, [pitcherId]: d })))
-  .catch(() => {});
-```
-
-#### Overview pitcher card UI
-
-Inside the existing Overview pitcher card, below the ERA/WHIP/K/BB stat row:
-- renders up to 5 recent-start chips
-- only renders when `liveGameLog[activePitcher.id]?.games?.length > 0`
-
-**Chip color logic**
-- green: `er <= 2`
-- amber: `er <= 4`
-- red: `er > 4`
-
-**Chip text**
-- compact `"{er} ER"` format
-- `title` tooltip includes:
-  - date
-  - opponent
-  - innings pitched
-  - strikeouts
-  - decision
-
-#### Last 3 ERA summary
-
-Added a compact summary line:
-```txt
-Last 3 ERA: X.XX vs season Y.YY
-```
-
-The line is computed from the most recent 3 starts using innings-pitched-to-outs conversion, not a simple arithmetic average of per-start ERA values.
-
-**Color logic**
-- red if `last3Era > seasonEra + 1.5`
-- green if `last3Era < seasonEra`
-- gray otherwise
-
-This keeps the signal compact while still surfacing whether a pitcher is running hot or cold relative to baseline.
-
----
-
-### Task 3 — Batter hot/cold badge in Lineup tab
-
-**File:** `prop-scout-v7.jsx`
-
-#### New state
-Added:
-- `liveHittingLog` — object keyed by `batterId`
-
-#### Lazy fetch pattern
-
-Extended the existing `onBatterExpand` helper so opening a batter drawer now lazily fetches:
-- Savant splits (existing behavior)
-- hitting game log (new behavior)
-
-New fetch path:
-```js
-apiFetch(`/api/players/${b.id}/gamelog?group=hitting`)
-  .then(d => setLiveHittingLog(prev => ({ ...prev, [b.id]: d })))
-  .catch(() => {});
-```
-
-#### Badge logic
-
-In the lineup batter name row, alongside the existing `⚠ IL` chip:
-- derive `seasonAvg` from `liveHittingLog[b.id]?.seasonAvg`
-- derive `last7Avg` from `liveHittingLog[b.id]?.last7Avg`
-
-Then:
-- if `last7Avg >= seasonAvg + 0.035` → green `▲ HOT`
-- if `last7Avg <= seasonAvg - 0.035` → red `▼ COLD`
-- else → no badge
-
-The chip only renders after the batter's hitting log has been loaded. No placeholder or neutral badge is shown.
-
-#### Noise guard
-
-The `.035` threshold from the task spec is preserved exactly to avoid overreacting to tiny sample swings.
-
----
-
-### Task 4 — Build verification
-
-Ran from repo root:
-```bash
-npm run build
-```
-
-**Result**
-- `vite build` passed successfully
-
----
-
-### Files changed in Session 20
-- `backend/routes/players.js`
-- `backend/server.js`
-- `prop-scout-v7.jsx`
-- `prop-scout-handoff.md`
-
----
-
-### Notes for next session
-
-Useful manual QA for CW:
-1. Open a game and switch Overview between away/home SP
-2. Confirm recent-form chips render for both starters when gamelog data is available
-3. Open several lineup batter drawers
-4. Confirm `▲ HOT` / `▼ COLD` chips appear only after expansion-triggered fetches complete
-5. Sanity-check that the hot/cold chips remain quiet for neutral batters
-
-Potential next extension:
-- reuse the same hitting log data in Props for a recent-form factor on Hits/TB confidence
-- add sparkline-style recent-start visuals now that pitching gamelog is available
-
----
-
-*Updated April 15 2026 — Prop Scout v7 · Session 20 complete · gamelog route + recent form + hot/cold badges shipped*
-
----
-
-## ✅ Session 21 — Career H2H Backend Route + Regression Pass
-
-Picked up the open Codex task under `🔴 Codex Task — Career H2H Backend Route` and completed the backend work in `backend/routes/players.js`.
-
-### What was added
-
-New route:
-```txt
-GET /api/players/:batterId/vs/:pitcherId
-```
-
-This route now calls MLB Stats API `vsPlayer` data using:
-```txt
-https://statsapi.mlb.com/api/v1/people/{batterId}/stats?stats=vsPlayer&opposingPlayerId={pitcherId}&group=hitting
-```
-
-### Response behavior
-
-The route normalizes MLB's response into:
-
-```json
-{
-  "batterId": "592450",
-  "pitcherId": "477132",
-  "atBats": 18,
-  "hits": 5,
-  "avg": ".278",
-  "homeRuns": 1,
-  "strikeOuts": 4,
-  "obp": ".350",
-  "slg": ".444",
-  "season": "career"
-}
-```
-
-If MLB returns no matchup split or `atBats === 0`, the route intentionally returns:
-
-```json
-{ "atBats": 0 }
-```
-
-This is by design and avoids treating "no prior matchup history" as an error.
-
-### Cache behavior
-
-Added a dedicated 24-hour cache TTL:
-
-```js
-const H2H_TTL_MS = 24 * 60 * 60 * 1000;
-```
-
-Cache key used:
-```txt
-h2h:${batterId}:${pitcherId}
-```
-
-Route returns `X-Cache: HIT` / `MISS` consistently with the rest of the backend.
-
-### Error handling
-
-Per task spec, this route is intentionally soft-fail:
-- if the MLB request fails
-- if the response shape is missing/unexpected
-
-it returns:
-
-```json
-{ "atBats": 0 }
-```
-
-instead of a `500`.
-
-This keeps the frontend simple and avoids blowing up Overview/Arsenal/H2H UI states when matchup history is missing or MLB is flaky.
-
-### Regression testing performed
-
-Started a temporary backend on port `3002` and ran a focused backend regression pass.
-
-Verified clean responses for:
-- `GET /health`
-- `GET /api/injuries`
-- `GET /api/players/554430/gamelog?group=pitching`
-- `GET /api/players/592450/gamelog?group=hitting`
-- `GET /api/players/592450/vs/477132`
-- `GET /api/picks`
-- `GET /api/arsenal/554430`
-- `GET /api/splits/592450`
-- `GET /api/bullpen/144`
-
-### Regression result
-
-Everything exercised in the pass returned `200 OK` and the new H2H route returned real live matchup data:
-
-```json
-{
-  "batterId": "592450",
-  "pitcherId": "477132",
-  "atBats": 3,
-  "hits": 1,
-  "avg": ".333",
-  "homeRuns": 1,
-  "strikeOuts": 1,
-  "obp": ".333",
-  "slg": "1.333",
-  "season": "career"
-}
-```
-
-Also confirmed:
-- `/api/injuries` cache was working (`X-Cache: HIT` on repeat call)
-- Savant routes still returned live data after the new `players.js` change
-- bullpen route still returned live classified reliever data
-
-### Small testing note
-
-Two initial `curl` attempts failed because zsh treated unquoted `?group=` querystrings as glob patterns. Once quoted, the routes themselves worked correctly. This was only a shell invocation issue, not an app bug.
-
-### Files changed in Session 21
-- `backend/routes/players.js`
-- `prop-scout-handoff.md`
-
-### Ready for CW
-
-This is a clean handoff point for Claude Cowork. The backend career H2H route is live in code, matches the handoff spec, and passed a regression check against the other active data routes.
-
----
-
-*Updated April 15 2026 — Prop Scout v7 · Session 21 complete · career H2H backend route shipped and regression-tested*
-
----
-
-## ✅ Session 22 — Arsenal `prevVelo` Backend Route Enhancement + Regression Pass
-
-Picked up the open Codex task under `🔴 Codex Task — Pitch Velocity Trend (prevVelo)` and completed the backend-only work in `backend/routes/arsenal.js`.
-
-### What changed
-
-The Arsenal route now adds a `prevVelo` field to each current-season pitch object:
-
-```json
-{
-  "abbr": "FF",
-  "type": "4-Seam Fastball",
-  "pct": 58,
-  "velo": 93.1,
-  "prevVelo": 94.3,
-  "whiffPct": "22%",
-  "...": "..."
-}
-```
-
-This gives the frontend enough data to derive:
-- `veloDelta = velo - prevVelo`
-- year-over-year velocity trend chips such as `FF -1.2 mph`
-
-### Implementation details
-
-Refactored `backend/routes/arsenal.js` slightly so the CSV workflow is reusable:
-
-- `fetchCSVRows(pitcherId, year)`
-- `buildArsenalFromRows(rows)`
-- `buildPrevVeloMap(rows)`
-
-The main current-season arsenal logic and the existing current-year → previous-year fallback loop were intentionally left in place.
-
-### How `prevVelo` is computed
-
-After the current arsenal resolves successfully, the route now performs a second best-effort Savant CSV fetch for:
-
-```txt
-resolvedYear - 1
-```
-
-Important: this is based on the final `resolvedYear`, not blindly the requested year.
-
-That means:
-- if current season data exists, `prevVelo` uses prior year
-- if current season was empty and arsenal fell back to previous season, `prevVelo` uses the year before that
-
-The prior-season rows are aggregated by `pitch_type`, averaging `release_speed` the same way the route already computes current-season pitch velocity.
-
-Example internal shape:
-
-```js
-{
-  FF: 95.3,
-  SI: 94.6,
-  ST: 85.0
-}
-```
-
-Each current pitch object now gets:
-
-```js
-prevVelo: prevVeloMap?.[pitch.abbr] ?? null
-```
-
-### Failure behavior
-
-Per task spec, the prior-season lookup is best-effort only:
-- if the prior-year Savant request fails
-- if Savant returns no usable prior-year rows
-- if a pitch type is missing from the prior-year set
-
-the route still succeeds and simply returns:
-
-```js
-prevVelo: null
-```
-
-No error is thrown and no response envelope was changed.
-
-### Cache behavior
-
-Added a dedicated prior-season cache:
-
-```txt
-arsenal:${pitcherId}:prev
-```
-
-TTL:
-```js
-24 hours
-```
-
-Current-season arsenal caching remains unchanged:
-- existing current cache key still used
-- existing 6-hour TTL still used
-
-The cached prior payload stores both:
-- the `season` it belongs to
-- the computed `map`
-
-So the route can safely reuse the prior-season velo data only when it matches the needed `resolvedYear - 1`.
-
-### Regression testing performed
-
-Started a temporary backend on port `3002` and ran a focused regression pass after the change.
-
-Verified clean responses for:
-- `GET /health`
-- `GET /api/arsenal/554430`
-- repeated `GET /api/arsenal/554430` to confirm cache hit
-- `GET /api/splits/592450`
-- `GET /api/players/592450/vs/477132`
-- `GET /api/players/554430/gamelog?group=pitching`
-- `GET /api/injuries`
-- `GET /api/bullpen/144`
-
-### Regression result
-
-Everything exercised returned `200 OK`.
-
-Live arsenal response now includes `prevVelo` values, for example:
-
-```json
-{
-  "pitcherId": 554430,
-  "season": 2025,
-  "source": "statcast_csv_prev_season",
-  "arsenal": [
-    { "abbr": "FF", "velo": "96.1", "prevVelo": 95.3 },
-    { "abbr": "SI", "velo": "95.4", "prevVelo": 94.6 },
-    { "abbr": "ST", "velo": "83.7", "prevVelo": 85.0 }
-  ]
-}
-```
-
-Also confirmed:
-- repeat arsenal request returned `X-Cache: HIT`
-- Savant splits route still worked
-- H2H route still worked
-- pitching gamelog route still worked
-- injuries route still worked
-- bullpen route still worked
-
-### Files changed in Session 22
-- `backend/routes/arsenal.js`
-- `prop-scout-handoff.md`
-
-### Ready for CW
-
-This is a clean handoff point for Claude Cowork. Backend `prevVelo` support is in place, the existing arsenal fallback logic was preserved, and the surrounding live routes still passed regression checks.
-
----
-
-*Updated April 15 2026 — Prop Scout v7 · Session 22 complete · arsenal prevVelo shipped and regression-tested*
-
----
-
-## ✅ Session 23 — Game Notes Backend Route + Live Smoke Test
-
-Picked up the open Codex task under `🔴 Codex Task — Game Notes Backend Route` and completed the backend work for per-game free-text notes.
-
-### What changed
-
-Created a new backend route:
-
-```txt
-GET /api/notes/:gamePk
-POST /api/notes/:gamePk
-```
-
-New file:
-- `backend/routes/notes.js`
-
-New data store:
 - `backend/data/notes.json`
 
-Registered in `backend/server.js` as:
+### Seed script
+
+Created:
+
+- `backend/seed-users.js`
+
+Usage:
+
+```bash
+node backend/seed-users.js
+```
+
+The owner edits the `USERS` array at the top of that file, for example:
 
 ```js
-app.use("/api/notes", notesRouter);
+const USERS = [
+  { id: "user1", username: "jd",      password: "changeme1" },
+  { id: "user2", username: "friend1", password: "changeme2" },
+  ...
+];
 ```
 
-Also added the startup banner line:
+What it does:
+
+- bcrypt-hashes each password with `saltRounds = 10`
+- writes `{ id, username, passwordHash }` only
+- never stores plaintext passwords
+- logs:
 
 ```txt
-/api/notes/:gamePk   local game notes CRUD
+✅ users.json written with N accounts
 ```
 
-### Storage model
+### Auth middleware
 
-Notes are stored as a flat JSON object keyed by `gamePk`, for example:
+Created:
+
+- `backend/middleware/auth.js`
+
+Behavior:
+
+- reads `Authorization: Bearer <token>`
+- verifies with `process.env.JWT_SECRET`
+- on success:
+  - `req.userId`
+  - `req.username`
+- on missing / invalid / expired token:
 
 ```json
-{
-  "717465": "Wheeler velocity looked down in warmups. Monitor.",
-  "717502": "Rain delay likely — check weather closer to first pitch."
-}
+{ "error": "Unauthorized" }
 ```
 
-This intentionally mirrors the same local flat-file pattern already used by `picks.js`.
+with `401`.
 
-### Route behavior
+### Auth routes
 
-#### `GET /api/notes/:gamePk`
+Created:
+
+- `backend/routes/auth.js`
+
+#### `POST /api/auth/login`
+
+Body:
+
+```json
+{ "username": "...", "password": "..." }
+```
+
+Behavior:
+
+- reads `users.json`
+- username match is case-insensitive
+- bcrypt-compares password against `passwordHash`
+- on success signs JWT:
+
+```json
+{ "userId": "...", "username": "..." }
+```
+
+with `expiresIn: "30d"`
+
+Response:
+
+```json
+{ "token": "...", "userId": "...", "username": "..." }
+```
+
+Failure behavior:
+
+- wrong username or wrong password:
+
+```json
+{ "error": "Invalid credentials" }
+```
+
+- account exists but `passwordHash` is empty:
+
+```json
+{ "error": "Account not configured" }
+```
+
+#### `GET /api/auth/me`
+
+Protected route.
 
 Returns:
 
 ```json
-{ "gamePk": "717465", "note": "" }
+{ "userId": req.userId, "username": req.username }
 ```
 
-If the file does not exist yet, the route still returns an empty string instead of 404.
+### Picks route changes
 
-#### `POST /api/notes/:gamePk`
+Created / updated:
 
-Accepts:
+- `backend/routes/picks.js`
 
-```json
-{ "note": "string" }
+All routes protected with `requireAuth`.
+
+User scoping:
+
+- `GET /api/picks`
+  - returns only picks where `pick.userId === req.userId`
+- `POST /api/picks`
+  - injects `userId: req.userId` before saving
+- `PATCH /api/picks/:id`
+  - `404` if pick missing
+  - `403` if pick belongs to another user
+- `DELETE /api/picks/:id`
+  - `404` if pick missing
+  - `403` if pick belongs to another user
+
+### Notes route changes
+
+Created / updated:
+
+- `backend/routes/notes.js`
+
+All routes protected with `requireAuth`.
+
+Storage is now internally keyed by:
+
+```txt
+${req.userId}:${gamePk}
 ```
+
+Public route shape stays the same:
+
+- `GET /api/notes/:gamePk`
+- `POST /api/notes/:gamePk`
+
+So the frontend does not need to change the URL shape, only send auth.
+
+### Digest route
+
+Created:
+
+- `backend/routes/digest.js`
+
+Protected routes:
+
+- `GET /api/digest`
+- `POST /api/digest/refresh`
 
 Behavior:
-- trims whitespace
-- caps notes at 500 chars
-- saves/overwrites the note for that `gamePk`
-- returns `{ gamePk, note }`
 
-If the trimmed note is empty, the route deletes that key from `notes.json` and still returns:
-
-```json
-{ "gamePk": "717465", "note": "" }
-```
-
-This keeps the JSON store clean and matches the handoff spec.
-
-### Error handling
-
-Followed the same synchronous flat-file pattern as `picks.js`:
-- `fs.readFileSync`
-- `fs.writeFileSync`
-- `ensureStore()` bootstrap for `backend/data/` and `notes.json`
-
-Wrapped route operations in `try/catch`, returning `500` on read/write failure.
-
-No cache was added.
-
-### Live smoke test performed
-
-Started a temporary backend on port `3002` and verified the route end to end.
-
-Test flow:
-1. `GET /api/notes/717465`
-2. `POST /api/notes/717465` with a real note
-3. `GET /api/notes/717465` to confirm persistence
-4. `POST /api/notes/717465` with whitespace-only note
-5. final `GET /api/notes/717465`
-6. inspected `backend/data/notes.json`
-
-### Smoke test result
-
-Observed behavior:
-- initial GET returned empty note
-- POST saved successfully
-- follow-up GET returned the saved note
-- POST with whitespace returned empty note
-- final GET returned empty note again
-- `backend/data/notes.json` was back to:
-
-```json
-{}
-```
-
-So save + delete-on-empty both worked correctly, and the test did not leave behind any junk data.
-
-### Files changed in Session 23
-- `backend/routes/notes.js`
-- `backend/data/notes.json`
-- `backend/server.js`
-- `prop-scout-handoff.md`
-
-### Ready for CW
-
-This is a clean handoff point for Claude Cowork. The backend Game Notes route is live in code, registered, verified with a real write/read/delete flow, and ready for frontend wiring in the Intel tab.
-
----
-
-*Updated April 16 2026 — Prop Scout v7 · Session 23 complete · game notes backend route shipped and smoke-tested*
-
----
-
-## ✅ Session 24 — RBI Context Backend Endpoint
-
-Added a new backend endpoint to support future RBI prop logic:
+- computes the last 7 days of **graded** picks only (`hit` / `miss`)
+- filters to `pick.userId === req.userId`
+- cache key is now user-scoped:
 
 ```txt
-GET /api/players/:batterId/rbi-context
+digest:7d:${req.userId}
 ```
 
-### What it does
+`POST /refresh` clears only that user’s digest cache key.
 
-This route lives in `backend/routes/players.js` and pulls **career hitting stats** from the MLB Stats API:
+### Server wiring
+
+Updated `backend/server.js` to mount:
+
+```js
+app.use("/api/auth", authRouter);
+app.use("/api/picks", picksRouter);
+app.use("/api/notes", notesRouter);
+app.use("/api/digest", digestRouter);
+```
+
+Added startup banner lines:
 
 ```txt
-/api/v1/people/:id/stats?stats=career&group=hitting
+/api/auth/login     POST — login, returns JWT
+/api/auth/me        GET  — current user (protected)
 ```
 
-It returns a compact RBI context payload for a batter:
+Also added env guidance near the top:
 
-```json
-{
-  "rbiPerGame": 0.742,
-  "rbiRate": 0.135,
-  "slg": ".487",
-  "extraBaseHits": 412
-}
+```js
+// Required env vars: ODDS_API_KEY, JWT_SECRET
+// Optional: DATABASE_URL (falls back to flat JSON)
 ```
 
-### Fields returned
+Updated:
 
-- `rbiPerGame`
-  - career RBI / career games played
-  - rounded to 3 decimals
-- `rbiRate`
-  - career RBI / career plate appearances
-  - rounded to 3 decimals
-- `slg`
-  - career slugging percentage
-- `extraBaseHits`
-  - career doubles + triples + home runs
-  - used as a proxy for run-driving power
+- `backend/.env.example`
 
-### Cache behavior
-
-Added a dedicated cache key:
+with:
 
 ```txt
-rbiCtx:${batterId}
+JWT_SECRET=replace_me
 ```
-
-TTL:
-
-```txt
-6 hours
-```
-
-This matches the cadence of the other medium-stability player stat routes.
-
-### Fallback behavior
-
-If career stats are unavailable or the MLB request fails, the route returns a safe empty payload:
-
-```json
-{
-  "rbiPerGame": 0,
-  "rbiRate": 0,
-  "slg": ".000",
-  "extraBaseHits": 0
-}
-```
-
-No 404 is thrown for missing stats in this case.
-
-### Implementation notes
-
-- Added `RBI_CTX_TTL_MS = 6 * 60 * 60 * 1000`
-- Added `emptyRbiContext()` helper
-- Route is cache-first like the rest of `players.js`
-- Kept this as a pure backend enhancement — no frontend wiring yet
 
 ### Verification
 
-Ran a module-load sanity check:
+Installed the new backend deps, then ran the exact requested module-load check:
 
 ```bash
-node -e "require('./backend/routes/players')"
+node -e "require('./backend/routes/auth'); require('./backend/routes/picks'); require('./backend/routes/notes'); require('./backend/routes/digest'); console.log('✅ all modules load cleanly')"
 ```
 
 Result:
-- players router loaded cleanly
-- no syntax or route-order issues detected
 
-### Files changed in Session 24
-- `backend/routes/players.js`
+```txt
+✅ all modules load cleanly
+```
+
+### Files added / changed in Session 25
+
+- `backend/package.json`
+- `backend/.env.example`
+- `backend/server.js`
+- `backend/seed-users.js`
+- `backend/middleware/auth.js`
+- `backend/routes/auth.js`
+- `backend/routes/picks.js`
+- `backend/routes/notes.js`
+- `backend/routes/digest.js`
+- `backend/data/users.json`
+- `backend/data/picks.json`
+- `backend/data/notes.json`
 - `prop-scout-handoff.md`
 
-### Ready for CW
+### Frontend auth — done (CW Session 26)
 
-This is a clean handoff point for Claude Cowork. The backend RBI context endpoint is now available for future RBI prop-engine work, and it follows the same cache/fallback style as the rest of the player data routes.
+- **`_authToken`** module-level variable — `apiFetch` and `apiMutate` both read it automatically. Set once on login, cleared on logout or 401. No need to pass token to individual call sites.
+- **401 handling** — both helpers dispatch `window.dispatchEvent(new Event("propscout:unauthorized"))` on 401. A `useEffect` in App listens and calls logout.
+- **Auth state** — `authToken`, `currentUser` (`{ userId, username }`), `loginUser`, `loginPass`, `loginError`, `loginLoading` — all in App.
+- **Login screen** — full-screen gate rendered when `!authToken`. Dark Discord style, centered card (max 360px), ⚾ branding, username + password fields, green Sign In button, red error chip. Token stored in `localStorage` as `propscout_token`. JWT payload decoded client-side via `atob` to initialize `currentUser` without an extra network call.
+- **`handleLogin`** — calls `POST /api/auth/login`, sets `_authToken`, updates state + localStorage.
+- **`handleLogout`** — clears localStorage, resets `_authToken`, clears `propLog` + `liveDigest`.
+- **Footer** — username display (`👤 username`) + "Sign Out" button above the data-source line.
 
 ---
 
-*Updated April 16 2026 — Prop Scout v7 · Session 24 complete · RBI context backend endpoint added*
+*Updated April 16 2026 — Session 26 complete · Frontend auth shipped · app is deploy-ready*

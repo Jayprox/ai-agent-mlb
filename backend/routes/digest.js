@@ -2,12 +2,12 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const cache = require("../services/cache");
+const requireAuth = require("../middleware/auth");
 
 const router = express.Router();
 
 const DATA_DIR = path.join(__dirname, "..", "data");
 const PICKS_FILE = path.join(DATA_DIR, "picks.json");
-const DIGEST_CACHE_KEY = "digest:7d";
 const DIGEST_TTL_MS = 5 * 60 * 1000;
 const WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const TYPE_BUCKETS = ["K", "Hits", "TB", "HR", "F5", "NRFI", "Other"];
@@ -64,11 +64,12 @@ function emptyDigest() {
   };
 }
 
-function computeDigest(picks) {
+function computeDigest(picks, userId) {
   const digest = emptyDigest();
   const cutoff = Date.now() - WINDOW_MS;
 
   const graded = picks.filter((pick) => {
+    if (pick?.userId !== userId) return false;
     if (pick?.result !== "hit" && pick?.result !== "miss") return false;
     const ts = Date.parse(pick?.timestamp || "");
     return !Number.isNaN(ts) && ts >= cutoff;
@@ -84,7 +85,6 @@ function computeDigest(picks) {
     if (pick.result === "hit") {
       digest.hits += 1;
       digest.byType[bucket].hits += 1;
-
       if (!digest.bestHit || confidence > digest.bestHit.confidence) {
         digest.bestHit = summarizePick(pick);
       }
@@ -92,7 +92,6 @@ function computeDigest(picks) {
 
     if (pick.result === "miss") {
       digest.misses += 1;
-
       if (!digest.worstMiss || confidence > digest.worstMiss.confidence) {
         digest.worstMiss = summarizePick(pick);
       }
@@ -103,22 +102,25 @@ function computeDigest(picks) {
   return digest;
 }
 
-router.get("/", (_req, res) => {
-  const cached = cache.get(DIGEST_CACHE_KEY);
+router.use(requireAuth);
+
+router.get("/", (req, res) => {
+  const cacheKey = `digest:7d:${req.userId}`;
+  const cached = cache.get(cacheKey);
   if (cached) {
     res.setHeader("X-Cache", "HIT");
     return res.json(cached);
   }
 
   const store = readStore();
-  const digest = computeDigest(store.picks);
-  cache.set(DIGEST_CACHE_KEY, digest, DIGEST_TTL_MS);
+  const digest = computeDigest(store.picks, req.userId);
+  cache.set(cacheKey, digest, DIGEST_TTL_MS);
   res.setHeader("X-Cache", "MISS");
   return res.json(digest);
 });
 
-router.post("/refresh", (_req, res) => {
-  cache.clear(DIGEST_CACHE_KEY);
+router.post("/refresh", (req, res) => {
+  cache.clear(`digest:7d:${req.userId}`);
   return res.json({ ok: true });
 });
 
