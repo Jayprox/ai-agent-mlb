@@ -3,16 +3,16 @@ const path = require("path");
 const bcrypt = require("bcrypt");
 
 const USERS = [
-  { id: "user1", username: "jd", password: "changeme1" },
-  { id: "user2", username: "friend1", password: "changeme2" },
-  { id: "user3", username: "friend2", password: "changeme3" },
-  { id: "user4", username: "friend3", password: "changeme4" },
-  { id: "user5", username: "friend4", password: "changeme5" },
-  { id: "user6", username: "friend5", password: "changeme6" },
-  { id: "user7", username: "friend6", password: "changeme7" },
-  { id: "user8", username: "friend7", password: "changeme8" },
-  { id: "user9", username: "friend8", password: "changeme9" },
-  { id: "user10", username: "friend9", password: "changeme10" },
+  { id: "user1",  username: "fastballzoro",   password: "password123" },
+  { id: "user2",  username: "sliderpikachu",  password: "password456" },
+  { id: "user3",  username: "cleanupgojo",    password: "password789" },
+  { id: "user4",  username: "closertanjiro",  password: "password234" },
+  { id: "user5",  username: "leadoffluffy",   password: "password345" },
+  { id: "user6",  username: "fastballsanji",  password: "password987" },
+  { id: "user7",  username: "cleanupgengar",  password: "password321" },
+  { id: "user8",  username: "slidernobara",   password: "password432" },
+  { id: "user9",  username: "closernezuko",   password: "password765" },
+  { id: "user10", username: "leadoffkaiba",   password: "password098" },
 ];
 
 const DATA_DIR = path.join(__dirname, "data");

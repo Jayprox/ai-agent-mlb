@@ -1,0 +1,52 @@
+[
+  {
+    "id": "user1",
+    "username": "fastballzoro",
+    "passwordHash": "$2b$10$ZVTyAJ/kmNKo3Qe3fThM6.KRQBwsOdvHRVXg25q8NNWLrQaTDy28G"
+  },
+  {
+    "id": "user2",
+    "username": "sliderpikachu",
+    "passwordHash": "$2b$10$y65qgOQloBiL65ywwg34Seh8IMU6o/kVHnPVnrWjje50mVQdrV4jS"
+  },
+  {
+    "id": "user3",
+    "username": "cleanupgojo",
+    "passwordHash": "$2b$10$bVgxbSKJSTMu8w1HKgjJveVtQsTJTZ/EY9hwTc6dzV8ZMM4jOs58G"
+  },
+  {
+    "id": "user4",
+    "username": "closertanjiro",
+    "passwordHash": "$2b$10$5iHlRZziTXoDd.wBSMpI0uehpjjHcS/jm3WHRs75BR2AUOIUBO.Ui"
+  },
+  {
+    "id": "user5",
+    "username": "leadoffluffy",
+    "passwordHash": "$2b$10$e/BAUpYeZ7HgPsl6/0U9CeIqz8qUYRSwi3MgDNNqhE38rC7wc/zPS"
+  },
+  {
+    "id": "user6",
+    "username": "fastballsanji",
+    "passwordHash": "$2b$10$gVe3MQlsgh97FrcLOCvqHOdTkg8UUW.ZUonPEp56/el.nOLkMxeE."
+  },
+  {
+    "id": "user7",
+    "username": "cleanupgengar",
+    "passwordHash": "$2b$10$VgcTy/pKnfqurZyc0D//5uqUJ/Jk75NWCsAEjmok8SpNbDdvhFP5C"
+  },
+  {
+    "id": "user8",
+    "username": "slidernobara",
+    "passwordHash": "$2b$10$DZCy03uLsK3Ws0092jd9oeGAHi2/ZeVEIr908kb70NWQ7K196Xvo2"
+  },
+  {
+    "id": "user9",
+    "username": "closernezuko",
+    "passwordHash": "$2b$10$GMM0.Xc7WAvhuwViqae5KuG3NYUMBkOFVA4RVNBbS1ZFO1KAhTHp2"
+  },
+  {
+    "id": "user10",
+    "username": "leadoffkaiba",
+    "passwordHash": "$2b$10$8Azg/rawGAvvrlK9GDHa6.6A.u3iXQdwTuZShMOe.oJNJHVmktlYy"
+  }
+]

@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors    = require("cors");
+const path    = require("path");
 const cache   = require("./services/cache");
 const authRouter = require("./routes/auth");
 const picksRouter = require("./routes/picks");
@@ -48,6 +49,14 @@ app.delete("/api/cache", (_req, res) => {
   cache.clear();
   res.json({ ok: true, message: "Cache cleared" });
 });
+
+// ── Static frontend (production only) ────────────────────────
+if (process.env.NODE_ENV === "production") {
+  const distPath = path.join(__dirname, "..", "dist");
+  app.use(express.static(distPath));
+  // SPA fallback — serve index.html for all non-API routes
+  app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
+}
 
 // ── 404 + error handlers ─────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));

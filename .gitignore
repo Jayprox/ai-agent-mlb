@@ -16,7 +16,7 @@ dist/
 # Runtime data — user picks/notes, never commit
 backend/data/picks.json
 backend/data/notes.json
-backend/data/users.json
+# users.json intentionally NOT gitignored — contains only bcrypt hashes (safe to store)
 
 # Lock files (generated, not needed in repo)
 package-lock.json

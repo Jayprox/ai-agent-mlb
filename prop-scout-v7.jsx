@@ -4000,13 +4000,13 @@ export default function App() {
         {/* Footer */}
         <div style={{ marginTop: 10 }}>
           {/* User row */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-            <div style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace" }}>
-              👤 <span style={{ color: "#6b7280" }}>{currentUser?.username ?? "—"}</span>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+              👤 <span style={{ color: "#9ca3af" }}>{currentUser?.username ?? "—"}</span>
             </div>
             <button
               onClick={handleLogout}
-              style={{ background: "none", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 9px", fontSize: 9, color: "#6b7280", fontFamily: "monospace", cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.06em" }}
+              style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "7px 16px", fontSize: 12, color: "#f87171", fontFamily: "monospace", cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, minWidth: 90, minHeight: 36 }}
             >
               Sign Out
             </button>
