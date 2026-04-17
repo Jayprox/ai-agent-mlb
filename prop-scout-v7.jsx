@@ -1459,6 +1459,21 @@ export default function App() {
     }
   }, [selectedId, view, liveSlate]);
 
+  // Auto-pin the away team's #3 batter when the lineup loads and nothing is manually pinned.
+  // Away lineup vs home pitcher = the primary matchup shown on the Overview tab.
+  // Fires again whenever selectedId changes (game switch clears the pin via openGame).
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || pinnedBatterId) return;
+    const sg = liveSlate?.find(g => g.gamePk === selectedId);
+    if (!sg) return;
+    const lineup = liveLineups[sg.gamePk];
+    if (!lineup?.away?.length) return;
+    // Sort by batting order and pick the #3 spot (index 2); fall back to #4 or #1
+    const sorted = [...lineup.away].sort((a, b) => (a.battingOrder ?? 99) - (b.battingOrder ?? 99));
+    const target = sorted[2] ?? sorted[3] ?? sorted[0];
+    if (target?.id) setPinnedBatterId(target.id);
+  }, [liveLineups, selectedId]);
+
   // Fetch live odds on mount (and on manual refresh)
   const refreshOdds = async () => {
     if (IS_ODDS_SANDBOX) return;
@@ -2314,7 +2329,7 @@ export default function App() {
     ? { ...game.nrfi, lean: eraLean.lean, confidence: eraLean.confidence, live: true }
     : game.nrfi;
 
-  const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); };
+  const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); setPinnedBatterId(null); };
 
   // ── Pick tracker helpers ──────────────────────────────────────────────────
   const logPick = (prop) => {
@@ -2684,7 +2699,11 @@ export default function App() {
               {/* Batter — pinned lineup batter or placeholder when live + no pin */}
               {!IS_STATS_SANDBOX && !pinnedBatterId ? (
                 <div style={{ textAlign: "center", padding: "10px 0 4px" }}>
-                  <div style={{ fontSize: 11, color: "#4b5563" }}>📌 Go to <strong style={{ color: "#9ca3af" }}>Lineup</strong> tab and pin a batter to see their stats here.</div>
+                  <div style={{ fontSize: 11, color: "#4b5563" }}>
+                    {homeLineup.length || awayLineup.length
+                      ? "📌 Pin a batter from the Lineup tab to view their props here."
+                      : "⏳ Waiting for confirmed lineup…"}
+                  </div>
                 </div>
               ) : (
                 <>
