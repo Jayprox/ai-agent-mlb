@@ -1947,7 +1947,7 @@ export default function App() {
         // High avg score = tough lineup = pitcher likely pulled sooner
         const oppBatters = game.lineups?.away ?? [];
         if (oppBatters.length >= 6) {
-          const scores = oppBatters.map(b => calcMatchupScore(b, pitcher)).filter(s => s > 0);
+          const scores = oppBatters.map(b => batterMatchupScore(b, pitcher)).filter(s => s > 0);
           if (scores.length >= 4) {
             const avgSc = scores.reduce((a, b) => a + b, 0) / scores.length;
             if      (avgSc >= 55) { score -= 7; projOuts -= 1.0; oR.push(`Tough lineup (avg score ${Math.round(avgSc)})`); }
@@ -2380,13 +2380,15 @@ export default function App() {
 
       // ── Lineup-strength signal (updates when lineups confirm) ──
       // Opposite-hand batters hit the pitcher better → tougher outing.
-      const awayLineup = liveLineups[sg.gamePk]?.away ?? [];
-      const lineupConfirmed = liveLineups[sg.gamePk]?.confirmed ?? false;
+      // Note: renamed to sgAwayBatters to avoid shadowing outer awayLineup variable.
+      const sgLineupEntry   = liveLineups[sg.gamePk];
+      const sgAwayBatters   = sgLineupEntry?.away ?? [];
+      const lineupConfirmed = sgLineupEntry?.confirmed ?? false;
       let lineupAdj = 0;  // applied to both K and Outs scores
-      if (lineupConfirmed && awayLineup.length >= 7) {
+      if (lineupConfirmed && sgAwayBatters.length >= 7) {
         const pitcherHand  = sg.probablePitchers?.home?.hand ?? "R";
-        const oppHandCount = awayLineup.filter(b => b.hand && b.hand !== pitcherHand && b.hand !== "?").length;
-        const oppHandPct   = oppHandCount / awayLineup.length;
+        const oppHandCount = sgAwayBatters.filter(b => b.hand && b.hand !== pitcherHand && b.hand !== "?").length;
+        const oppHandPct   = oppHandCount / sgAwayBatters.length;
         if      (oppHandPct >= 0.67) lineupAdj = -5; // platoon-heavy lineup — tough for this pitcher
         else if (oppHandPct >= 0.56) lineupAdj = -2;
         else if (oppHandPct <= 0.33) lineupAdj = +5; // pitcher-friendly handedness matchup
