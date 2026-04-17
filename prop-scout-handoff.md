@@ -278,6 +278,135 @@ The mock SLATE array is always present as a fallback scaffold. Live data overlay
 
 ---
 
+## 🤖 Codex Task Backlog
+
+Tasks ready for Codex to pick up. Each is self-contained backend work — CW handles frontend wiring after.
+
+---
+
+### Task A — Live NRFI Data (Intel Tab)
+
+**Current state:** The NRFI card in the Intel tab (first inning scoring %, tendency text, lean) uses mock template data for all live games. It's hardcoded from `SLATE[0]` and does not reflect real team tendencies.
+
+**Goal:** Replace mock NRFI data with real per-team first-inning scoring history pulled from the MLB Stats API.
+
+**Suggested approach:**
+- New backend route: `GET /api/nrfi/:gamePk`
+- For each team in the game, fetch their last N games from `statsapi.mlb.com/api/v1/schedule?gamePks=...` and check first-inning linescore
+- Endpoint: `https://statsapi.mlb.com/api/v1/game/{gamePk}/linescore` — returns inning-by-inning runs
+- Compute: `scoredPct` (% of games where team scored in the 1st), `avgRuns` (avg 1st inning runs), `tendency` (descriptive string)
+- Cache TTL: 1 hour
+- Return shape (must match existing frontend contract):
+```json
+{
+  "awayFirst": { "scoredPct": "34%", "avgRuns": 0.41, "tendency": "Slow starters" },
+  "homeFirst":  { "scoredPct": "47%", "avgRuns": 0.63, "tendency": "Average 1st inning output" },
+  "lean": "NRFI",
+  "confidence": 61
+}
+```
+- Frontend already reads `game.nrfi` — just needs the live fetch wired in `buildLiveGame()` in `prop-scout-v7.jsx` (CW will handle this after backend is done)
+
+#### 📋 Codex Prompt — Task A
+
+> You are working on Prop Scout, an MLB betting research app. The backend is Node/Express in `backend/`. All existing routes are in `backend/routes/`. Use `backend/services/cache.js` for caching and `backend/services/mlbApi.js` for MLB Stats API calls.
+>
+> **Your task:** Build a new backend route `GET /api/nrfi/:gamePk` that returns real first-inning scoring data for both teams in a game.
+>
+> **Steps:**
+> 1. Use the MLB Stats API to look up the game's away and home team IDs from `/api/v1/schedule?gamePks={gamePk}&hydrate=team`.
+> 2. For each team, fetch their last 20 completed games from `/api/v1/schedule?teamId={teamId}&startDate=...&endDate=...&sportId=1&gameType=R` and collect each game's `gamePk`.
+> 3. For each of those gamePks, fetch `/api/v1/game/{gamePk}/linescore` and check index 0 of the `innings` array for that team's runs scored in the 1st inning.
+> 4. Compute: `scoredPct` (% of games with runs > 0 in the 1st, formatted as `"34%"`), `avgRuns` (average 1st inning runs, rounded to 2 decimals), `tendency` (a short descriptive string: e.g. `"Slow starters — bottom 25% in 1st inn scoring"`, `"Average 1st inning output"`, `"Strong first inning team"`, etc. based on thresholds).
+> 5. Compute `lean` (`"NRFI"` or `"YRFI"`) and `confidence` (0–100 integer) based on both teams' combined `scoredPct`.
+> 6. Cache the result for 1 hour using `cache.set(key, data, 60 * 60 * 1000)`.
+> 7. Mount the route in `backend/server.js` as `app.use("/api/nrfi", require("./routes/nrfi"))`.
+> 8. This route does NOT require auth — it's a public reference route like `/api/schedule` and `/api/lineups`.
+> 9. Return shape must be exactly:
+> ```json
+> {
+>   "awayFirst": { "scoredPct": "34%", "avgRuns": 0.41, "tendency": "Slow starters" },
+>   "homeFirst":  { "scoredPct": "47%", "avgRuns": 0.63, "tendency": "Average 1st inning output" },
+>   "lean": "NRFI",
+>   "confidence": 61
+> }
+> ```
+> 10. Update `prop-scout-handoff.md` noting Task A is complete with any important implementation details.
+
+---
+
+### Task B — Live Bullpen Data (Intel Tab)
+
+**Current state:** The Bullpen card (Intel tab + Bullpen tab) uses mock template data — fatigue level, grade (A–C), rest days, pitches last 3 days, reliever list — all hardcoded from SLATE template.
+
+**Goal:** Replace mock bullpen data with real reliever usage from the MLB Stats API.
+
+**Suggested approach:**
+- New backend route: `GET /api/bullpen/:gamePk`
+- Use `statsapi.mlb.com/api/v1/schedule?gamePks={gamePk}&hydrate=probablePitcher,roster(rosterType=active)` to get both team rosters
+- For each non-SP reliever, fetch recent game logs: `statsapi.mlb.com/api/v1/people/{playerId}/stats?stats=gameLog&group=pitching`
+- Compute per team:
+  - `fatigueLevel`: "HIGH" / "MODERATE" / "FRESH" based on pitches thrown in last 3 days
+  - `restDays`: days since last appearance for key relievers
+  - `pitchesLast3`: total bullpen pitches last 3 days
+  - `grade`: A (fresh, deep) / B (moderate) / C (taxed)
+  - `relievers`: array of `{ name, hand, era, role, lastUsed, pitchesLast3 }`
+- Cache TTL: 15 min (bullpen usage changes daily)
+- Return shape (must match existing frontend contract):
+```json
+{
+  "away": {
+    "fatigueLevel": "MODERATE",
+    "restDays": 1,
+    "pitchesLast3": 134,
+    "grade": "B",
+    "setupDepth": "avg",
+    "lrBalance": "balanced",
+    "relievers": [
+      { "name": "Clay Holmes", "hand": "R", "era": "2.84", "role": "Closer", "lastUsed": "Yesterday", "pitchesLast3": 18 }
+    ]
+  },
+  "home": { ...same shape... }
+}
+```
+- Frontend already reads `game.bullpen.away` and `game.bullpen.home` — CW will wire the live fetch in `buildLiveGame()` after backend is done
+
+#### 📋 Codex Prompt — Task B
+
+> You are working on Prop Scout, an MLB betting research app. The backend is Node/Express in `backend/`. All existing routes are in `backend/routes/`. Use `backend/services/cache.js` for caching and `backend/services/mlbApi.js` for MLB Stats API calls.
+>
+> **Your task:** Build a new backend route `GET /api/bullpen/:gamePk` that returns real bullpen fatigue and reliever usage data for both teams in a game.
+>
+> **Steps:**
+> 1. Fetch the game's away and home team IDs from `/api/v1/schedule?gamePks={gamePk}&hydrate=team`.
+> 2. For each team, fetch the active roster from `/api/v1/teams/{teamId}/roster?rosterType=active&hydrate=person`. Filter to relievers and middle relievers (position type `"Relief Pitcher"` or similar — exclude SP and catchers/fielders).
+> 3. For each reliever, fetch their last 5 game appearances from `/api/v1/people/{playerId}/stats?stats=gameLog&group=pitching&season={currentYear}`. Only look at the last 3 calendar days. Sum `numberOfPitches` across those games for `pitchesLast3`. Record `lastUsed` as "Today", "Yesterday", or "X days ago".
+> 4. Compute per team:
+>    - `pitchesLast3`: total bullpen pitches thrown in last 3 days across all relievers
+>    - `fatigueLevel`: `"HIGH"` if pitchesLast3 > 180, `"MODERATE"` if 100–180, `"FRESH"` if < 100
+>    - `grade`: `"A"` if FRESH + 4+ available relievers, `"B"` if MODERATE, `"C"` if HIGH
+>    - `restDays`: minimum rest days among the team's top 3 relievers (by recent usage)
+>    - `setupDepth`: `"deep"` / `"avg"` / `"thin"` based on available fresh arms
+>    - `lrBalance`: `"lefty-heavy"` / `"righty-heavy"` / `"balanced"` based on hand split of roster
+>    - `relievers`: array sorted by `pitchesLast3` descending (most recently used first), each with `{ name, hand, era, role, lastUsed, pitchesLast3 }`
+> 5. Cache result for 15 minutes using `cache.set(key, data, 15 * 60 * 1000)`.
+> 6. Mount in `backend/server.js` as `app.use("/api/bullpen", require("./routes/bullpen"))`. Note: a `bullpen.js` stub may already exist in `backend/routes/` — check first and build on it if so.
+> 7. This route does NOT require auth — public reference route.
+> 8. Return shape must be exactly:
+> ```json
+> {
+>   "away": {
+>     "fatigueLevel": "MODERATE", "restDays": 1, "pitchesLast3": 134,
+>     "grade": "B", "setupDepth": "avg", "lrBalance": "balanced",
+>     "relievers": [{ "name": "Clay Holmes", "hand": "R", "era": "2.84", "role": "Closer", "lastUsed": "Yesterday", "pitchesLast3": 18 }]
+>   },
+>   "home": { "fatigueLevel": "FRESH", "restDays": 2, "pitchesLast3": 89, "grade": "A", "setupDepth": "deep", "lrBalance": "righty-heavy", "relievers": [...] }
+> }
+> ```
+> 9. Update `prop-scout-handoff.md` noting Task B is complete with any important implementation details.
+
+---
+
 ## Key Design Decisions
 
 | Decision | Choice | Reason |
