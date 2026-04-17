@@ -4203,6 +4203,12 @@ export default function App() {
                       <span style={{ color: "#818cf8" }}>💡 Tip: go to the <strong>Lineup tab</strong>, expand a batter, and pin them to the Overview tab — their notes will update with that batter's real Statcast splits against this pitcher's arsenal.</span>
                     </div>
                   </div>
+                  <div style={{ background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#a78bfa", fontWeight: 700, marginBottom: 4 }}>Handedness penalty</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                      Same-hand matchups (RHP vs RHB, LHP vs LHB) apply an <span style={{ color: "#f9fafb", fontWeight: 600 }}>8% score reduction</span> across all pitch components. Breaking balls naturally run away from same-handed batters, giving the pitcher a built-in edge. Opposite-hand matchups (RHP vs LHB) get no penalty — historically easier for the batter.
+                    </div>
+                  </div>
                   <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
                     The <span style={{ color: "#f9fafb", fontWeight: 700 }}>Confidence Meter</span> (0–100%) on each prop shows how strongly the engine leans. <span style={{ color: "#22c55e" }}>70%+</span> is a strong signal worth considering.
                   </div>
