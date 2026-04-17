@@ -1228,6 +1228,7 @@ export default function App() {
 
   const [selectedId, setSelectedId] = useState(1);
   const [view, setView] = useState("slate"); // "slate" | "game" | "picks"
+  const [showHelp, setShowHelp] = useState(false);
   const [picksFilter, setPicksFilter] = useState("all"); // "all" | "pending" | "hit" | "miss"
   const [showTrends, setShowTrends] = useState(true);   // collapse/expand Trends card in Picks view
   const [liveDigest, setLiveDigest] = useState(null);   // { period, total, hits, misses, pct, bestHit, worstMiss, byType }
@@ -4001,8 +4002,15 @@ export default function App() {
         <div style={{ marginTop: 10 }}>
           {/* User row */}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-            <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
-              👤 <span style={{ color: "#9ca3af" }}>{currentUser?.username ?? "—"}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+                👤 <span style={{ color: "#9ca3af" }}>{currentUser?.username ?? "—"}</span>
+              </div>
+              <button
+                onClick={() => setShowHelp(true)}
+                style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.35)", borderRadius: 8, padding: "7px 12px", fontSize: 13, color: "#818cf8", fontFamily: "monospace", cursor: "pointer", fontWeight: 700, minHeight: 36, lineHeight: 1 }}
+                title="Help & Glossary"
+              >?</button>
             </div>
             <button
               onClick={handleLogout}
@@ -4032,6 +4040,111 @@ export default function App() {
           </div>
         </div>
       </div>
+      {/* ── Help Overlay ── */}
+      {showHelp && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 999, background: "#0b0c17", overflowY: "auto", padding: "0 0 40px 0" }}>
+          {/* Header */}
+          <div style={{ position: "sticky", top: 0, zIndex: 10, background: "#0b0c17", borderBottom: "1px solid #1f2437", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>⚾ PROP SCOUT GUIDE</div>
+            <button onClick={() => setShowHelp(false)} style={{ background: "rgba(255,255,255,0.07)", border: "1px solid #2d3148", borderRadius: 8, padding: "6px 14px", fontSize: 12, color: "#9ca3af", fontFamily: "monospace", cursor: "pointer", fontWeight: 700 }}>✕ CLOSE</button>
+          </div>
+
+          <div style={{ padding: "16px 14px", display: "flex", flexDirection: "column", gap: 20 }}>
+
+            {/* Color Guide */}
+            {(() => {
+              const Section = ({ title, children }) => (
+                <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 10, overflow: "hidden" }}>
+                  <div style={{ background: "#1a1c2e", padding: "9px 14px", fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.1em", textTransform: "uppercase" }}>{title}</div>
+                  <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>{children}</div>
+                </div>
+              );
+              const Row = ({ color, label, sub }) => (
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                  <div style={{ width: 12, height: 12, borderRadius: 3, background: color, flexShrink: 0, marginTop: 2 }} />
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", fontFamily: "monospace" }}>{label}</div>
+                    {sub && <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2, lineHeight: 1.4 }}>{sub}</div>}
+                  </div>
+                </div>
+              );
+              const Stat = ({ term, def }) => (
+                <div style={{ borderBottom: "1px solid #1f2437", paddingBottom: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace" }}>{term}</div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 3, lineHeight: 1.5 }}>{def}</div>
+                </div>
+              );
+              const PropRow = ({ type, def }) => (
+                <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                  <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 10, fontWeight: 700, color: "#22c55e", fontFamily: "monospace", flexShrink: 0, minWidth: 44, textAlign: "center" }}>{type}</div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{def}</div>
+                </div>
+              );
+              return (<>
+                <Section title="🎨 Color Guide — What Do the Colors Mean?">
+                  <Row color="#22c55e" label="Green  →  Pitcher Edge (score < 35)" sub="The pitcher has the advantage in this matchup. Good for K props and unders." />
+                  <Row color="#fbbf24" label="Yellow  →  Neutral (score 35–54)" sub="No clear edge either way. Look for other factors before betting." />
+                  <Row color="#ef4444" label="Red  →  Batter Edge (score 55+)" sub="The batter has the advantage. Good for hit, TB, and HR props." />
+                  <Row color="#a78bfa" label="Purple  →  Picks & logged data" sub="Used for your saved prop picks and the picks tracker." />
+                  <div style={{ background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 8, padding: "10px 12px", marginTop: 4 }}>
+                    <div style={{ fontSize: 11, color: "#818cf8", lineHeight: 1.6 }}>
+                      <strong style={{ color: "#a78bfa" }}>Quick rule:</strong> Green favors the pitcher, red favors the batter. A red matchup score on a hitter = good spot for a hits or TB prop. A green matchup score = good spot for a K prop or under.
+                    </div>
+                  </div>
+                </Section>
+
+                <Section title="📊 How the Matchup Score Works">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                    Each batter gets a <span style={{ color: "#f9fafb", fontWeight: 700 }}>0–100 matchup score</span> based on how they historically perform against the pitcher's specific pitch types (fastball, slider, curveball, etc.).
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {[["AVG vs pitch type", "45%", "How often they get a hit on that pitch"], ["Whiff rate", "35%", "How often they swing and miss (lower = batter wins)"], ["Slugging vs pitch", "20%", "Power when they make contact"]].map(([f, w, d]) => (
+                      <div key={f} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#22c55e", fontFamily: "monospace", minWidth: 36, marginTop: 1 }}>{w}</div>
+                        <div>
+                          <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 600 }}>{f}</div>
+                          <div style={{ fontSize: 10, color: "#6b7280" }}>{d}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6, marginTop: 4 }}>
+                    The <span style={{ color: "#f9fafb", fontWeight: 700 }}>Confidence Meter</span> (0–100%) on each prop shows how strongly the engine leans. <span style={{ color: "#22c55e" }}>70%+</span> is a strong signal worth considering.
+                  </div>
+                </Section>
+
+                <Section title="🎯 Prop Types Explained">
+                  <PropRow type="K" def="Pitcher strikeouts — Over/Under on how many batters the starter fans. High K/9 + green matchup scores = good over spot." />
+                  <PropRow type="Hits" def="Batter hits — typically Over 0.5 hits (get at least one hit) or Under 1.5. Red matchup score = good over spot." />
+                  <PropRow type="TB" def="Total Bases — counts singles (1), doubles (2), triples (3), home runs (4). Over 1.5 TB is a popular line." />
+                  <PropRow type="HR" def="Home Run — will this batter hit at least one HR? Looks at power metrics, park factor, and pitcher tendencies." />
+                  <PropRow type="F5" def="First 5 Innings Over/Under — the game total through just the first 5 innings. Depends heavily on starting pitchers since relievers haven't entered yet." />
+                  <PropRow type="NRFI" def="No Run First Inning — neither team scores in the 1st inning. Good when both SPs have low first-inning scoring rates and low walk rates." />
+                  <PropRow type="RBI" def="Runs Batted In — will this batter drive in at least one run? Looks at batting order position, runners on base tendencies, and extra-base hit rate." />
+                </Section>
+
+                <Section title="📖 Stat Glossary">
+                  {[
+                    ["ERA", "Earned Run Average — runs a pitcher allows per 9 innings pitched. Under 3.00 = elite, 3–4 = solid, 5+ = hittable."],
+                    ["WHIP", "Walks + Hits per Inning Pitched. Measures how many baserunners a pitcher allows. Under 1.10 = elite, 1.10–1.30 = average, 1.40+ = concerning."],
+                    ["K/9", "Strikeouts per 9 innings. Measures a pitcher's swing-and-miss ability. 10+ = high strikeout pitcher, great for K props."],
+                    ["BB/9", "Walks per 9 innings. Measures control. Lower is better — pitchers under 2.5 BB/9 are very controlled."],
+                    ["AVG", "Batting Average — hits divided by at-bats. .300+ = excellent hitter, .250 = average, under .220 = struggling."],
+                    ["OPS", "On-base Plus Slugging. Combines how often a batter gets on base with their power. .900+ = elite, .800 = solid, under .700 = below average."],
+                    ["SLG", "Slugging Percentage — total bases per at-bat. Measures raw power. .500+ = power hitter."],
+                    ["wOBA", "Weighted On-Base Average — advanced hitting stat that values each outcome (walk, single, HR, etc.) by how many runs it's worth. .340+ = above average."],
+                    ["IP", "Innings Pitched — how deep into the game a starter typically goes. Avg IP of 6+ means they usually work into the late innings."],
+                    ["PC", "Pitch Count — average pitches thrown per start. High PC + deep IP = efficient pitcher."],
+                    ["K%", "Strikeout rate — percentage of batters struck out. 28%+ is high for a pitcher; above 25% is concerning for a hitter facing this pitcher."],
+                    ["HR Factor", "Park Factor for home runs — over 1.0 means the stadium inflates HR rates (hitter-friendly), under 1.0 suppresses them (pitcher-friendly)."],
+                  ].map(([t, d]) => <Stat key={t} term={t} def={d} />)}
+                </Section>
+              </>);
+            })()}
+
+          </div>
+        </div>
+      )}
     </>
   );
 }
