@@ -2638,14 +2638,15 @@ export default function App() {
                   </div>
                   {recentStarts.length > 0 && (
                     <div style={{ marginTop: 8 }}>
-                      {/* Sparkline — ERA bar chart for last 5 starts (oldest → newest, left → right) */}
+                      {/* Sparkline — ERA bar chart for last 5 starts (oldest → newest, left → right)
+                          ER badges are rendered directly below each bar so they stay aligned */}
                       {recentStarts.length >= 2 && (() => {
                         const starts = recentStarts.slice(0, 5).reverse(); // oldest first
                         const MAX_ERA_SCALE = 9;
                         return (
-                          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 28, marginBottom: 8 }}>
+                          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, marginBottom: 8 }}>
                             {starts.map((g, idx) => {
-                              const era = g.ip > 0 ? (g.er / parseIpToOuts(g.ip)) * 27 : 0; // rough ERA equiv for that start
+                              const era = g.ip > 0 ? (g.er / parseIpToOuts(g.ip)) * 27 : 0;
                               const heightPct = Math.min(era / MAX_ERA_SCALE, 1);
                               const barH = Math.max(3, Math.round(heightPct * 24));
                               const barColor = g.er <= 2 ? "#22c55e" : g.er <= 4 ? "#f59e0b" : "#ef4444";
@@ -2653,8 +2654,14 @@ export default function App() {
                               return (
                                 <div key={idx} title={`${g.date} · ${g.er} ER · ${g.ip} IP`}
                                   style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-                                  <div style={{ width: "100%", height: barH, background: barColor, borderRadius: "2px 2px 0 0", opacity: isLatest ? 1 : 0.6, border: isLatest ? `1px solid ${barColor}` : "none" }} />
+                                  {/* bar */}
+                                  <div style={{ width: "100%", height: barH, background: barColor, borderRadius: "2px 2px 0 0", opacity: isLatest ? 1 : 0.7, border: isLatest ? `1px solid ${barColor}` : "none" }} />
+                                  {/* dot on latest */}
                                   {isLatest && <div style={{ width: 4, height: 4, borderRadius: "50%", background: barColor, flexShrink: 0 }} />}
+                                  {/* ER label */}
+                                  <div style={{ fontSize: 8, fontWeight: 700, color: barColor, fontFamily: "monospace", marginTop: isLatest ? 0 : 4 }}>
+                                    {g.er}ER
+                                  </div>
                                 </div>
                               );
                             })}
@@ -2662,20 +2669,6 @@ export default function App() {
                           </div>
                         );
                       })()}
-                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 6 }}>
-                        {recentStarts.slice(0, 5).map((g, idx) => {
-                          const chipColor = g.er <= 2 ? "#22c55e" : g.er <= 4 ? "#f59e0b" : "#ef4444";
-                          return (
-                            <div
-                              key={`${g.date}-${idx}`}
-                              title={`${g.date} vs ${g.opponent} · ${g.ip} IP · ${g.k} K · ${g.er} ER · ${g.result}`}
-                              style={{ background: `${chipColor}18`, border: `1px solid ${chipColor}44`, borderRadius: 999, padding: "3px 7px", fontSize: 9, fontWeight: 700, color: chipColor, fontFamily: "monospace" }}
-                            >
-                              {g.er} ER
-                            </div>
-                          );
-                        })}
-                      </div>
                       {last3Era != null && (
                         <div style={{ fontSize: 10, color: summaryColor, lineHeight: 1.5 }}>
                           Last 3 ERA: {last3Era.toFixed(2)} vs season {gamelog?.seasonEra ?? activePitcher.era ?? "—"}
