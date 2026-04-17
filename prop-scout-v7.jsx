@@ -1394,15 +1394,22 @@ export default function App() {
       .finally(() => setDigestLoading(false));
   }, [view]);
 
-  // Background prefetch: home pitcher stats for ALL slate games so the
-  // cross-slate Best Bets card can compute without waiting for game opens.
+  // Background prefetch: home pitcher stats + lineups for ALL slate games
+  // so the cross-slate Best Bets card can compute and update reactively.
   useEffect(() => {
     if (IS_STATS_SANDBOX || !liveSlate?.length) return;
     liveSlate.forEach(sg => {
+      // Pitcher stats
       const pid = sg.probablePitchers?.home?.id;
       if (pid && !livePitcherStats[pid]) {
         apiFetch(`/api/players/${pid}/stats?group=pitching`)
           .then(data => setLivePitcherStats(prev => ({ ...prev, [pid]: data })))
+          .catch(() => {});
+      }
+      // Lineup — re-fetch if not yet confirmed (1-min TTL on backend keeps it fresh)
+      if (!liveLineups[sg.gamePk]?.confirmed) {
+        apiFetch(`/api/lineups/${sg.gamePk}`)
+          .then(data => setLiveLineups(prev => ({ ...prev, [sg.gamePk]: data })))
           .catch(() => {});
       }
     });
@@ -2365,6 +2372,21 @@ export default function App() {
       const wx    = liveWeather[sg.gamePk];
       const gameLabel = `${sg.away?.abbr ?? "?"} @ ${sg.home?.abbr ?? "?"}`;
 
+      // ── Lineup-strength signal (updates when lineups confirm) ──
+      // Opposite-hand batters hit the pitcher better → tougher outing.
+      const awayLineup = liveLineups[sg.gamePk]?.away ?? [];
+      const lineupConfirmed = liveLineups[sg.gamePk]?.confirmed ?? false;
+      let lineupAdj = 0;  // applied to both K and Outs scores
+      if (lineupConfirmed && awayLineup.length >= 7) {
+        const pitcherHand  = sg.probablePitchers?.home?.hand ?? "R";
+        const oppHandCount = awayLineup.filter(b => b.hand && b.hand !== pitcherHand && b.hand !== "?").length;
+        const oppHandPct   = oppHandCount / awayLineup.length;
+        if      (oppHandPct >= 0.67) lineupAdj = -5; // platoon-heavy lineup — tough for this pitcher
+        else if (oppHandPct >= 0.56) lineupAdj = -2;
+        else if (oppHandPct <= 0.33) lineupAdj = +5; // pitcher-friendly handedness matchup
+        else if (oppHandPct <= 0.44) lineupAdj = +2;
+      }
+
       // ── K prop ──
       let kScore = 50;
       if      (era  < 3.00) kScore += 8;  else if (era  < 3.50) kScore += 5;
@@ -2374,6 +2396,7 @@ export default function App() {
       if (whip < 1.1) kScore += 3; else if (whip > 1.45) kScore -= 5;
       kScore += Math.round((pf.k - 1.0) * 50);
       if (wx && !wx.roof && parseInt(wx.temp) < 55) kScore += 5;
+      kScore += lineupAdj;
       kScore = Math.max(38, Math.min(75, kScore));
       const kLine = Math.max(0.5, Math.round(avgK) - 0.5);
       picks.push({
@@ -2384,6 +2407,7 @@ export default function App() {
         propType: "K",
         gamePk: sg.gamePk,
         game: gameLabel,
+        lineupConfirmed,
       });
 
       // ── Outs prop ──
@@ -2394,6 +2418,7 @@ export default function App() {
       else if (whip > 1.50) oScore -= 12; else if (whip > 1.38) oScore -= 6;
       if      (bbPer9 < 2.5) oScore += 8; else if (bbPer9 < 3.0) oScore += 3;
       else if (bbPer9 > 4.5) oScore -= 8; else if (bbPer9 > 3.5) oScore -= 4;
+      oScore += lineupAdj;
       oScore = Math.max(38, Math.min(75, oScore));
       const oLine = Math.max(0.5, Math.round(avgIP * 3) - 0.5);
       picks.push({
@@ -2404,6 +2429,7 @@ export default function App() {
         propType: "Outs",
         gamePk: sg.gamePk,
         game: gameLabel,
+        lineupConfirmed,
       });
     });
     return picks.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
@@ -2619,7 +2645,10 @@ export default function App() {
                   <div style={{ fontSize: 11, fontWeight: 800, color: "#fbbf24", width: 16, flexShrink: 0, textAlign: "center" }}>{i + 1}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.label}</div>
-                    <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>{p.game}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 1 }}>
+                      <span style={{ fontSize: 9, color: "#6b7280" }}>{p.game}</span>
+                      {p.lineupConfirmed && <span style={{ fontSize: 8, color: "#22c55e", fontFamily: "monospace", fontWeight: 700 }}>✓ LINEUP</span>}
+                    </div>
                   </div>
                   <LeanBadge label={p.lean} positive={p.positive} small />
                   <div style={{ fontSize: 12, fontWeight: 800, color: p.confidence >= 65 ? "#22c55e" : "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 32, textAlign: "right" }}>{p.confidence}%</div>
