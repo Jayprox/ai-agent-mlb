@@ -1394,6 +1394,20 @@ export default function App() {
       .finally(() => setDigestLoading(false));
   }, [view]);
 
+  // Background prefetch: home pitcher stats for ALL slate games so the
+  // cross-slate Best Bets card can compute without waiting for game opens.
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || !liveSlate?.length) return;
+    liveSlate.forEach(sg => {
+      const pid = sg.probablePitchers?.home?.id;
+      if (pid && !livePitcherStats[pid]) {
+        apiFetch(`/api/players/${pid}/stats?group=pitching`)
+          .then(data => setLivePitcherStats(prev => ({ ...prev, [pid]: data })))
+          .catch(() => {});
+      }
+    });
+  }, [liveSlate]);
+
   // Fetch lineups, umpire, + pitcher stats when a live game card opens
   useEffect(() => {
     if (IS_STATS_SANDBOX || view !== "game" || !liveSlate) return;
@@ -2329,6 +2343,72 @@ export default function App() {
     ? { ...game.nrfi, lean: eraLean.lean, confidence: eraLean.confidence, live: true }
     : game.nrfi;
 
+  // ── Cross-slate Best Bets ────────────────────────────────────────────────
+  // Computes K + Outs props for every game that has home pitcher stats loaded.
+  // Returns the top 3 by confidence — shown on the Slate view landing screen.
+  const topSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length ? (() => {
+    const picks = [];
+    liveSlate.forEach(sg => {
+      const pid = sg.probablePitchers?.home?.id;
+      const ps  = livePitcherStats[pid];
+      if (!ps) return;
+
+      const lastName = (ps.name ?? sg.probablePitchers?.home?.name ?? "SP")
+        .split(" ").slice(-1)[0];
+      const era   = parseFloat(ps.era)   || 5.00;
+      const kPer9 = parseFloat(ps.kPer9) || 6.0;
+      const whip  = parseFloat(ps.whip)  || 1.35;
+      const bbPer9= parseFloat(ps.bbPer9)|| 3.5;
+      const avgIP = parseFloat(ps.avgIP) || 5.0;
+      const avgK  = parseFloat(ps.avgK)  || Math.round(kPer9 * avgIP / 9 * 10) / 10;
+      const pf    = PARK_FACTORS[sg.home?.abbr] ?? NEUTRAL_PARK;
+      const wx    = liveWeather[sg.gamePk];
+      const gameLabel = `${sg.away?.abbr ?? "?"} @ ${sg.home?.abbr ?? "?"}`;
+
+      // ── K prop ──
+      let kScore = 50;
+      if      (era  < 3.00) kScore += 8;  else if (era  < 3.50) kScore += 5;
+      else if (era  > 5.00) kScore -= 8;  else if (era  > 4.50) kScore -= 4;
+      if      (kPer9 >= 10) kScore += 14; else if (kPer9 >= 8.5) kScore += 8;
+      else if (kPer9 >= 7)  kScore += 3;  else if (kPer9 < 6)   kScore -= 10;
+      if (whip < 1.1) kScore += 3; else if (whip > 1.45) kScore -= 5;
+      kScore += Math.round((pf.k - 1.0) * 50);
+      if (wx && !wx.roof && parseInt(wx.temp) < 55) kScore += 5;
+      kScore = Math.max(38, Math.min(75, kScore));
+      const kLine = Math.max(0.5, Math.round(avgK) - 0.5);
+      picks.push({
+        label: `${lastName} K O/U ${kLine}`,
+        lean: kScore >= 50 ? "OVER" : "UNDER",
+        positive: kScore >= 50,
+        confidence: kScore,
+        propType: "K",
+        gamePk: sg.gamePk,
+        game: gameLabel,
+      });
+
+      // ── Outs prop ──
+      let oScore = 50;
+      if      (era  < 3.00) oScore += 10; else if (era  < 3.50) oScore += 6;
+      else if (era  > 5.00) oScore -= 10; else if (era  > 4.50) oScore -= 5;
+      if      (whip < 1.10) oScore += 12; else if (whip < 1.25) oScore += 6;
+      else if (whip > 1.50) oScore -= 12; else if (whip > 1.38) oScore -= 6;
+      if      (bbPer9 < 2.5) oScore += 8; else if (bbPer9 < 3.0) oScore += 3;
+      else if (bbPer9 > 4.5) oScore -= 8; else if (bbPer9 > 3.5) oScore -= 4;
+      oScore = Math.max(38, Math.min(75, oScore));
+      const oLine = Math.max(0.5, Math.round(avgIP * 3) - 0.5);
+      picks.push({
+        label: `${lastName} Outs O/U ${oLine}`,
+        lean: oScore >= 50 ? "OVER" : "UNDER",
+        positive: oScore >= 50,
+        confidence: oScore,
+        propType: "Outs",
+        gamePk: sg.gamePk,
+        game: gameLabel,
+      });
+    });
+    return picks.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
+  })() : [];
+
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); setPinnedBatterId(null); };
 
   // ── Pick tracker helpers ──────────────────────────────────────────────────
@@ -2523,6 +2603,31 @@ export default function App() {
         })()}
 
         {view === "slate" && (<>
+          {/* ── Best Bets card ── */}
+          {topSlatePicks.length > 0 && (
+            <Card style={{ borderColor: "rgba(251,191,36,0.35)", background: "rgba(251,191,36,0.04)", marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+                <SLabel style={{ marginBottom: 0 }}>🎯 Best Bets Today</SLabel>
+                <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>AUTO · TOP {topSlatePicks.length}</span>
+              </div>
+              <div style={{ fontSize: 9, color: "#4b5563", marginBottom: 10 }}>Highest-confidence props across today's slate</div>
+              {topSlatePicks.map((p, i) => (
+                <div key={i} onClick={() => { openGame(p.gamePk); setTab("props"); }}
+                  style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 8,
+                    padding: "8px 0",
+                    borderBottom: i < topSlatePicks.length - 1 ? "1px solid rgba(251,191,36,0.1)" : "none" }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "#fbbf24", width: 16, flexShrink: 0, textAlign: "center" }}>{i + 1}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.label}</div>
+                    <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>{p.game}</div>
+                  </div>
+                  <LeanBadge label={p.lean} positive={p.positive} small />
+                  <div style={{ fontSize: 12, fontWeight: 800, color: p.confidence >= 65 ? "#22c55e" : "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 32, textAlign: "right" }}>{p.confidence}%</div>
+                </div>
+              ))}
+            </Card>
+          )}
+
           <SLabel>Today's Slate — {activeSlate.length} Games{!IS_STATS_SANDBOX && !slateLoading && liveSlate ? " · LIVE" : !IS_STATS_SANDBOX && slateLoading ? " · Loading…" : ""}</SLabel>
           {slateLoading && !liveSlate && (
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 0" }}>
