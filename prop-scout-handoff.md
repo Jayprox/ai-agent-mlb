@@ -681,4 +681,48 @@ Result:
 
 ---
 
-*Updated April 16 2026 — Session 26 complete · Frontend auth shipped · app is deploy-ready*
+## ✅ Session 27 — Pitcher Outs Prop + Help Page + Railway Deployment
+
+### Pitcher Outs Prop (`propType: "Outs"`)
+New prop engine added to `prop-scout-v7.jsx`, fires whenever `avgIP >= 4`.
+
+**Line:** `Math.round(avgIP × 3) - 0.5` (e.g. 6.2 IP → 18.5 outs line)
+
+**5 factors:**
+1. **WHIP** — high WHIP = bullpen risk, proj outs down; elite WHIP = proj outs up
+2. **BB/9** — walks inflate pitch count; high BB/9 shortens outing
+3. **Opposing lineup avg matchup score** — tough lineup (avg score 55+) = earlier hook
+4. **Weather** — cold suppresses offense → pitcher goes deeper; hot = opposite
+5. **Park factor** — hitter-friendly parks shorten pitcher outings
+
+Confidence range: 38–74. `backend/routes/digest.js` TYPE_BUCKETS updated to include `"Outs"`.
+
+### Help Page (`?` button in footer)
+New full-screen overlay accessible via purple `?` button in the footer (left of username).
+
+Four sections:
+- **Color Guide** — green/yellow/red explained with the quick rule
+- **How Scoring Works** — 3-factor matchup score breakdown + confidence meter
+- **Prop Types** — K, Outs, Hits, TB, HR, F5, NRFI, RBI in plain English
+- **Stat Glossary** — ERA, WHIP, K/9, BB/9, AVG, OPS, SLG, wOBA, IP, PC, K%, HR Factor
+
+### Railway Deployment
+App is live at `ai-agent-mlb-production.up.railway.app`.
+
+Deploy config (`railway.json`):
+- Build: `npm install && npm run build && cd backend && npm install`
+- Start: `NODE_ENV=production node backend/server.js`
+
+Required Railway env vars: `ODDS_API_KEY`, `JWT_SECRET`, `NODE_ENV=production`, `PORT=3001`
+
+Express serves the Vite `dist/` build as static files in production mode with SPA fallback.
+
+`backend/data/users.json` is committed (bcrypt hashes only, safe). `picks.json` and `notes.json` are gitignored (ephemeral on Railway — Railway volume upgrade needed for persistence).
+
+### 10 User Accounts
+Seeded via `node backend/seed-users.js`. All accounts stored in `backend/data/users.json`.
+To add/change accounts: edit `USERS` array in `backend/seed-users.js`, re-run script, commit `users.json`.
+
+---
+
+*Updated April 16 2026 — Session 27 complete · Pitcher Outs prop · Help page · Railway live*

@@ -1875,7 +1875,74 @@ export default function App() {
       });
     }
 
-    // ── 2. F5 TOTAL (First 5 Innings O/U) ─────────────────────────────────────
+    // ── 2. PITCHER OUTS PROP ──────────────────────────────────────────────────
+    // Fires whenever avgIP is known (live or mock). Outs = IP × 3.
+    {
+      const avgIPNum2 = parseFloat(pitcher.avgIP) || 0;
+      if (avgIPNum2 >= 4) {
+        const baseOuts = avgIPNum2 * 3;
+        const line     = Math.round(baseOuts) - 0.5;  // e.g. 18.6 IP → 18.5 line
+        let   score    = 50;
+        let   projOuts = baseOuts;
+        const oR       = [`Avg ${avgIPNum2.toFixed(1)} IP/start (${Math.round(baseOuts)} outs)`];
+
+        // Factor 1: WHIP — more baserunners = higher stress = earlier hook
+        const whipNum = parseFloat(pitcher.whip);
+        if (!isNaN(whipNum)) {
+          if      (whipNum >= 1.40) { score -= 7; projOuts -= 1.0; oR.push(`High WHIP ${whipNum} — bullpen risk`); }
+          else if (whipNum >= 1.25) { score -= 3; projOuts -= 0.5; oR.push(`WHIP ${whipNum}`); }
+          else if (whipNum <= 1.05) { score += 6; projOuts += 0.7; oR.push(`Elite WHIP ${whipNum}`); }
+          else if (whipNum <= 1.15) { score += 3; projOuts += 0.3; oR.push(`Solid WHIP ${whipNum}`); }
+        }
+
+        // Factor 2: BB/9 — walks inflate pitch count, shorten outings
+        const bbNum = parseFloat(pitcher.bbPer9 ?? pitcher.bb9);
+        if (!isNaN(bbNum)) {
+          if      (bbNum >= 3.8) { score -= 6; projOuts -= 0.8; oR.push(`High walk rate (${bbNum} BB/9)`); }
+          else if (bbNum >= 3.0) { score -= 2; oR.push(`${bbNum} BB/9`); }
+          else if (bbNum <= 1.8) { score += 5; projOuts += 0.6; oR.push(`Elite control (${bbNum} BB/9)`); }
+          else if (bbNum <= 2.3) { score += 2; oR.push(`Good control (${bbNum} BB/9)`); }
+        }
+
+        // Factor 3: Opposing lineup avg matchup score
+        // High avg score = tough lineup = pitcher likely pulled sooner
+        const oppBatters = game.lineups?.away ?? [];
+        if (oppBatters.length >= 6) {
+          const scores = oppBatters.map(b => calcMatchupScore(b, pitcher)).filter(s => s > 0);
+          if (scores.length >= 4) {
+            const avgSc = scores.reduce((a, b) => a + b, 0) / scores.length;
+            if      (avgSc >= 55) { score -= 7; projOuts -= 1.0; oR.push(`Tough lineup (avg score ${Math.round(avgSc)})`); }
+            else if (avgSc >= 47) { score -= 3; projOuts -= 0.4; oR.push(`Solid lineup (avg ${Math.round(avgSc)})`); }
+            else if (avgSc <= 30) { score += 5; projOuts += 0.6; oR.push(`Weak lineup (avg ${Math.round(avgSc)})`); }
+            else if (avgSc <= 38) { score += 2; projOuts += 0.3; oR.push(`Below-avg lineup`); }
+          }
+        }
+
+        // Factor 4: Weather — cold suppresses offense → pitcher can go deeper
+        if (!weather?.roof) {
+          const t = parseInt(weather?.temp) || 72;
+          if      (t < 48) { score += 3; projOuts += 0.3; oR.push(`Cold ${t}° — offense suppressed`); }
+          else if (t > 88) { score -= 3; projOuts -= 0.3; oR.push(`Hot ${t}° — hitter-friendly`); }
+        }
+
+        // Factor 5: Park factor — hitter-friendly parks shorten pitcher outings
+        if      (parkFactor.hit >= 1.06) { score -= 4; projOuts -= 0.4; oR.push(`${game.home.abbr} hitter-friendly (${parkFactor.hit}x hits)`); }
+        else if (parkFactor.hit <= 0.93) { score += 4; projOuts += 0.4; oR.push(`${game.home.abbr} pitcher-friendly (${parkFactor.hit}x hits)`); }
+
+        score = Math.max(38, Math.min(74, score));
+        const outsLean = projOuts >= line ? "OVER" : "UNDER";
+        out.push({
+          label:      `${pitcher.name?.split(" ").slice(-1)[0] ?? pitcher.name} Outs O/U ${line}`,
+          propType:   "Outs",
+          confidence: Math.round(score),
+          lean:       outsLean,
+          positive:   outsLean === "OVER",
+          reason:     oR.slice(0, 3).join(" · "),
+        });
+      }
+    }
+
+    // ── 3. F5 TOTAL (First 5 Innings O/U) ─────────────────────────────────────
     // Game-level prop — fires whenever a game is open, no batter pin required.
     // Uses both SPs' ERA + K/9, park factor, weather, and NRFI lean.
     // F5 line from Odds API (totals_h1 market) used for label only — avoids circular
@@ -4088,7 +4155,7 @@ export default function App() {
                   <Row color="#a78bfa" label="Purple  →  Picks & logged data" sub="Used for your saved prop picks and the picks tracker." />
                   <div style={{ background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 8, padding: "10px 12px", marginTop: 4 }}>
                     <div style={{ fontSize: 11, color: "#818cf8", lineHeight: 1.6 }}>
-                      <strong style={{ color: "#a78bfa" }}>Quick rule:</strong> Green favors the pitcher, red favors the batter. A red matchup score on a hitter = good spot for a hits or TB prop. A green matchup score = good spot for a K prop or under.
+                      <strong style={{ color: "#a78bfa" }}>Quick rule:</strong> Green favors the pitcher, red favors the batter. A red matchup score on a hitter = good spot for a hits or TB prop. A green matchup score = good spot for a K prop, Outs over, or under.
                     </div>
                   </div>
                 </Section>
@@ -4115,6 +4182,7 @@ export default function App() {
 
                 <Section title="🎯 Prop Types Explained">
                   <PropRow type="K" def="Pitcher strikeouts — Over/Under on how many batters the starter fans. High K/9 + green matchup scores = good over spot." />
+                  <PropRow type="Outs" def="Pitcher outs recorded — Over/Under on how many outs the starter gets before leaving the game. 3 outs = 1 inning. A line of 17.5 means roughly 6 innings. Elite control (low WHIP + BB/9) and a weak lineup push this over." />
                   <PropRow type="Hits" def="Batter hits — typically Over 0.5 hits (get at least one hit) or Under 1.5. Red matchup score = good over spot." />
                   <PropRow type="TB" def="Total Bases — counts singles (1), doubles (2), triples (3), home runs (4). Over 1.5 TB is a popular line." />
                   <PropRow type="HR" def="Home Run — will this batter hit at least one HR? Looks at power metrics, park factor, and pitcher tendencies." />

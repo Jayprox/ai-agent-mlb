@@ -10,7 +10,7 @@ const DATA_DIR = path.join(__dirname, "..", "data");
 const PICKS_FILE = path.join(DATA_DIR, "picks.json");
 const DIGEST_TTL_MS = 5 * 60 * 1000;
 const WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-const TYPE_BUCKETS = ["K", "Hits", "TB", "HR", "F5", "NRFI", "Other"];
+const TYPE_BUCKETS = ["K", "Outs", "Hits", "TB", "HR", "F5", "NRFI", "Other"];
 
 function ensureStore() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
