@@ -1137,8 +1137,8 @@ const BullpenCard = ({ label, data }) => {
 // ─────────────────────────────────────────────
 // SLATE CARD (mini, for game selector)
 // ─────────────────────────────────────────────
-const SlateCard = ({ game, selected, onSelect, liveOddsMap = {} }) => {
-  const topProp = game.props[0];
+const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null }) => {
+  const topProp = bestBet ?? (game.props[0]?.lean ? game.props[0] : null);
   // Merge live odds if available for this game
   const liveKey  = `${game.away.name}|${game.home.name}`;
   const liveOdds = liveOddsMap[liveKey];
@@ -1186,7 +1186,13 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {} }) => {
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <LeanBadge label={game.nrfi.lean} positive={game.nrfi.lean === "NRFI"} small />
         <LeanBadge label={game.weather.roof ? "DOME" : `${game.weather.temp}°`} positive={game.weather.hrFavorable} small />
-        <LeanBadge label={`${game.pitcher.name.split(" ")[1]} K ${game.props[0]?.lean}`} positive={game.props[0]?.positive} small />
+        {topProp && (() => {
+          const lastName = bestBet
+            ? bestBet.label.split(" ")[0]
+            : game.pitcher.name?.split(" ").slice(-1)[0] ?? "";
+          const propType = bestBet?.propType ?? "K";
+          return <LeanBadge label={`${lastName} ${propType} ${topProp.lean}`} positive={topProp.positive} small />;
+        })()}
       </div>
     </div>
   );
@@ -2666,7 +2672,8 @@ export default function App() {
             </div>
           )}
           {activeSlate.map(g => (
-            <SlateCard key={g.id} game={g} selected={selectedId === g.id} onSelect={openGame} liveOddsMap={liveOddsMap} />
+            <SlateCard key={g.id} game={g} selected={selectedId === g.id} onSelect={openGame} liveOddsMap={liveOddsMap}
+              bestBet={topSlatePicks.find(p => p.gamePk === (g.gamePk ?? g.id)) ?? null} />
           ))}
         </>)}
 
