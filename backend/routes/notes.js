@@ -1,0 +1,58 @@
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+
+const router = express.Router();
+
+const DATA_DIR = path.join(__dirname, "..", "data");
+const NOTES_FILE = path.join(DATA_DIR, "notes.json");
+
+function ensureStore() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(NOTES_FILE)) {
+    fs.writeFileSync(NOTES_FILE, JSON.stringify({}, null, 2));
+  }
+}
+
+function readStore() {
+  ensureStore();
+  const raw = fs.readFileSync(NOTES_FILE, "utf8");
+  const parsed = JSON.parse(raw);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
+function writeStore(store) {
+  ensureStore();
+  fs.writeFileSync(NOTES_FILE, JSON.stringify(store, null, 2));
+}
+
+router.get("/:gamePk", (req, res) => {
+  try {
+    const store = readStore();
+    const { gamePk } = req.params;
+    return res.json({ gamePk, note: store[gamePk] ?? "" });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to read notes", detail: err.message });
+  }
+});
+
+router.post("/:gamePk", (req, res) => {
+  try {
+    const store = readStore();
+    const { gamePk } = req.params;
+    const note = String(req.body?.note ?? "").trim().slice(0, 500);
+
+    if (note === "") {
+      delete store[gamePk];
+    } else {
+      store[gamePk] = note;
+    }
+
+    writeStore(store);
+    return res.json({ gamePk, note });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to save note", detail: err.message });
+  }
+});
+
+module.exports = router;
