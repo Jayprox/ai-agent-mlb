@@ -1167,7 +1167,7 @@ const BullpenCard = ({ label, data }) => {
 // ─────────────────────────────────────────────
 // SLATE CARD (mini, for game selector)
 // ─────────────────────────────────────────────
-const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null }) => {
+const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null, liveScore = null }) => {
   const topProp = bestBet ?? (game.props[0]?.lean ? game.props[0] : null);
   // Merge live odds if available for this game
   const liveKey       = `${game.away.name}|${game.home.name}`;
@@ -1201,6 +1201,16 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null 
                 <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
               </div>
             )}
+            {isInProgress && liveScore && (
+              <div style={{ display: "flex", alignItems: "center", gap: 3, background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 5, padding: "2px 7px" }}>
+                <span style={{ fontSize: 9, fontWeight: 700, color: "#f9fafb", fontFamily: "monospace" }}>
+                  {liveScore.awayScore}–{liveScore.homeScore}
+                </span>
+                <span style={{ fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                  {liveScore.halfInning === "bottom" ? "▼" : "▲"}{liveScore.inning}
+                </span>
+              </div>
+            )}
             {isFinal && (
               <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "2px 6px" }}>
                 <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
@@ -1220,27 +1230,59 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null 
           <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{game.time} · {game.stadium}</div>
         </div>
         <div style={{ textAlign: "right" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 5, justifyContent: "flex-end" }}>
-            <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 700 }}>O/U {total}</div>
-            {isLive && <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 4px #22c55e", flexShrink: 0 }} />}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 3 }}>
-            <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>ML</span>
-            <span style={{ fontSize: 10, color: "#22c55e", fontFamily: "monospace" }}>{awayML} / {homeML}</span>
-          </div>
-          {(overOdds || underOdds) && (
-            <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 2 }}>
-              <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>O/U Odds</span>
-              <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{overOdds ?? "—"} / {underOdds ?? "—"}</span>
-            </div>
-          )}
-          {(awaySpread || homeSpread) && (
-            <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 2 }}>
-              <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>RL</span>
-              <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>
-                {awaySpread}({awaySprdOdds}) / {homeSpread}({homeSprdOdds})
-              </span>
-            </div>
+          {isFinal && liveScore ? (() => {
+            const combinedRuns = liveScore.awayScore + liveScore.homeScore;
+            const ouResult     = total ? (combinedRuns > parseFloat(total) ? "O" : "U") : null;
+            const awayWon      = liveScore.awayScore > liveScore.homeScore;
+            const winnerAbbr   = awayWon ? game.away.abbr : game.home.abbr;
+            const winnerML     = awayWon ? awayML : homeML;
+            const margin       = Math.abs(liveScore.awayScore - liveScore.homeScore);
+            const rlCovered    = margin >= 2 ? "-1.5" : "+1.5";
+            return (
+              <>
+                <div style={{ fontSize: 14, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>
+                  {liveScore.awayScore}–{liveScore.homeScore}
+                </div>
+                <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", flexWrap: "wrap", marginTop: 4 }}>
+                  {ouResult && total && (
+                    <span style={{ fontSize: 9, fontWeight: 700, color: ouResult === "O" ? "#22c55e" : "#ef4444", fontFamily: "monospace" }}>
+                      {ouResult} {total}
+                    </span>
+                  )}
+                  {winnerAbbr && winnerML && (
+                    <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>· {winnerAbbr} {winnerML}</span>
+                  )}
+                  {rlCovered && (
+                    <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>· {rlCovered}</span>
+                  )}
+                </div>
+              </>
+            );
+          })() : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, justifyContent: "flex-end" }}>
+                <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 700 }}>O/U {total}</div>
+                {isLive && <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 4px #22c55e", flexShrink: 0 }} />}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 3 }}>
+                <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>ML</span>
+                <span style={{ fontSize: 10, color: "#22c55e", fontFamily: "monospace" }}>{awayML} / {homeML}</span>
+              </div>
+              {(overOdds || underOdds) && (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 2 }}>
+                  <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>O/U Odds</span>
+                  <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{overOdds ?? "—"} / {underOdds ?? "—"}</span>
+                </div>
+              )}
+              {(awaySpread || homeSpread) && (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 2 }}>
+                  <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>RL</span>
+                  <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>
+                    {awaySpread}({awaySprdOdds}) / {homeSpread}({homeSprdOdds})
+                  </span>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -1964,6 +2006,7 @@ export default function App() {
   const [liveRbiCtx, setLiveRbiCtx] = useState({});        // batterId → { rbiPerGame, rbiRate, slg, extraBaseHits }
   const [liveBullpen,  setLiveBullpen]  = useState({});     // gamePk    → { away, home } bullpen object
   const [liveNrfiData, setLiveNrfiData] = useState({});     // gamePk    → { awayFirst, homeFirst, lean, confidence }
+  const [liveScores,   setLiveScores]   = useState({});     // gamePk    → { inning, halfInning, awayScore, homeScore, outs }
   const [liveInjuries, setLiveInjuries] = useState([]);
   const [gameNotes, setGameNotes]       = useState({});  // gamePk → note string
   const [noteSaveState, setNoteSaveState] = useState(null); // null | "saving" | "saved"
@@ -2119,6 +2162,28 @@ export default function App() {
           .catch(() => {});
       }
     });
+  }, [liveSlate]);
+
+  // Poll linescore every 60s for all in-progress games
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || !liveSlate?.length) return;
+
+    const pollScores = () => {
+      liveSlate.forEach(sg => {
+        const status = sg.status ?? "";
+        const inProgress = status === "In Progress" || status === "Warmup";
+        const finished   = status === "Final" || status === "Game Over";
+        // Poll in-progress every 60s; fetch final once (skip if already cached)
+        if (!inProgress && !(finished && !liveScores[sg.gamePk])) return;
+        apiFetch(`/api/linescore/${sg.gamePk}`)
+          .then(data => setLiveScores(prev => ({ ...prev, [sg.gamePk]: data })))
+          .catch(() => {});
+      });
+    };
+
+    pollScores(); // immediate first fetch
+    const interval = setInterval(pollScores, 60_000);
+    return () => clearInterval(interval);
   }, [liveSlate]);
 
   // Fetch lineups, umpire, + pitcher stats when a live game card opens
@@ -2772,7 +2837,8 @@ export default function App() {
           <div style={windowWidth > 640 ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } : {}}>
             {activeSlate.map(g => (
               <SlateCard key={g.id} game={g} selected={selectedId === g.id} onSelect={openGame} liveOddsMap={liveOddsMap}
-                bestBet={topSlatePicks.find(p => p.gamePk === (g.gamePk ?? g.id)) ?? null} />
+                bestBet={topSlatePicks.find(p => p.gamePk === (g.gamePk ?? g.id)) ?? null}
+                liveScore={liveScores[g.gamePk ?? g.id] ?? null} />
             ))}
           </div>
         </>)}

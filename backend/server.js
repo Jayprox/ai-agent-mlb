@@ -31,8 +31,9 @@ app.use("/api/umpires",  require("./routes/umpires"));
 app.use("/api/arsenal",  require("./routes/arsenal"));  // Baseball Savant: pitcher pitch mix
 app.use("/api/splits",   require("./routes/splits"));   // Baseball Savant: batter vs pitch type
 app.use("/api/nrfi",     require("./routes/nrfi"));     // MLB Stats: first-inning team scoring tendencies
-app.use("/api/bullpen",  require("./routes/bullpen"));  // MLB Stats: bullpen fatigue + reliever usage
-app.use("/api/auth",     authRouter);
+app.use("/api/bullpen",   require("./routes/bullpen"));   // MLB Stats: bullpen fatigue + reliever usage
+app.use("/api/linescore", require("./routes/linescore")); // MLB Stats: live score + inning for in-progress games
+app.use("/api/auth",      authRouter);
 app.use("/api/picks",    picksRouter);
 app.use("/api/notes",    notesRouter);
 app.use("/api/digest",   digestRouter);

@@ -1263,13 +1263,100 @@ Previously the app blocked rendering above 520px with a `DesktopWarning` full-sc
 
 ---
 
-### Next Up — Live Scores on In-Progress Cards (still pending)
+## ✅ Session 30b — Live Linescore on In-Progress Slate Cards
 
-Same plan as documented in Session 29:
-1. New backend route `GET /api/game/:gamePk/linescore`
-2. Frontend polls every 60s for in-progress games
-3. Live score overlay on slate card alongside LIVE badge (e.g. `BOT 6 · 3–1`)
+### What Was Built
+
+Real-time score + inning overlaid on slate cards for games currently in progress.
+
+#### Backend — `backend/routes/linescore.js` (new file)
+
+- Route: `GET /api/linescore/:gamePk`
+- Hits `statsapi.mlb.com/api/v1/game/{gamePk}/linescore` (free, no auth)
+- Returns: `{ gamePk, inning, halfInning, awayScore, homeScore, outs }`
+- `halfInning` is lowercase `"top"` or `"bottom"` from the MLB API (`inningHalf` field)
+- 45-second cache — short enough to stay current, avoids hammering on multiple clients
+
+Registered in `server.js`:
+```js
+app.use("/api/linescore", require("./routes/linescore"));
+```
+
+#### Frontend — `prop-scout-v7.jsx`
+
+1. **`liveScores` state** — `{}` keyed by `gamePk`, holds linescore response objects
+
+2. **Polling useEffect** — runs on `[liveSlate]`, checks each game's `status`:
+   - Only fetches for `"In Progress"` or `"Warmup"` games
+   - Calls `apiFetch("/api/linescore/:gamePk")` immediately on mount, then every 60 seconds
+   - Cleans up interval on unmount
+   ```js
+   useEffect(() => {
+     if (IS_STATS_SANDBOX || !liveSlate?.length) return;
+     const pollScores = () => {
+       liveSlate.forEach(sg => {
+         const inProgress = sg.status === "In Progress" || sg.status === "Warmup";
+         if (!inProgress) return;
+         apiFetch(`/api/linescore/${sg.gamePk}`)
+           .then(data => setLiveScores(prev => ({ ...prev, [sg.gamePk]: data })))
+           .catch(() => {});
+       });
+     };
+     pollScores();
+     const interval = setInterval(pollScores, 60_000);
+     return () => clearInterval(interval);
+   }, [liveSlate]);
+   ```
+
+3. **SlateCard prop** — `liveScore={liveScores[g.gamePk ?? g.id] ?? null}` passed to each card
+
+4. **Score display — in-progress games** — chip inline left side next to LIVE badge:
+   - Format: `3–1 ▼6` (away–home score, half-inning arrow, inning number)
+   - `▲` = top of inning, `▼` = bottom of inning
+   - Red-tinted chip styling
+
+5. **Score display — final games** — right column replaces odds with result summary:
+   - Polling: fetched once on load (`!liveScores[sg.gamePk]` guard), not re-polled since score can't change
+   - Final score at 14px bold top of right column: `4–14`
+   - Result line below showing which lines hit:
+     - **O/U result** — green `O 8` or red `U 8` depending on combined runs vs line
+     - **ML winner** — `NYY -149` (winner abbreviation + their ML odds)
+     - **RL result** — `-1.5` if winning margin ≥ 2 (favorite covered), `+1.5` if dog covered
+   - ML/RL/O/U Odds rows hidden for final games (irrelevant post-game)
+
+#### Visual results:
+
+In-progress:
+```
+KC @ NYY  [● LIVE] [3–1 ▼6]          O/U 8 ●
+                                       ML +123 / -149
+                                       O/U Odds -102 / -118
+                                       RL +1.5(-181) / -1.5(+149)
+```
+
+Final:
+```
+KC @ NYY  [FINAL]                      4–14
+                                       O 8 · NYY -149 · -1.5
+```
 
 ---
 
-*Updated April 18 2026 — Session 30 complete · responsive layout · tablet + desktop support · removed width gate*
+### Files Changed in Session 30b
+
+- `backend/routes/linescore.js` (new)
+- `backend/server.js` (registered new route)
+- `prop-scout-v7.jsx`
+- `prop-scout-handoff.md`
+
+---
+
+### Suggested Next Features (for Codex)
+
+- **Live score on Game view header** — the game detail header card shows the matchup but not the live score when in-progress; pull from `liveScores[selectedId]` and display score + inning there too
+- **Push to Railway** — add `VITE_ODDS_API_KEY` to Railway environment variables so spreads market works in production
+- **Backend restart reminder** — after deploy, schedule cache may need a clear (`DELETE /api/cache`) to pick up the new `gameTime` field from `schedule.js`
+
+---
+
+*Updated April 18 2026 — Session 30b complete · live linescore · final score results (O/U, ML, RL) on slate cards*
