@@ -1,3 +1,23 @@
 {
-  "picks": []
+  "picks": [
+    {
+      "id": "1776539285449_caygq",
+      "timestamp": "2026-04-18T19:08:05.449Z",
+      "date": "Apr 18",
+      "game": "TEX @ SEA",
+      "gamePk": 823151,
+      "label": "NRFI · TEX @ SEA",
+      "lean": "NRFI",
+      "confidence": 50,
+      "propType": "NRFI",
+      "homeTeam": "SEA",
+      "awayTeam": "TEX",
+      "pitcherId": 669923,
+      "pitcherName": "George Kirby",
+      "playerId": null,
+      "playerName": null,
+      "result": null,
+      "userId": "user2"
+    }
+  ]
 }

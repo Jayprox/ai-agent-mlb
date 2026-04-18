@@ -6,7 +6,7 @@
 
 ## What Is Prop Scout?
 
-A personal MLB sports betting research app that compresses pre-game prop research from hours to minutes. Mobile-first React app (max-width 480px) with a dark Discord-style card UI. The entire frontend is a single JSX file — intentional, keeps it portable.
+A personal MLB sports betting research app that compresses pre-game prop research from hours to minutes. Responsive React app (max-width 960px, 2-column layout on tablet/desktop) with a dark Discord-style card UI. The entire frontend is a single JSX file — intentional, keeps it portable.
 
 ---
 
@@ -43,7 +43,7 @@ npm run dev
 # Runs on http://localhost:5173
 ```
 
-Open `http://localhost:5173` in a narrow browser window (under 520px wide) or use browser DevTools → Toggle Device Toolbar.
+Open `http://localhost:5173` in any browser — works on phone, tablet, and desktop. On screens wider than 640px the slate renders in 2 columns.
 
 ---
 
@@ -272,7 +272,6 @@ The mock SLATE array is always present as a fallback scaffold. Live data overlay
 - **Injury flags** — Manual flag system to mark players questionable/out
 - **Park factors** — HR factor, hit factor, K factor per stadium integrated into game card
 - **Prop tracker** — Log picks, track hit rate over time
-- **Full desktop layout** — Currently shows warning screen over 520px; responsive layout is future enhancement
 - **Bullpen dedicated tab** — Currently in Intel tab; full dedicated tab discussed
 - **PostgreSQL** — Pre-aggregated splits, arsenal snapshots, historical logs, park factors, umpire history
 
@@ -412,7 +411,7 @@ Tasks ready for Codex to pick up. Each is self-contained backend work — CW han
 | Decision | Choice | Reason |
 |---|---|---|
 | Single JSX file | Intentional | Portable, easy to hand off, no build complexity |
-| Desktop handling | Warning screen >520px | Prompts user to resize; full layout is future work |
+| Desktop handling | Responsive, no gate | `windowWidth` state drives 1-col (< 640px) vs 2-col (≥ 640px) slate grid; max-width 960px centered |
 | Scoring formula | 3-factor (AVG + whiff + SLG) | AVG-only caused score compression (all batters 22–27) |
 | Mock scaffold | Always present | App stays functional when APIs down/slow |
 | Overlay pattern | Field-by-field | Graceful — never breaks if one API fails |
@@ -1048,3 +1047,229 @@ CW can now wire these into `buildLiveGame()` / Intel without needing more backen
 ---
 
 *Updated April 16 2026 — Session 28 complete · live NRFI + game-level bullpen backend shipped and verified*
+
+---
+
+## ✅ Session 29 — Slate Card Overhaul + Live Game Status + Timezone Support
+
+All changes are in `prop-scout-v7.jsx` unless noted.
+
+---
+
+### Slate Card — Live Weather & NRFI Prefetch
+
+**Problem:** All slate cards showed mock weather (74°) and mock NRFI from `SLATE[0]` because `buildLiveGame` used template data and weather/NRFI were only fetched when a specific game was opened.
+
+**Fix:**
+- Added weather + NRFI prefetch to the background prefetch `useEffect` (the one that already prefetches pitcher stats and lineups for all slate games on mount)
+- `fetchWeather` handles domes internally — removed the `!STADIUMS[sg.stadium]?.roof` guard that was preventing dome stadiums from getting their `{ roof: true }` weather object set
+- Updated `activeSlate` building from `liveSlate.map(buildLiveGame)` to merge `liveWeather[sg.gamePk]` and `liveNrfiData[sg.gamePk]` into each built game object
+
+```js
+const activeSlate = (!IS_STATS_SANDBOX && liveSlate)
+  ? liveSlate.map(sg => {
+      const built = buildLiveGame(sg);
+      if (liveWeather[sg.gamePk])  built.weather = liveWeather[sg.gamePk];
+      if (liveNrfiData[sg.gamePk]) built.nrfi = { ...built.nrfi, ...liveNrfiData[sg.gamePk] };
+      return built;
+    })
+  : SLATE;
+```
+
+---
+
+### Intel Tab — Dome Weather Card
+
+Removed "DEMO · live when deployed" status label for domes. Dome data is computed locally (no external API call), so the label was misleading. Domes now show only the "DOME" heading and badge with no status line.
+
+---
+
+### Slate Card — Odds Redesign
+
+Added three labeled rows to the right column of each slate card:
+
+```
+O/U 7.5  •
+ML   +116 / -136
+O/U Odds  -105 / -115
+RL   +1.5(-196) / -1.5(+162)
+```
+
+- `ML` label clarifies moneyline numbers
+- `O/U Odds` label replaces the previous unlabeled juice (previously mistakenly labeled "Juice")
+- `RL` = runline (MLB spread, always ±1.5). Shows spread point + price per side.
+
+---
+
+### Spreads (Runline) — Full Stack
+
+**Odds API:** Added `spreads` to the markets parameter:
+```
+&markets=h2h,totals,spreads
+```
+
+**`extractBook`:** Added spread parsing:
+```js
+awaySpread, awaySpreadOdds, homeSpread, homeSpreadOdds
+```
+
+**`getGameOdds`:** Added all four spread fields to the live odds merge.
+
+**Mock SLATE data:** Added spread fields to all 6 mock games' `odds` objects.
+
+**Intel tab — multi-book table:** Added `Away RL` and `Home RL` columns. Grid changed from `44px repeat(5, 1fr)` to `36px repeat(7, 1fr)`. Each cell shows spread point + odds in parentheses.
+
+**Intel tab — mock/sandbox fallback:** Added a row of two `StatMini` boxes for away/home runline below the existing ML/total/odds rows.
+
+---
+
+### NRFI Badge — Confidence Threshold
+
+Changed NRFI badge to only show when `confidence >= 62` (same threshold that would turn the border green). Previously it showed for any NRFI lean regardless of confidence, causing inconsistency.
+
+```js
+{game.nrfi?.lean === "NRFI" && (game.nrfi?.confidence ?? 0) >= 62 && <LeanBadge ... />}
+```
+
+---
+
+### Slate Card — Removed Accent Border
+
+Removed the left-border color logic entirely. It combined NRFI confidence + prop signals into one color which was confusing and inconsistent. The badges (NRFI, weather, prop lean) carry all the signal. Cards now use a flat border — green highlight only when selected.
+
+---
+
+### Slate Card — Tag Order
+
+Standardized tag row order: **weather/dome → NRFI → line movement → prop badge**. Weather is always first for consistent layout.
+
+---
+
+### Local Timezone for Game Times
+
+**`backend/routes/schedule.js`:** Added `gameTime: g.gameDate` (raw ISO datetime string) to the schedule response alongside the existing ET-formatted `time` field.
+
+**`prop-scout-v7.jsx`:** Added `formatLocalTime(isoStr)` module-level helper:
+```js
+const formatLocalTime = (isoStr) => {
+  if (!isoStr) return null;
+  try {
+    return new Date(isoStr).toLocaleTimeString("en-US", {
+      hour: "numeric", minute: "2-digit", timeZoneName: "short",
+    });
+  } catch { return null; }
+};
+```
+
+Used in `buildLiveGame`: `time: formatLocalTime(sg.gameTime) ?? sg.time`
+
+Users in PT see "10:35 AM PDT", CT sees "12:35 PM CDT", etc. Falls back to the backend's ET string if `gameTime` is missing.
+
+**Note:** Schedule endpoint is cached 1 hour — restart backend once after deploying to pick up the new `gameTime` field.
+
+---
+
+### Game Status Indicators on Slate Cards
+
+Added `status: sg.status ?? "Scheduled"` to `buildLiveGame`.
+
+Status badges rendered inline next to team names:
+
+| Status | Badge | Color |
+|---|---|---|
+| `"In Progress"`, `"Warmup"` | ● LIVE | Red pulsing dot |
+| `"Final"`, `"Game Over"` | FINAL | Muted grey |
+| starts with `"Delayed"` | DELAY | Amber |
+| `"Postponed"`, `"Cancelled"`, `"Suspended"` | PPD | Amber |
+
+`startsWith("Delayed")` covers all MLB API delay variants: `"Delayed"`, `"Delayed: Rain"`, `"Delayed Start: Rain"`, etc.
+
+Pulse keyframe animation added inline: `@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }`
+
+---
+
+### Help Guide Updates
+
+- **New section: "🃏 Reading the Slate Card"** — added as the first section, explains every element: selected card highlight, O/U line, ML, O/U Odds, RL, NRFI badge (with 62% threshold noted), weather/dome, and line movement badges
+- **New glossary entries:** ML, RL, O/U Odds, Line Movement
+- **Updated NRFI badge entry** to reflect 62% confidence threshold
+- **Replaced "Left border color" entry** with "Selected card" (border removed)
+
+---
+
+### Files Changed in Session 29
+
+- `prop-scout-v7.jsx`
+- `backend/routes/schedule.js` (added `gameTime` field)
+- `prop-scout-handoff.md`
+
+---
+
+### Next Up — Live Scores on In-Progress Cards
+
+Discussed but not yet built. Plan:
+1. New backend route `GET /api/game/:gamePk/linescore` — hits `statsapi.mlb.com/api/v1/game/{gamePk}/linescore` (lightweight: current score + inning only, not the full live feed)
+2. Frontend polls every 60 seconds for all in-progress games
+3. Overlay live score on the slate card alongside the LIVE badge (e.g. `BOT 6 · 3–1`)
+
+MLB Stats API is free, no key, no rate limits. The linescore endpoint is much lighter than the full live feed (`/api/v1.1/game/{gamePk}/feed/live`).
+
+---
+
+*Updated April 18 2026 — Session 29 complete · slate overhaul · spreads · live game status · local timezone · NRFI confidence threshold*
+
+---
+
+## ✅ Session 30 — Responsive Layout: Tablet + Desktop Support
+
+### What Changed
+
+**Removed the mobile-only width restriction entirely.**
+
+Previously the app blocked rendering above 520px with a `DesktopWarning` full-screen overlay. This caused a blank screen bug when the browser window was resized wider, and even prevented recovery when resizing back down (stale state issue).
+
+#### Changes to `prop-scout-v7.jsx`
+
+1. **Deleted `DesktopWarning` component** — the blocking overlay is gone. The app now renders at any screen width.
+
+2. **Deleted `isWide` state** — removed `useState(window.innerWidth > 520/1440)` and all references. No more width gate.
+
+3. **Added `windowWidth` state** — tracks `window.innerWidth` reactively via a resize listener. Used purely for responsive layout decisions (not blocking).
+
+4. **Expanded main container** — `maxWidth: 480` → `maxWidth: 960`, centered with `margin: 0 auto`. Padding scales up slightly on wider screens (`windowWidth > 640`).
+
+5. **2-column slate grid** — at `windowWidth > 640px` (tablets, iPads, desktop), slate cards render in a `display: grid; gridTemplateColumns: 1fr 1fr` layout. Under 640px stays single-column (phone).
+
+#### Breakpoints summary
+
+| Width | Layout |
+|---|---|
+| < 640px | Single column slate, narrow padding (phone) |
+| 640px – 960px | 2-column slate grid, wider padding (tablet / iPad) |
+| > 960px | Same as 640–960 but container max-width caps at 960px, centered (desktop) |
+
+#### Also updated
+
+- `What Is Prop Scout?` section — removed "Mobile-first (max-width 480px)" framing
+- Run instructions — removed "narrow browser window (under 520px)" note
+- Known Limitations — removed "Full desktop layout is future enhancement" item
+
+---
+
+### Files Changed in Session 30
+
+- `prop-scout-v7.jsx`
+- `prop-scout-handoff.md`
+
+---
+
+### Next Up — Live Scores on In-Progress Cards (still pending)
+
+Same plan as documented in Session 29:
+1. New backend route `GET /api/game/:gamePk/linescore`
+2. Frontend polls every 60s for in-progress games
+3. Live score overlay on slate card alongside LIVE badge (e.g. `BOT 6 · 3–1`)
+
+---
+
+*Updated April 18 2026 — Session 30 complete · responsive layout · tablet + desktop support · removed width gate*

@@ -115,6 +115,20 @@ const PARK_FACTORS = {
 };
 const NEUTRAL_PARK = { hr: 1.0, hit: 1.0, k: 1.0, label: "Neutral" };
 
+// Format an ISO datetime string in the user's local timezone
+const formatLocalTime = (isoStr) => {
+  if (!isoStr) return null;
+  try {
+    return new Date(isoStr).toLocaleTimeString("en-US", {
+      hour:           "numeric",
+      minute:         "2-digit",
+      timeZoneName:   "short",
+    });
+  } catch {
+    return null;
+  }
+};
+
 const weatherCache = {};
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
@@ -250,7 +264,7 @@ const fetchOdds = async (forceRefresh = false) => {
   oddsCache.error = null;
   try {
     const res = await fetch(
-      `https://api.the-odds-api.com/v4/sports/baseball_mlb/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,totals&oddsFormat=american&dateFormat=iso`
+      `https://api.the-odds-api.com/v4/sports/baseball_mlb/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,totals,spreads&oddsFormat=american&dateFormat=iso`
     );
 
     if (!res.ok) {
@@ -272,7 +286,8 @@ const fetchOdds = async (forceRefresh = false) => {
     ];
 
     const extractBook = (bk, awayTeam) => {
-      let awayML = null, homeML = null, total = null, overOdds = null, underOdds = null, f5Total = null;
+      let awayML = null, homeML = null, total = null, overOdds = null, underOdds = null, f5Total = null,
+          awaySpread = null, awaySpreadOdds = null, homeSpread = null, homeSpreadOdds = null;
       const h2h = bk.markets.find(m => m.key === "h2h");
       if (h2h) {
         const awayOut = h2h.outcomes.find(o => o.name === awayTeam);
@@ -293,7 +308,21 @@ const fetchOdds = async (forceRefresh = false) => {
         const f5Over = totalsH1.outcomes.find(o => o.name === "Over");
         if (f5Over) f5Total = String(f5Over.point);
       }
-      return { awayML, homeML, total, overOdds, underOdds, f5Total };
+      // Runline (spreads) — MLB always ±1.5
+      const spreadsMarket = bk.markets.find(m => m.key === "spreads");
+      if (spreadsMarket) {
+        const awayOut = spreadsMarket.outcomes.find(o => o.name === awayTeam);
+        const homeOut = spreadsMarket.outcomes.find(o => o.name !== awayTeam);
+        if (awayOut) {
+          awaySpread     = awayOut.point >= 0 ? `+${awayOut.point}` : `${awayOut.point}`;
+          awaySpreadOdds = awayOut.price  > 0 ? `+${awayOut.price}` : `${awayOut.price}`;
+        }
+        if (homeOut) {
+          homeSpread     = homeOut.point >= 0 ? `+${homeOut.point}` : `${homeOut.point}`;
+          homeSpreadOdds = homeOut.price  > 0 ? `+${homeOut.price}` : `${homeOut.price}`;
+        }
+      }
+      return { awayML, homeML, total, overOdds, underOdds, f5Total, awaySpread, awaySpreadOdds, homeSpread, homeSpreadOdds };
     };
 
     const map = {};
@@ -344,7 +373,7 @@ const SLATE = [
     location: "Philadelphia, PA",
     weather: { temp: 74, condition: "Partly Cloudy", wind: "8 mph OUT to RF", humidity: "61%", roof: false, hrFavorable: true },
     umpire: { name: "Angel Hernandez", kRate: "19.2%", bbRate: "9.1%", tendency: "Tight zone — favors pitchers", rating: "pitcher" },
-    odds: { awayML: "+115", homeML: "-135", total: "8.5", overOdds: "-110", underOdds: "-110", movement: "Total opened 9 — moved DOWN 0.5. Sharp under action.", lineMove: "under" },
+    odds: { awayML: "+115", homeML: "-135", total: "8.5", overOdds: "-110", underOdds: "-110", awaySpread: "+1.5", awaySpreadOdds: "-168", homeSpread: "-1.5", homeSpreadOdds: "+142", movement: "Total opened 9 — moved DOWN 0.5. Sharp under action.", lineMove: "under" },
     nrfi: {
       awayFirst: { scoredPct: "38%", avgRuns: 0.52, tendency: "Slow starters — 4th lowest 1st inn scoring" },
       homeFirst:  { scoredPct: "41%", avgRuns: 0.58, tendency: "Average 1st inning output" },
@@ -448,7 +477,7 @@ const SLATE = [
     location: "Los Angeles, CA",
     weather: { temp: 68, condition: "Clear", wind: "5 mph IN from CF", humidity: "55%", roof: false, hrFavorable: false },
     umpire: { name: "Ángel Campos", kRate: "22.1%", bbRate: "7.8%", tendency: "Wide zone — high K environment", rating: "pitcher" },
-    odds: { awayML: "+142", homeML: "-162", total: "7.5", overOdds: "-115", underOdds: "-105", movement: "Total opened 8 — moved DOWN 0.5. Heavy under action early.", lineMove: "under" },
+    odds: { awayML: "+142", homeML: "-162", total: "7.5", overOdds: "-115", underOdds: "-105", awaySpread: "+1.5", awaySpreadOdds: "-155", homeSpread: "-1.5", homeSpreadOdds: "+132", movement: "Total opened 8 — moved DOWN 0.5. Heavy under action early.", lineMove: "under" },
     nrfi: {
       awayFirst: { scoredPct: "44%", avgRuns: 0.61, tendency: "Braves aggressive early in counts" },
       homeFirst:  { scoredPct: "39%", avgRuns: 0.54, tendency: "Dodgers patient — often 2nd time through" },
@@ -546,7 +575,7 @@ const SLATE = [
     location: "Arlington, TX",
     weather: { temp: 72, condition: "Dome", wind: "N/A", humidity: "N/A", roof: true, hrFavorable: false },
     umpire: { name: "CB Bucknor", kRate: "20.4%", bbRate: "8.6%", tendency: "Inconsistent zone — watch BB props", rating: "neutral" },
-    odds: { awayML: "-108", homeML: "-112", total: "9.0", overOdds: "-110", underOdds: "-110", movement: "Total opened 8.5 — moved UP 0.5. Public over money flowing in.", lineMove: "over" },
+    odds: { awayML: "-108", homeML: "-112", total: "9.0", overOdds: "-110", underOdds: "-110", awaySpread: "+1.5", awaySpreadOdds: "-182", homeSpread: "-1.5", homeSpreadOdds: "+154", movement: "Total opened 8.5 — moved UP 0.5. Public over money flowing in.", lineMove: "over" },
     nrfi: {
       awayFirst: { scoredPct: "48%", avgRuns: 0.71, tendency: "Astros lead majors in 1st inn scoring" },
       homeFirst:  { scoredPct: "43%", avgRuns: 0.62, tendency: "Rangers active early vs new pitchers" },
@@ -646,7 +675,7 @@ const SLATE = [
     location: "Milwaukee, WI",
     weather: { temp: 58, condition: "Overcast", wind: "14 mph IN from RF", humidity: "71%", roof: false, hrFavorable: false },
     umpire: { name: "Joe West", kRate: "18.8%", bbRate: "9.8%", tendency: "Slow pace · generous outside corner", rating: "neutral" },
-    odds: { awayML: "+128", homeML: "-148", total: "7.0", overOdds: "-110", underOdds: "-110", movement: "Total opened 7.5 — moved DOWN 0.5. Cold, wind in — sharp under action.", lineMove: "under" },
+    odds: { awayML: "+128", homeML: "-148", total: "7.0", overOdds: "-110", underOdds: "-110", awaySpread: "+1.5", awaySpreadOdds: "-162", homeSpread: "-1.5", homeSpreadOdds: "+138", movement: "Total opened 7.5 — moved DOWN 0.5. Cold, wind in — sharp under action.", lineMove: "under" },
     nrfi: {
       awayFirst: { scoredPct: "35%", avgRuns: 0.44, tendency: "Cubs among lowest 1st inn scorers" },
       homeFirst:  { scoredPct: "37%", avgRuns: 0.49, tendency: "Brewers patient — grind early counts" },
@@ -748,7 +777,7 @@ const SLATE = [
     location: "San Francisco, CA",
     weather: { temp: 61, condition: "Foggy", wind: "12 mph IN from CF", humidity: "78%", roof: false, hrFavorable: false },
     umpire: { name: "Mark Carlson", kRate: "21.3%", bbRate: "8.2%", tendency: "Average zone · consistent calls", rating: "neutral" },
-    odds: { awayML: "-122", homeML: "+104", total: "7.5", overOdds: "-110", underOdds: "-110", movement: "Total steady at 7.5. No significant movement. Public split.", lineMove: "none" },
+    odds: { awayML: "-122", homeML: "+104", total: "7.5", overOdds: "-110", underOdds: "-110", awaySpread: "-1.5", awaySpreadOdds: "+128", homeSpread: "+1.5", homeSpreadOdds: "-148", movement: "Total steady at 7.5. No significant movement. Public split.", lineMove: "none" },
     nrfi: {
       awayFirst: { scoredPct: "40%", avgRuns: 0.55, tendency: "Padres average 1st inn — depends on lineup" },
       homeFirst:  { scoredPct: "36%", avgRuns: 0.48, tendency: "Giants slow at Oracle — cold and foggy conditions" },
@@ -850,7 +879,7 @@ const SLATE = [
     location: "Toronto, ON",
     weather: { temp: 70, condition: "Dome", wind: "N/A", humidity: "N/A", roof: true, hrFavorable: false },
     umpire: { name: "Dan Iassogna", kRate: "20.9%", bbRate: "8.4%", tendency: "Solid zone · above avg strike calls", rating: "pitcher" },
-    odds: { awayML: "+105", homeML: "-125", total: "8.0", overOdds: "-112", underOdds: "-108", movement: "Total opened 8 — held steady. Slight over lean from public.", lineMove: "over" },
+    odds: { awayML: "+105", homeML: "-125", total: "8.0", overOdds: "-112", underOdds: "-108", awaySpread: "+1.5", awaySpreadOdds: "-158", homeSpread: "-1.5", homeSpreadOdds: "+134", movement: "Total opened 8 — held steady. Slight over lean from public.", lineMove: "over" },
     nrfi: {
       awayFirst: { scoredPct: "42%", avgRuns: 0.58, tendency: "Red Sox active leadoff — Turner, Yoshida" },
       homeFirst:  { scoredPct: "45%", avgRuns: 0.64, tendency: "Blue Jays leadoff boppers — Springer drives runs early" },
@@ -968,7 +997,8 @@ const buildLiveGame = (sg) => {
     gamePk:      sg.gamePk,
     away:        sg.away,
     home:        sg.home,
-    time:        sg.time,
+    time:        formatLocalTime(sg.gameTime) ?? sg.time,
+    status:      sg.status ?? "Scheduled",
     stadium:     sg.stadium,
     location:    "",
     weather:     tpl.weather,  // overridden by Open-Meteo when IS_SANDBOX = false
@@ -1140,35 +1170,53 @@ const BullpenCard = ({ label, data }) => {
 const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null }) => {
   const topProp = bestBet ?? (game.props[0]?.lean ? game.props[0] : null);
   // Merge live odds if available for this game
-  const liveKey  = `${game.away.name}|${game.home.name}`;
-  const liveOdds = liveOddsMap[liveKey];
-  const total    = liveOdds?.total    ?? game.odds.total;
-  const awayML   = liveOdds?.awayML   ?? game.odds.awayML;
-  const homeML   = liveOdds?.homeML   ?? game.odds.homeML;
-  const isLive   = !!liveOdds;
-
-  // ── Slate card accent border ──────────────────────────────────────────────
-  // Left-border color signal: green = strong NRFI + favorable props,
-  // red = YRFI lean, amber = mixed / no strong read.
-  const nrfiConf  = game.nrfi?.confidence ?? 50;
-  const nrfiLean  = game.nrfi?.lean ?? "NRFI";
-  const propConf  = topProp?.confidence ?? 50;
-  const propOver  = topProp?.positive === true;
-  const accentColor = selected
-    ? "#22c55e"  // always green when selected
-    : nrfiLean === "YRFI"
-      ? "#ef4444"                                              // red — YRFI lean
-      : nrfiLean === "NRFI" && nrfiConf >= 62 && (propOver || propConf >= 60)
-        ? "#22c55e"                                            // green — strong NRFI + solid prop lean
-        : nrfiLean === "NRFI" && nrfiConf >= 55
-          ? "#f59e0b"                                          // amber — moderate NRFI, mixed prop
-          : "#374151";                                         // neutral grey — no clear read
+  const liveKey       = `${game.away.name}|${game.home.name}`;
+  const liveOdds      = liveOddsMap[liveKey];
+  const total         = liveOdds?.total         ?? game.odds.total;
+  const awayML        = liveOdds?.awayML        ?? game.odds.awayML;
+  const homeML        = liveOdds?.homeML        ?? game.odds.homeML;
+  const overOdds      = liveOdds?.overOdds      ?? game.odds.overOdds;
+  const underOdds     = liveOdds?.underOdds     ?? game.odds.underOdds;
+  const awaySpread    = liveOdds?.awaySpread    ?? game.odds.awaySpread;
+  const awaySprdOdds  = liveOdds?.awaySpreadOdds ?? game.odds.awaySpreadOdds;
+  const homeSpread    = liveOdds?.homeSpread    ?? game.odds.homeSpread;
+  const homeSprdOdds  = liveOdds?.homeSpreadOdds ?? game.odds.homeSpreadOdds;
+  const isLive        = !!liveOdds;
+  const lineMove      = game.odds.lineMove; // "over" | "under" | "none"
+  const gameStatus    = game.status ?? "Scheduled";
+  const isInProgress  = gameStatus === "In Progress" || gameStatus === "Warmup";
+  const isFinal       = gameStatus === "Final" || gameStatus === "Game Over";
+  const isDelayed     = gameStatus.startsWith("Delayed");
+  const isPostponed   = gameStatus === "Postponed" || gameStatus === "Cancelled" || gameStatus === "Suspended";
 
   return (
-    <div onClick={() => onSelect(game.id)} style={{ background: selected ? "rgba(34,197,94,0.06)" : "#161827", border: `1px solid ${selected ? "rgba(34,197,94,0.25)" : "#1f2437"}`, borderLeft: `3px solid ${accentColor}`, borderRadius: 12, padding: "12px", cursor: "pointer", marginBottom: 8, transition: "all 0.15s" }}>
+    <div onClick={() => onSelect(game.id)} style={{ background: selected ? "rgba(34,197,94,0.06)" : "#161827", border: `1px solid ${selected ? "rgba(34,197,94,0.25)" : "#1f2437"}`, borderRadius: 12, padding: "12px", cursor: "pointer", marginBottom: 8, transition: "all 0.15s" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
         <div>
-          <div style={{ fontSize: 14, fontWeight: 800, color: "#f9fafb" }}>{game.away.abbr} <span style={{ color: "#6b7280", fontWeight: 400 }}>@</span> {game.home.abbr}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <div style={{ fontSize: 14, fontWeight: 800, color: "#f9fafb" }}>{game.away.abbr} <span style={{ color: "#6b7280", fontWeight: 400 }}>@</span> {game.home.abbr}</div>
+            {isInProgress && (
+              <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "2px 6px" }}>
+                <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
+                <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
+              </div>
+            )}
+            {isFinal && (
+              <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "2px 6px" }}>
+                <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
+              </div>
+            )}
+            {isDelayed && (
+              <div style={{ background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.35)", borderRadius: 5, padding: "2px 6px" }}>
+                <span style={{ fontSize: 8, fontWeight: 700, color: "#f59e0b", fontFamily: "monospace", letterSpacing: "0.05em" }}>DELAY</span>
+              </div>
+            )}
+            {isPostponed && (
+              <div style={{ background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 5, padding: "2px 6px" }}>
+                <span style={{ fontSize: 8, fontWeight: 700, color: "#f59e0b", fontFamily: "monospace", letterSpacing: "0.05em" }}>PPD</span>
+              </div>
+            )}
+          </div>
           <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{game.time} · {game.stadium}</div>
         </div>
         <div style={{ textAlign: "right" }}>
@@ -1176,16 +1224,31 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null 
             <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 700 }}>O/U {total}</div>
             {isLive && <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 4px #22c55e", flexShrink: 0 }} />}
           </div>
-          <div style={{ fontSize: 10, color: isLive ? "#22c55e" : (game.odds.lineMove === "over" ? "#f59e0b" : game.odds.lineMove === "under" ? "#38bdf8" : "#6b7280"), marginTop: 2 }}>
-            {isLive
-              ? `${awayML} / ${homeML}`
-              : (game.odds.lineMove === "none" ? "No move" : `↓ ${game.odds.lineMove.toUpperCase()}`)}
+          <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 3 }}>
+            <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>ML</span>
+            <span style={{ fontSize: 10, color: "#22c55e", fontFamily: "monospace" }}>{awayML} / {homeML}</span>
           </div>
+          {(overOdds || underOdds) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 2 }}>
+              <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>O/U Odds</span>
+              <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{overOdds ?? "—"} / {underOdds ?? "—"}</span>
+            </div>
+          )}
+          {(awaySpread || homeSpread) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "flex-end", marginTop: 2 }}>
+              <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>RL</span>
+              <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>
+                {awaySpread}({awaySprdOdds}) / {homeSpread}({homeSprdOdds})
+              </span>
+            </div>
+          )}
         </div>
       </div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <LeanBadge label={game.nrfi.lean} positive={game.nrfi.lean === "NRFI"} small />
         <LeanBadge label={game.weather.roof ? "DOME" : `${game.weather.temp}°`} positive={game.weather.hrFavorable} small />
+        {game.nrfi?.lean === "NRFI" && (game.nrfi?.confidence ?? 0) >= 62 && <LeanBadge label="NRFI" positive={true} small />}
+        {lineMove === "over"  && <LeanBadge label="↑ OVER"  positive={true}  small />}
+        {lineMove === "under" && <LeanBadge label="↓ UNDER" positive={false} small />}
         {topProp && (() => {
           const lastName = bestBet
             ? bestBet.label.split(" ")[0]
@@ -1198,20 +1261,6 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null 
   );
 };
 
-// ─────────────────────────────────────────────
-// DESKTOP WARNING
-// ─────────────────────────────────────────────
-const DesktopWarning = () => (
-  <div style={{ position: "fixed", inset: 0, background: "#0e0f1a", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 9999, padding: 32, textAlign: "center" }}>
-    <div style={{ fontSize: 40, marginBottom: 16 }}>📱</div>
-    <div style={{ fontSize: 20, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", marginBottom: 10 }}>Mobile View Required</div>
-    <div style={{ fontSize: 13, color: "#6b7280", fontFamily: "monospace", lineHeight: 1.8, maxWidth: 320 }}>
-      This app is built for mobile screens.<br />
-      Please resize your browser window to a narrower width (under 520px) to view the app.<br /><br />
-      <span style={{ color: "#22c55e" }}>Tip: Use your browser's DevTools → Toggle Device Toolbar</span>
-    </div>
-  </div>
-);
 
 // ─────────────────────────────────────────────
 // TOP SLATE PICKS — extracted to module scope so the minifier can't
@@ -1888,7 +1937,7 @@ export default function App() {
   const [syncMessage, setSyncMessage] = useState("");
   const [picksServerReachable, setPicksServerReachable] = useState(false);
   const [tab, setTab] = useState("overview");
-  const [isWide, setIsWide] = useState(window.innerWidth > 520);
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth);
   const [liveWeather, setLiveWeather] = useState({});
   const [weatherLoading, setWeatherLoading] = useState(false);
   const [liveOddsMap, setLiveOddsMap] = useState({});
@@ -2057,6 +2106,18 @@ export default function App() {
           .then(data => setLiveLineups(prev => ({ ...prev, [sg.gamePk]: data })))
           .catch(() => {});
       }
+      // Weather — fetchWeather handles domes internally (no API call, returns roof:true immediately)
+      if (!liveWeather[sg.gamePk]) {
+        fetchWeather(sg.gamePk, sg.stadium, sg.time, SLATE[0].weather)
+          .then(data => setLiveWeather(prev => ({ ...prev, [sg.gamePk]: data })))
+          .catch(() => {});
+      }
+      // NRFI first-inning tendencies
+      if (!liveNrfiData[sg.gamePk]) {
+        apiFetch(`/api/nrfi/${sg.gamePk}`)
+          .then(data => setLiveNrfiData(prev => ({ ...prev, [sg.gamePk]: data })))
+          .catch(() => {});
+      }
     });
   }, [liveSlate]);
 
@@ -2157,16 +2218,22 @@ export default function App() {
 
   // Watch resize — must use useEffect, not useState, so cleanup runs properly
   useEffect(() => {
-    const handler = () => setIsWide(window.innerWidth > 520);
+    const handler = () => {
+      setWindowWidth(window.innerWidth);
+    };
     window.addEventListener("resize", handler);
     return () => window.removeEventListener("resize", handler);
   }, []);
 
-  if (isWide) return <DesktopWarning />;
 
   // Active slate: live schedule games when backend is on, mock SLATE otherwise
   const activeSlate = (!IS_STATS_SANDBOX && liveSlate)
-    ? liveSlate.map(buildLiveGame)
+    ? liveSlate.map(sg => {
+        const built = buildLiveGame(sg);
+        if (liveWeather[sg.gamePk])  built.weather = liveWeather[sg.gamePk];
+        if (liveNrfiData[sg.gamePk]) built.nrfi = { ...built.nrfi, ...liveNrfiData[sg.gamePk] };
+        return built;
+      })
     : SLATE;
 
   // Base game from active slate; fall back to first game if selectedId is stale
@@ -2275,11 +2342,15 @@ export default function App() {
     if (!live) return g.odds;
     return {
       ...g.odds,
-      awayML:    live.awayML    ?? g.odds.awayML,
-      homeML:    live.homeML    ?? g.odds.homeML,
-      total:     live.total     ?? g.odds.total,
-      overOdds:  live.overOdds  ?? g.odds.overOdds,
-      underOdds: live.underOdds ?? g.odds.underOdds,
+      awayML:         live.awayML         ?? g.odds.awayML,
+      homeML:         live.homeML         ?? g.odds.homeML,
+      total:          live.total          ?? g.odds.total,
+      overOdds:       live.overOdds       ?? g.odds.overOdds,
+      underOdds:      live.underOdds      ?? g.odds.underOdds,
+      awaySpread:     live.awaySpread     ?? g.odds.awaySpread,
+      awaySpreadOdds: live.awaySpreadOdds ?? g.odds.awaySpreadOdds,
+      homeSpread:     live.homeSpread     ?? g.odds.homeSpread,
+      homeSpreadOdds: live.homeSpreadOdds ?? g.odds.homeSpreadOdds,
       live:      true,
       book:      live.book,
       books:     live.books ?? {},
@@ -2375,6 +2446,45 @@ export default function App() {
         .catch(() => {});
     }
   };
+
+  // ── Lineup tab prefetch ──────────────────────────────────────────────────────
+  // When the user opens the Lineup tab, eagerly fetch splits + gamelog + H2H +
+  // RBI context for every batter in the visible lineup side so drawers open
+  // instantly instead of loading on first expand.
+  useEffect(() => {
+    if (tab !== "lineup" || IS_STATS_SANDBOX) return;
+    const batters = game.lineups?.[lineupSide] ?? [];
+    if (!batters.length) return;
+    const opposingPitcherId = lineupSide === "away"
+      ? game.pitcher?.id            // away batters face home pitcher
+      : game.awayPitcher?.id;       // home batters face away pitcher
+    batters.forEach(b => {
+      if (!b?.id) return;
+      if (!IS_SAVANT_SANDBOX && !batterSplits[b.id]) {
+        apiFetch(`/api/splits/${b.id}`)
+          .then(data => { if (data?.splits) setBatterSplits(prev => ({ ...prev, [b.id]: data.splits })); })
+          .catch(() => {});
+      }
+      if (!liveHittingLog[b.id]) {
+        apiFetch(`/api/players/${b.id}/gamelog?group=hitting`)
+          .then(data => setLiveHittingLog(prev => ({ ...prev, [b.id]: data })))
+          .catch(() => {});
+      }
+      if (opposingPitcherId) {
+        const h2hKey = `${b.id}_${opposingPitcherId}`;
+        if (!liveH2H[h2hKey]) {
+          apiFetch(`/api/players/${b.id}/vs/${opposingPitcherId}`)
+            .then(data => setLiveH2H(prev => ({ ...prev, [h2hKey]: data })))
+            .catch(() => {});
+        }
+      }
+      if (!liveRbiCtx[b.id]) {
+        apiFetch(`/api/players/${b.id}/rbi-context`)
+          .then(data => setLiveRbiCtx(prev => ({ ...prev, [b.id]: data })))
+          .catch(() => {});
+      }
+    });
+  }, [tab, lineupSide, selectedId]);
 
   // ── Prop Engine ─────────────────────────────────────────────────────────────
   // Kept at module scope to avoid production minifier TDZ collisions in App().
@@ -2585,7 +2695,7 @@ export default function App() {
   return (
     <>
       <style>{`* { box-sizing: border-box; margin: 0; padding: 0; } body { background: #0e0f1a; } ::-webkit-scrollbar { width: 4px; height: 4px; } ::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }`}</style>
-      <div style={{ background: "#0e0f1a", minHeight: "100vh", color: "#e5e7eb", fontFamily: "monospace", maxWidth: 480, margin: "0 auto", padding: "16px 14px 48px" }}>
+      <div style={{ background: "#0e0f1a", minHeight: "100vh", color: "#e5e7eb", fontFamily: "monospace", maxWidth: 960, margin: "0 auto", padding: windowWidth > 640 ? "20px 24px 64px" : "16px 14px 48px" }}>
 
         {/* ── APP HEADER ── */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
@@ -2656,13 +2766,15 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 0" }}>
               <div style={{ width: 18, height: 18, border: "2px solid #1f2437", borderTop: "2px solid #22c55e", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />
               <span style={{ fontSize: 12, color: "#6b7280" }}>Fetching today's slate…</span>
-              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+              <style>{`@keyframes spin { to { transform: rotate(360deg); } } @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }`}</style>
             </div>
           )}
-          {activeSlate.map(g => (
-            <SlateCard key={g.id} game={g} selected={selectedId === g.id} onSelect={openGame} liveOddsMap={liveOddsMap}
-              bestBet={topSlatePicks.find(p => p.gamePk === (g.gamePk ?? g.id)) ?? null} />
-          ))}
+          <div style={windowWidth > 640 ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } : {}}>
+            {activeSlate.map(g => (
+              <SlateCard key={g.id} game={g} selected={selectedId === g.id} onSelect={openGame} liveOddsMap={liveOddsMap}
+                bestBet={topSlatePicks.find(p => p.gamePk === (g.gamePk ?? g.id)) ?? null} />
+            ))}
+          </div>
         </>)}
 
         {/* ════════════════════════════════════
@@ -3232,15 +3344,17 @@ export default function App() {
                         {weather.roof ? "DOME" : `${weather.temp}°F`}
                       </div>
                       <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 3 }}>{weather.condition}</div>
-                      {weather.live
-                        ? <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
-                            <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 5px #22c55e" }} />
-                            <span style={{ fontSize: 9, color: "#22c55e", fontFamily: "monospace" }}>LIVE · {weather.fetchedAt}</span>
-                          </div>
-                        : <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
-                            <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b" }} />
-                            <span style={{ fontSize: 9, color: "#f59e0b", fontFamily: "monospace" }}>DEMO · live when deployed</span>
-                          </div>
+                      {weather.roof
+                        ? null
+                        : weather.live
+                          ? <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+                              <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 5px #22c55e" }} />
+                              <span style={{ fontSize: 9, color: "#22c55e", fontFamily: "monospace" }}>LIVE · {weather.fetchedAt}</span>
+                            </div>
+                          : <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+                              <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b" }} />
+                              <span style={{ fontSize: 9, color: "#f59e0b", fontFamily: "monospace" }}>DEMO · live when deployed</span>
+                            </div>
                       }
                     </div>
                     <LeanBadge label={weather.hrFavorable ? "HR WEATHER" : weather.roof ? "DOME" : "WIND IN"} positive={weather.hrFavorable} />
@@ -3398,35 +3512,47 @@ export default function App() {
                 return (
                   <>
                     {/* Header row */}
-                    <div style={{ display: "grid", gridTemplateColumns: "44px repeat(5, 1fr)", gap: 2, marginBottom: 4 }}>
-                      {["", `${game.away.abbr} ML`, `${game.home.abbr} ML`, "Total", "O Odds", "U Odds"].map((h, i) => (
-                        <div key={i} style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", textAlign: "center", letterSpacing: "0.05em" }}>{h}</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "36px repeat(7, 1fr)", gap: 2, marginBottom: 4 }}>
+                      {["", `${game.away.abbr} ML`, `${game.home.abbr} ML`, "Total", "O Odds", "U Odds", `${game.away.abbr} RL`, `${game.home.abbr} RL`].map((h, i) => (
+                        <div key={i} style={{ fontSize: 7, color: "#6b7280", textTransform: "uppercase", textAlign: "center", letterSpacing: "0.04em" }}>{h}</div>
                       ))}
                     </div>
                     {/* Book rows */}
                     {bookEntries.map(([label, b]) => (
-                      <div key={label} style={{ display: "grid", gridTemplateColumns: "44px repeat(5, 1fr)", gap: 2, marginBottom: 3, background: "#1a1f2e", borderRadius: 6, padding: "5px 4px", alignItems: "center" }}>
+                      <div key={label} style={{ display: "grid", gridTemplateColumns: "36px repeat(7, 1fr)", gap: 2, marginBottom: 3, background: "#1a1f2e", borderRadius: 6, padding: "5px 4px", alignItems: "center" }}>
                         <div style={{ fontSize: 9, fontWeight: 700, color: "#f59e0b", textAlign: "center", fontFamily: "monospace" }}>{label}</div>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: mlColor(b.awayML), textAlign: "center", fontFamily: "monospace" }}>{b.awayML ?? "—"}</div>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: mlColor(b.homeML), textAlign: "center", fontFamily: "monospace" }}>{b.homeML ?? "—"}</div>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", textAlign: "center", fontFamily: "monospace" }}>{b.total ?? "—"}</div>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>{b.overOdds ?? "—"}</div>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>{b.underOdds ?? "—"}</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: mlColor(b.awayML), textAlign: "center", fontFamily: "monospace" }}>{b.awayML ?? "—"}</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: mlColor(b.homeML), textAlign: "center", fontFamily: "monospace" }}>{b.homeML ?? "—"}</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#f9fafb", textAlign: "center", fontFamily: "monospace" }}>{b.total ?? "—"}</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>{b.overOdds ?? "—"}</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>{b.underOdds ?? "—"}</div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>
+                          {b.awaySpread && b.awaySpreadOdds ? <><span style={{ color: "#e5e7eb" }}>{b.awaySpread}</span><span style={{ fontSize: 8 }}> ({b.awaySpreadOdds})</span></> : "—"}
+                        </div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>
+                          {b.homeSpread && b.homeSpreadOdds ? <><span style={{ color: "#e5e7eb" }}>{b.homeSpread}</span><span style={{ fontSize: 8 }}> ({b.homeSpreadOdds})</span></> : "—"}
+                        </div>
                       </div>
                     ))}
                   </>
                 );
               })() : (
                 <>
-                  <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
                     <StatMini label={`${game.away.abbr} ML`} value={odds.awayML} color={odds.awayML.startsWith("+") ? "#22c55e" : "#e5e7eb"} />
                     <StatMini label={`${game.home.abbr} ML`} value={odds.homeML} color={odds.homeML.startsWith("-") ? "#ef4444" : "#e5e7eb"} />
                     <StatMini label="Total" value={odds.total} color="#f9fafb" />
                   </div>
-                  <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
                     <StatMini label="Over Odds" value={odds.overOdds} />
                     <StatMini label="Under Odds" value={odds.underOdds} />
                   </div>
+                  {(odds.awaySpread || odds.homeSpread) && (
+                    <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                      <StatMini label={`${game.away.abbr} RL`} value={odds.awaySpread ? `${odds.awaySpread} (${odds.awaySpreadOdds})` : "—"} color="#9ca3af" />
+                      <StatMini label={`${game.home.abbr} RL`} value={odds.homeSpread ? `${odds.homeSpread} (${odds.homeSpreadOdds})` : "—"} color="#9ca3af" />
+                    </div>
+                  )}
                 </>
               )}
               {/* Line movement — always shown */}
@@ -4298,6 +4424,29 @@ export default function App() {
                 </div>
               );
               return (<>
+                <Section title="🃏 Reading the Slate Card">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                    Each game card in the Slate view packs several data points into a compact layout. Here's what everything means:
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["Selected card", "The active game is highlighted with a green background and border — tap any card to open that game."],
+                      ["O/U  7  •", "The total runs line for the game. The green dot means live odds are loaded. Bet over or under this number."],
+                      ["ML  +126 / -148", "Moneyline — the odds to win the game outright. Away team listed first. Positive (+) = underdog, negative (−) = favorite."],
+                      ["O/U Odds  −110 / −110", "The juice (vig) on the over and under. −110 is standard. When uneven (e.g. −115 / −105) the book is shading one side — that's often where sharp money sits."],
+                      ["RL  +1.5(−168) / −1.5(+142)", "Runline — MLB's version of the spread. Always ±1.5 runs. The underdog gets +1.5 (must lose by 1 or win outright to cover). The favorite gives −1.5 (must win by 2+). The number in parentheses is the price."],
+                      ["NRFI badge", "Model leans toward No Run First Inning with 62%+ confidence. Only shown on green-bordered cards where the signal is strong enough to act on — gray or amber borders mean the lean isn't confident enough to display."],
+                      ["Temperature / DOME badge", "Live weather at game time from Open-Meteo. Cold temps suppress offense. DOME = retractable roof stadium, climate controlled."],
+                      ["↑ OVER / ↓ UNDER badge", "Line movement detected — the total shifted up or down from its opening number. Sharp bettors often drive these moves, so it's a useful fade or follow signal."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#22c55e", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+
                 <Section title="🎨 Color Guide — What Do the Colors Mean?">
                   <Row color="#22c55e" label="Green  →  Pitcher Edge (score < 35)" sub="The pitcher has the advantage in this matchup. Good for K props and unders." />
                   <Row color="#fbbf24" label="Yellow  →  Neutral (score 35–54)" sub="No clear edge either way. Look for other factors before betting." />
@@ -4370,6 +4519,10 @@ export default function App() {
 
                 <Section title="📖 Stat Glossary">
                   {[
+                    ["ML", "Moneyline — odds to win the game outright. +150 means bet $100 to win $150. −150 means bet $150 to win $100. The minus side is always the favorite."],
+                    ["RL", "Runline — MLB's version of the point spread, always set at ±1.5 runs. The favorite gives 1.5 runs (must win by 2+), the underdog gets 1.5 runs (can lose by 1 and still cover). The price next to it is the juice."],
+                    ["O/U Odds", "The juice (vig) attached to each side of the over/under total. Standard is −110/−110 (bet $110 to win $100). When it's uneven like −115/−105, the book is adjusting for lopsided betting action — often a sharp money signal."],
+                    ["Line Movement", "A change in the total or moneyline from its opening number. Sharp bettors (wiseguys) tend to move lines early; public bettors move them closer to game time. A line that moves against the public betting direction is called a 'sharp move.'"],
                     ["ERA", "Earned Run Average — runs a pitcher allows per 9 innings pitched. Under 3.00 = elite, 3–4 = solid, 5+ = hittable."],
                     ["WHIP", "Walks + Hits per Inning Pitched. Measures how many baserunners a pitcher allows. Under 1.10 = elite, 1.10–1.30 = average, 1.40+ = concerning."],
                     ["K/9", "Strikeouts per 9 innings. Measures a pitcher's swing-and-miss ability. 10+ = high strikeout pitcher, great for K props."],

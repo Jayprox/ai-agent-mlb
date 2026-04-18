@@ -69,11 +69,12 @@ router.get("/", async (req, res) => {
       const homeAbbr = TEAM_ABBR[home.team.id] ?? home.team.abbreviation ?? "???";
 
       return {
-        gamePk:  g.gamePk,
-        id:      g.gamePk,
-        status:  g.status.detailedState,
-        time:    formatGameTime(g.gameDate),
-        stadium: g.venue.name,
+        gamePk:   g.gamePk,
+        id:       g.gamePk,
+        status:   g.status.detailedState,
+        time:     formatGameTime(g.gameDate), // ET fallback
+        gameTime: g.gameDate,                 // raw ISO — frontend formats in user's local TZ
+        stadium:  g.venue.name,
         away: {
           id:   away.team.id,
           name: away.team.name,
