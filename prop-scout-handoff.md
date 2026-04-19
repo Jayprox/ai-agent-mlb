@@ -323,7 +323,7 @@ Frontend filters: confidence ≥ 55% and odds ≥ −200. Sort by confidence des
 ### ⚫ Infrastructure (separate branch / longer term)
 
 **10. PostgreSQL data layer** *(feat/postgres-data-layer — fully designed)*
-Fully designed in `handoff-postgres-data-layer.md`. Branch needs to be created and handed to Codex. Enables all items below that require historical data.
+Fully designed in `handoff-postgres-data-layer.md` and implemented on the separate `feat/postgres-data-layer` branch. Branch includes backend-only scaffolding for `pg` + `node-cron`, `backend/services/db.js`, SQL migrations, snapshot jobs, scheduler wiring, DB-first reads for `schedule` / `bullpen` / `linescore` / `umpires`, and an admin trigger endpoint. It was intentionally kept off `main` because it still needs real `DATABASE_URL` / `ADMIN_SECRET` environment wiring plus first-run migration execution on Railway before it should be merged. Enables all items below that require historical data.
 
 **11. Historical prop hit rates + CLV tracking** *(pro bettor feature)*
 Track whether props hit over time and compare final line vs line at pick time (Closing Line Value). Depends on PostgreSQL being live — picks need to be stored with timestamps and graded after game completion. Also requires capturing pre-game odds at pick time for CLV calculation.
