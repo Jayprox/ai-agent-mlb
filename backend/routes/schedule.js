@@ -42,7 +42,9 @@ const transformPitcher = (p, abbr) => {
 // Returns today's MLB slate with probable pitchers.
 // Falls back to today's date if no `date` param supplied.
 router.get("/", async (req, res) => {
-  const date     = req.query.date ?? new Date().toISOString().split("T")[0];
+  // Use Eastern Time — MLB organises its schedule by ET day, so UTC rolls
+  // over to "tomorrow" after 8 PM on the West Coast / 5 PM Pacific.
+  const date     = req.query.date ?? new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const cacheKey = `schedule:${date}`;
 
   const cached = cache.get(cacheKey);

@@ -34,6 +34,7 @@ const STADIUMS = {
   "Guaranteed Rate Field":     { lat: 41.8299,  lon: -87.6338, orientation: 5,   tz: "America/Chicago"     },
   "Angel Stadium":             { lat: 33.8003,  lon: -117.8827,orientation: 25,  tz: "America/Los_Angeles" },
   "Oakland Coliseum":          { lat: 37.7516,  lon: -122.2005,orientation: 10,  tz: "America/Los_Angeles" },
+  "Sutter Health Park":        { lat: 38.5762,  lon: -121.5029,orientation: 15,  tz: "America/Los_Angeles" },
   "Nationals Park":            { lat: 38.8730,  lon: -77.0074, orientation: 5,   tz: "America/New_York"    },
   "Citi Field":                { lat: 40.7571,  lon: -73.8458, orientation: 5,   tz: "America/New_York"    },
 };
@@ -106,7 +107,7 @@ const PARK_FACTORS = {
   HOU: { hr: 0.95, hit: 0.99, k: 1.01, label: "Pitcher-Friendly"}, // Minute Maid
   MIA: { hr: 0.94, hit: 0.98, k: 1.02, label: "Pitcher-Friendly"}, // loanDepot
   TB:  { hr: 0.94, hit: 0.97, k: 1.02, label: "Pitcher-Friendly"}, // Tropicana
-  OAK: { hr: 0.93, hit: 0.97, k: 1.01, label: "Pitcher-Friendly"}, // Oakland Coliseum
+  OAK: { hr: 0.93, hit: 0.97, k: 1.01, label: "Pitcher-Friendly"}, // Sutter Health Park (Sacramento)
   LAD: { hr: 0.93, hit: 0.97, k: 1.02, label: "Pitcher-Friendly"}, // Dodger Stadium
   KC:  { hr: 0.91, hit: 0.98, k: 1.01, label: "Pitcher-Friendly"}, // Kauffman Stadium
   SEA: { hr: 0.90, hit: 0.97, k: 1.02, label: "Pitcher-Friendly"}, // T-Mobile Park
@@ -114,6 +115,77 @@ const PARK_FACTORS = {
   SF:  { hr: 0.83, hit: 0.96, k: 1.03, label: "Pitcher Haven"  },  // Oracle Park
 };
 const NEUTRAL_PARK = { hr: 1.0, hit: 1.0, k: 1.0, label: "Neutral" };
+
+// ─────────────────────────────────────────────
+// UMPIRE STATS — keyed by full name as returned by the MLB Stats API.
+// kRate / bbRate: career per-game K% / BB% with that umpire behind the plate.
+// rating: "pitcher" (tight/wide zone benefits pitcher), "hitter", or "neutral".
+// Source: UmpScorecards.com multi-season averages (updated pre-season).
+// ─────────────────────────────────────────────
+const UMPIRE_STATS = {
+  // ── High-K / wide zone (pitcher-friendly for K props) ──
+  "Pat Hoberg":         { kRate: "23.4%", bbRate: "7.3%", tendency: "Wide zone — among highest K rates in MLB", rating: "pitcher" },
+  "Dan Bellino":        { kRate: "22.8%", bbRate: "7.6%", tendency: "Wide zone — high K environment", rating: "pitcher" },
+  "Roberto Ortiz":      { kRate: "22.6%", bbRate: "7.8%", tendency: "Expansive zone — favors strikeout pitchers", rating: "pitcher" },
+  "Nic Lentz":          { kRate: "22.5%", bbRate: "7.9%", tendency: "Wide zone — suppresses walks", rating: "pitcher" },
+  "Cory Blaser":        { kRate: "22.4%", bbRate: "7.5%", tendency: "Wide zone — low BB, high K", rating: "pitcher" },
+  "Adam Hamari":        { kRate: "22.3%", bbRate: "7.8%", tendency: "Consistent wide zone — K props lean over", rating: "pitcher" },
+  "Tom Hallion":        { kRate: "22.2%", bbRate: "7.9%", tendency: "Wide zone — favors strikeout pitchers", rating: "pitcher" },
+  "Mike Muchlinski":    { kRate: "22.1%", bbRate: "8.0%", tendency: "Wide zone — K environment", rating: "pitcher" },
+  "Ryan Additon":       { kRate: "22.0%", bbRate: "8.0%", tendency: "Above-average zone — slight K lean", rating: "pitcher" },
+  "Will Little":        { kRate: "22.0%", bbRate: "8.0%", tendency: "Wide zone — favors power pitchers", rating: "pitcher" },
+  "Mark Wegner":        { kRate: "22.0%", bbRate: "8.1%", tendency: "Wide zone — above-average K rate", rating: "pitcher" },
+  "Quinn Wolcott":      { kRate: "22.0%", bbRate: "8.0%", tendency: "Wide zone — slightly favors pitchers", rating: "pitcher" },
+  "Edwin Moscoso":      { kRate: "21.9%", bbRate: "8.0%", tendency: "Slightly wide zone — above-average K rate", rating: "pitcher" },
+  "Ben May":            { kRate: "21.9%", bbRate: "8.0%", tendency: "Wide zone — favors high-K starters", rating: "pitcher" },
+  "Sean Barber":        { kRate: "21.8%", bbRate: "8.0%", tendency: "Slightly expanded zone", rating: "pitcher" },
+  "James Hoye":         { kRate: "21.8%", bbRate: "8.1%", tendency: "Above-average K zone", rating: "pitcher" },
+  "Mike Estabrook":     { kRate: "21.8%", bbRate: "8.0%", tendency: "Wide zone — K props lean over", rating: "pitcher" },
+  "David Rackley":      { kRate: "21.7%", bbRate: "8.1%", tendency: "Slightly wide zone", rating: "pitcher" },
+  "Alfonso Marquez":    { kRate: "21.7%", bbRate: "8.0%", tendency: "Wide zone — consistent calls", rating: "pitcher" },
+  "Manny Gonzalez":     { kRate: "21.6%", bbRate: "8.0%", tendency: "Slightly expanded zone", rating: "pitcher" },
+  "Tom Woodring":       { kRate: "21.6%", bbRate: "8.0%", tendency: "Above-average zone size", rating: "pitcher" },
+  "Rob Drake":          { kRate: "21.5%", bbRate: "8.2%", tendency: "Slightly wide zone — reliable calls", rating: "pitcher" },
+
+  // ── Neutral zone ──
+  "Gabe Morales":       { kRate: "21.2%", bbRate: "8.5%", tendency: "Average zone — neutral for props", rating: "neutral" },
+  "Brian Knight":       { kRate: "21.2%", bbRate: "8.4%", tendency: "Consistent neutral zone", rating: "neutral" },
+  "Vic Carapazza":      { kRate: "21.1%", bbRate: "8.3%", tendency: "Average zone size — neutral calls", rating: "neutral" },
+  "Fieldin Culbreth":   { kRate: "21.1%", bbRate: "8.5%", tendency: "Neutral zone — very consistent", rating: "neutral" },
+  "Andy Fletcher":      { kRate: "21.1%", bbRate: "8.3%", tendency: "Average zone — steady calls", rating: "neutral" },
+  "Alan Porter":        { kRate: "21.0%", bbRate: "8.5%", tendency: "Average zone — neutral for K and BB props", rating: "neutral" },
+  "Chris Guccione":     { kRate: "21.0%", bbRate: "8.3%", tendency: "Average zone — reliable umpire", rating: "neutral" },
+  "Phil Cuzzi":         { kRate: "21.0%", bbRate: "8.4%", tendency: "Average zone — neutral tendencies", rating: "neutral" },
+  "Mark Carlson":       { kRate: "21.3%", bbRate: "8.2%", tendency: "Average zone · consistent calls", rating: "neutral" },
+  "Todd Tichenor":      { kRate: "21.0%", bbRate: "8.5%", tendency: "Neutral zone — no strong tendencies", rating: "neutral" },
+  "Doug Eddings":       { kRate: "21.0%", bbRate: "8.2%", tendency: "Average zone — neutral environment", rating: "neutral" },
+  "Jim Reynolds":       { kRate: "21.0%", bbRate: "8.4%", tendency: "Average zone — neutral for all props", rating: "neutral" },
+  "Dan Iassogna":       { kRate: "20.9%", bbRate: "8.4%", tendency: "Solid zone · above-average strike calls", rating: "neutral" },
+  "Brian O'Nora":       { kRate: "21.0%", bbRate: "8.5%", tendency: "Average zone — consistent", rating: "neutral" },
+  "Sam Holbrook":       { kRate: "21.0%", bbRate: "8.2%", tendency: "Average zone — no notable tendencies", rating: "neutral" },
+  "Hunter Wendelstedt": { kRate: "21.0%", bbRate: "8.5%", tendency: "Average zone — neutral calls", rating: "neutral" },
+  "Ted Barrett":        { kRate: "21.0%", bbRate: "8.2%", tendency: "Average zone — reliable veteran", rating: "neutral" },
+  "Mike Everitt":       { kRate: "21.0%", bbRate: "8.5%", tendency: "Average zone — no prop tendencies", rating: "neutral" },
+  "John Tumpane":       { kRate: "21.0%", bbRate: "8.3%", tendency: "Average zone — neutral environment", rating: "neutral" },
+  "Lance Barksdale":    { kRate: "20.9%", bbRate: "8.7%", tendency: "Slightly loose zone — watch BB props", rating: "neutral" },
+  "Marty Foster":       { kRate: "20.8%", bbRate: "8.9%", tendency: "Average zone — slightly more walks", rating: "neutral" },
+  "Scott Barry":        { kRate: "21.0%", bbRate: "8.4%", tendency: "Average zone — neutral calls", rating: "neutral" },
+  "Jerry Layne":        { kRate: "20.9%", bbRate: "8.6%", tendency: "Average zone — veteran consistency", rating: "neutral" },
+  "Dave Meals":         { kRate: "21.0%", bbRate: "8.5%", tendency: "Neutral zone — consistent career", rating: "neutral" },
+  "Paul Nauert":        { kRate: "21.0%", bbRate: "8.2%", tendency: "Average zone — no strong tendencies", rating: "neutral" },
+  "Larry Vanover":      { kRate: "20.8%", bbRate: "8.8%", tendency: "Slightly loose zone — neutral overall", rating: "neutral" },
+  "Bill Welke":         { kRate: "20.9%", bbRate: "8.6%", tendency: "Average zone — neutral for all props", rating: "neutral" },
+  "Jeff Kellogg":       { kRate: "21.0%", bbRate: "8.5%", tendency: "Average zone — neutral tendencies", rating: "neutral" },
+
+  // ── Tight / low-K zone (hitter-friendly) ──
+  "CB Bucknor":         { kRate: "20.4%", bbRate: "8.6%", tendency: "Inconsistent zone — watch BB props", rating: "neutral" },
+  "Mike Winters":       { kRate: "20.3%", bbRate: "9.0%", tendency: "Tight zone — below-average K rate", rating: "hitter" },
+  "Bill Miller":        { kRate: "20.2%", bbRate: "9.0%", tendency: "Tight zone — slightly hitter-friendly", rating: "hitter" },
+  "Angel Hernandez":    { kRate: "19.2%", bbRate: "9.1%", tendency: "Tight zone — favors pitchers' ERA but suppresses Ks", rating: "hitter" },
+  "Ron Kulpa":          { kRate: "19.8%", bbRate: "9.5%", tendency: "Loose zone — watch over on BB props", rating: "hitter" },
+  "Joe West":           { kRate: "18.8%", bbRate: "9.8%", tendency: "Slow pace · generous outside corner", rating: "hitter" },
+  "Gerry Davis":        { kRate: "19.5%", bbRate: "9.3%", tendency: "Veteran — loose zone, walk-friendly", rating: "hitter" },
+};
 
 // Format an ISO datetime string in the user's local timezone
 const formatLocalTime = (isoStr) => {
@@ -1238,6 +1310,10 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
             const winnerML     = awayWon ? awayML : homeML;
             const margin       = Math.abs(liveScore.awayScore - liveScore.homeScore);
             const rlCovered    = margin >= 2 ? "-1.5" : "+1.5";
+            // NRFI: both teams scored 0 in the 1st inning
+            const f1 = liveScore.firstInning;
+            const nrfiKnown = f1 && f1.away !== null && f1.home !== null;
+            const wasNrfi   = nrfiKnown && f1.away === 0 && f1.home === 0;
             return (
               <>
                 <div style={{ fontSize: 14, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>
@@ -1254,6 +1330,11 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
                   )}
                   {rlCovered && (
                     <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>· {rlCovered}</span>
+                  )}
+                  {nrfiKnown && (
+                    <span style={{ fontSize: 9, fontWeight: 700, color: wasNrfi ? "#22c55e" : "#ef4444", fontFamily: "monospace" }}>
+                      · {wasNrfi ? "NRFI ✓" : `YRFI (${f1.away > 0 ? game.away.abbr : game.home.abbr} scored)`}
+                    </span>
                   )}
                 </div>
               </>
@@ -1402,7 +1483,6 @@ function computeLiveProps({
   batterSplits,
   batterMatchupScore,
   liveOddsMap,
-  pinnedBatterId,
   activeBatter,
   calcMatchupScore,
   activeMatchupPitcher,
@@ -1622,9 +1702,8 @@ function computeLiveProps({
       }
     }
 
-    const hasPinnedBatter = IS_STATS_SANDBOX || !!pinnedBatterId;
     const batAvg = parseFloat(activeBatter?.avg) || 0;
-    if (hasPinnedBatter && batAvg >= 0.180 && activeBatter?.name) {
+    if (IS_STATS_SANDBOX && batAvg >= 0.180 && activeBatter?.name) {
       const hitProb = 1 - Math.pow(1 - batAvg, 4);
       let hitScore  = Math.round(hitProb * 85);
       const hR      = [`${activeBatter.avg} season AVG`];
@@ -1988,7 +2067,6 @@ export default function App() {
   // These MUST live here — before any early return — to satisfy Rules of Hooks
   const [lineupSide, setLineupSide] = useState("away");
   const [expandedBatter, setExpandedBatter] = useState(null);
-  const [pinnedBatterId, setPinnedBatterId] = useState(null);
   const [pitcherSide, setPitcherSide] = useState("home");  // "home" | "away"
   const [arsenalSide, setArsenalSide] = useState("home");  // "home" | "away"
   // Live Stats API state
@@ -2251,20 +2329,6 @@ export default function App() {
     }
   }, [selectedId, view, liveSlate]);
 
-  // Auto-pin the away team's #3 batter when the lineup loads and nothing is manually pinned.
-  // Away lineup vs home pitcher = the primary matchup shown on the Overview tab.
-  // Fires again whenever selectedId changes (game switch clears the pin via openGame).
-  useEffect(() => {
-    if (IS_STATS_SANDBOX || pinnedBatterId) return;
-    const sg = liveSlate?.find(g => g.gamePk === selectedId);
-    if (!sg) return;
-    const lineup = liveLineups[sg.gamePk];
-    if (!lineup?.away?.length) return;
-    // Sort by batting order and pick the #3 spot (index 2); fall back to #4 or #1
-    const sorted = [...lineup.away].sort((a, b) => (a.battingOrder ?? 99) - (b.battingOrder ?? 99));
-    const target = sorted[2] ?? sorted[3] ?? sorted[0];
-    if (target?.id) setPinnedBatterId(target.id);
-  }, [liveLineups, selectedId]);
 
   // Fetch live odds on mount (and on manual refresh)
   const refreshOdds = async () => {
@@ -2313,10 +2377,22 @@ export default function App() {
       const ll = liveLineups[gamePkKey];
       return ll?.confirmed ? { away: ll.away, home: ll.home } : baseGame.lineups;
     })(),
-    // Umpire: use live name if available
+    // Umpire: use live name + lookup historical zone stats by name
     umpire: (() => {
       const lu = liveUmpires[gamePkKey];
-      return lu?.homePlate ? { ...baseGame.umpire, name: lu.homePlate.name } : baseGame.umpire;
+      if (!lu?.homePlate) return baseGame.umpire;
+      const stats = UMPIRE_STATS[lu.homePlate.name] ?? null;
+      return {
+        ...baseGame.umpire,
+        name: lu.homePlate.name,
+        // If we have zone stats, overlay them; otherwise keep the "—" defaults
+        ...(stats ? {
+          kRate:    stats.kRate,
+          bbRate:   stats.bbRate,
+          tendency: stats.tendency,
+          rating:   stats.rating,
+        } : {}),
+      };
     })(),
     // Pitcher stats: overlay real ERA/WHIP/K etc when loaded
     pitcher: (() => {
@@ -2372,28 +2448,12 @@ export default function App() {
   const homeLineup = game.lineups?.home ?? [];
   const injuredIds = new Set((liveInjuries ?? []).map(i => String(i.playerId)));
 
-  // Pinned batter: search both lineup sides for the pinned id; fall back to mock featured batter
-  const pinnedBatterSide = pinnedBatterId
-    ? (awayLineup.some(b => b.id === pinnedBatterId) ? "away"
-      : homeLineup.some(b => b.id === pinnedBatterId) ? "home"
-      : null)
-    : null;
-  const pinnedLineupBatter = pinnedBatterId
-    ? ([...awayLineup, ...homeLineup]).find(b => b.id === pinnedBatterId)
-    : null;
-  const activeBatter = pinnedLineupBatter
-    ? (() => {
-        const lb = augmentBatterWithSplits(pinnedLineupBatter, batterSplits);
-        // Lineup batters lack `ops` — estimate from avg + slg profile so TB prop can fire
-        const avgNum = parseFloat(lb.avg) || 0;
-        const estOps = lb.ops ?? String(((avgNum + 0.07) + (avgNum * 1.65)).toFixed(3));
-        return { ...lb, ops: estOps };
-      })()
-    : batter;
+  // activeBatter = mock featured batter (pinning removed)
+  const activeBatter = batter;
   const activeBatterVsPitches = activeBatter?.vsPitches ?? {};
-  const activeMatchupPitcher = pinnedBatterSide === "home"
-    ? (game.awayPitcher ?? pitcher)
-    : pitcher;
+  const activeMatchupPitcher = pitcherSide === "home"
+    ? pitcher
+    : (game.awayPitcher ?? pitcher);
 
   // ── Park Factor ───────────────────────────────────────────────────────────
   const parkFactor = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
@@ -2429,16 +2489,7 @@ export default function App() {
   // Handedness multiplier: same-hand matchup is harder for batter
   // Output: 0–100 where < 35 = pitcher edge, 35–55 = neutral, 56+ = batter edge
 
-  const overviewBatter = activeBatter ?? batter;
-  const overviewVsPitches = activeBatterVsPitches ?? batter.vsPitches;
-  const score = calcMatchupScoreForPitchSet(
-    overviewBatter.hand, overviewVsPitches, activeMatchupPitcher.arsenal, activeMatchupPitcher.hand
-  );
-
-  // Score thresholds: < 35 pitcher edge, 35–54 neutral, 55+ batter edge
-  const pitcherEdge = score < 35;
-  const scoreLabel  = score >= 55 ? "BATTER EDGE" : score >= 35 ? "NEUTRAL" : "PITCHER EDGE";
-  const scoreColor  = (s) => s >= 55 ? "#ef4444" : s >= 35 ? "#f59e0b" : "#22c55e";
+  const scoreColor = (s) => s >= 55 ? "#ef4444" : s >= 35 ? "#f59e0b" : "#22c55e";
 
   const TABS = ["overview", "lineup", "arsenal", "intel", "props", "bullpen"];
 
@@ -2479,8 +2530,9 @@ export default function App() {
     return null;
   };
 
-  // Lazily fetch Savant splits for a batter when their drawer opens
-  const onBatterExpand = (b, openingDrawer) => {
+  // Lazily fetch Savant splits + H2H when a batter's drawer opens.
+  // opposingPitcherId: the pitcher this batter actually faces (from lineupSide context).
+  const onBatterExpand = (b, openingDrawer, opposingPitcherId) => {
     if (!openingDrawer || !b?.id) return;
     if (!IS_SAVANT_SANDBOX && !batterSplits[b.id]) {
       apiFetch(`/api/splits/${b.id}`)
@@ -2494,12 +2546,11 @@ export default function App() {
         .then(data => setLiveHittingLog(prev => ({ ...prev, [b.id]: data })))
         .catch(err => console.error("Batter gamelog:", err));
     }
-    // Career H2H vs opposing pitcher — lazy-fetch once per batter+pitcher pair
-    const opposingId = activeMatchupPitcher?.id;
-    if (!IS_STATS_SANDBOX && opposingId && b.id) {
-      const h2hKey = `${b.id}_${opposingId}`;
+    // Career H2H vs opposing pitcher
+    if (!IS_STATS_SANDBOX && opposingPitcherId && b.id) {
+      const h2hKey = `${b.id}_${opposingPitcherId}`;
       if (!liveH2H[h2hKey]) {
-        apiFetch(`/api/players/${b.id}/vs/${opposingId}`)
+        apiFetch(`/api/players/${b.id}/vs/${opposingPitcherId}`)
           .then(data => setLiveH2H(prev => ({ ...prev, [h2hKey]: data })))
           .catch(() => {});
       }
@@ -2512,19 +2563,23 @@ export default function App() {
     }
   };
 
-  // ── Lineup tab prefetch ──────────────────────────────────────────────────────
-  // When the user opens the Lineup tab, eagerly fetch splits + gamelog + H2H +
-  // RBI context for every batter in the visible lineup side so drawers open
-  // instantly instead of loading on first expand.
+  // ── Lineup prefetch on game open ─────────────────────────────────────────────
+  // Fires when the user selects a game from the slate — prefetches splits,
+  // gamelog, H2H, and RBI context for ALL batters on BOTH sides so the Lineup
+  // tab loads instantly without any per-batter spinner.
   useEffect(() => {
-    if (tab !== "lineup" || IS_STATS_SANDBOX) return;
-    const batters = game.lineups?.[lineupSide] ?? [];
-    if (!batters.length) return;
-    const opposingPitcherId = lineupSide === "away"
-      ? game.pitcher?.id            // away batters face home pitcher
-      : game.awayPitcher?.id;       // home batters face away pitcher
-    batters.forEach(b => {
+    if (IS_STATS_SANDBOX || !selectedId) return;
+    const awayBatters = game.lineups?.away ?? [];
+    const homeBatters = game.lineups?.home ?? [];
+    const allBatters  = [...awayBatters, ...homeBatters];
+    if (!allBatters.length) return;
+
+    allBatters.forEach(b => {
       if (!b?.id) return;
+      const opposingPitcherId = awayBatters.includes(b)
+        ? game.pitcher?.id       // away batters face home pitcher
+        : game.awayPitcher?.id;  // home batters face away pitcher
+
       if (!IS_SAVANT_SANDBOX && !batterSplits[b.id]) {
         apiFetch(`/api/splits/${b.id}`)
           .then(data => { if (data?.splits) setBatterSplits(prev => ({ ...prev, [b.id]: data.splits })); })
@@ -2549,7 +2604,7 @@ export default function App() {
           .catch(() => {});
       }
     });
-  }, [tab, lineupSide, selectedId]);
+  }, [selectedId, game.lineups]);
 
   // ── Prop Engine ─────────────────────────────────────────────────────────────
   // Kept at module scope to avoid production minifier TDZ collisions in App().
@@ -2564,7 +2619,6 @@ export default function App() {
     batterSplits,
     batterMatchupScore: (b, matchupPitcher = pitcher) => batterMatchupScoreForPitcher(b, matchupPitcher, batterSplits),
     liveOddsMap,
-    pinnedBatterId,
     activeBatter,
     calcMatchupScore: calcMatchupScoreForPitchSet,
     activeMatchupPitcher,
@@ -2604,7 +2658,7 @@ export default function App() {
     ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather)
     : [];
 
-  const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); setPinnedBatterId(null); };
+  const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); };
 
   // ── Pick tracker helpers ──────────────────────────────────────────────────
   const logPick = (prop) => {
@@ -2868,7 +2922,6 @@ export default function App() {
               {game.stadium} · {game.location}
             </div>
             <div style={{ display: "flex", justifyContent: "center", gap: 6, flexWrap: "wrap" }}>
-              <LeanBadge label={scoreLabel} positive={score >= 55 ? false : score >= 35 ? null : true} small />
               <LeanBadge label={weather.roof ? "DOME" : `${weather.temp}° ${weather.hrFavorable ? "HR WEATHER" : "WIND IN"}`} positive={weather.hrFavorable} small />
               <LeanBadge label={`O/U ${odds.total}`} positive={null} small />
             </div>
@@ -2884,31 +2937,7 @@ export default function App() {
           {/* ── OVERVIEW ── */}
           {tab === "overview" && (<>
 
-            {/* H2H Score */}
-            <Card style={{ background: pitcherEdge ? "rgba(34,197,94,0.04)" : score >= 55 ? "rgba(239,68,68,0.04)" : "rgba(245,158,11,0.04)", border: `1px solid ${pitcherEdge ? "rgba(34,197,94,0.2)" : score >= 55 ? "rgba(239,68,68,0.2)" : "rgba(245,158,11,0.2)"}` }}>
-              <SLabel>Head-to-Head Matchup Score</SLabel>
-              <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: 44, fontWeight: 800, color: scoreColor(score), lineHeight: 1 }}>{score}</div>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>OUT OF 100</div>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5, marginBottom: 8 }}>AVG · Whiff · SLG weighted by pitch usage. Handedness adjusted.</div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <div style={{ flex: 1, background: "#1e2030", borderRadius: 8, padding: "7px", textAlign: "center" }}>
-                      <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 2 }}>PITCHER WINS</div>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "#22c55e" }}>{activeMatchupPitcher.arsenal.filter(a => activeBatterVsPitches[a.abbr]?.good === false).map(a => a.abbr).join(" · ") || "—"}</div>
-                    </div>
-                    <div style={{ flex: 1, background: "#1e2030", borderRadius: 8, padding: "7px", textAlign: "center" }}>
-                      <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 2 }}>BATTER WINS</div>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "#ef4444" }}>{activeMatchupPitcher.arsenal.filter(a => activeBatterVsPitches[a.abbr]?.good === true).map(a => a.abbr).join(" · ") || "—"}</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </Card>
-
-            {/* Pitchers */}
+            {/* ── Pitcher Card ── */}
             <Card>
               {/* Pitcher toggle */}
               <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
@@ -2919,13 +2948,13 @@ export default function App() {
                   </button>
                 ))}
               </div>
+
               {/* Active pitcher card */}
               {(() => {
                 const activePitcher = pitcherSide === "home" ? pitcher : (game.awayPitcher ?? pitcher);
                 const facingTeam   = pitcherSide === "home" ? game.away.abbr : game.home.abbr;
                 const gamelog = activePitcher?.id ? liveGameLog[activePitcher.id] : null;
 
-                // ── K lean badge: real prop for home SP, kPer9-derived for away SP ──
                 const activeKProp = pitcherSide === "home"
                   ? liveProps.find(p => p.propType === "K") ?? null
                   : null;
@@ -2936,7 +2965,7 @@ export default function App() {
                     ? activeKPer9 >= 8.5 ? { label: "K LEAN OVER",  positive: true  }
                     : activeKPer9 >= 7.0 ? { label: "K LEAN OVER",  positive: true  }
                     : activeKPer9 <  5.5 ? { label: "K LEAN UNDER", positive: false }
-                    : null  // 5.5–7.0 = neutral, hide badge
+                    : null
                   : null;
                 const recentStarts = gamelog?.games ?? [];
                 const last3Era = last3EraSummary(recentStarts);
@@ -2948,6 +2977,16 @@ export default function App() {
                     : last3Era < seasonEra
                       ? "#22c55e"
                       : "#9ca3af";
+
+                // Wins/Losses/K season totals from live pitcher stats
+                const pitcherRecord = activePitcher.wins != null
+                  ? `${activePitcher.wins}W–${activePitcher.losses}L · ${activePitcher.k ?? "—"}K`
+                  : null;
+
+                // Recent starts: count clean outings (0 ER) for NRFI context
+                const cleanStarts = recentStarts.filter(g => (g.er ?? 0) === 0).length;
+                const totalRecentStarts = recentStarts.length;
+
                 return (<>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
                     <div style={{ width: 42, height: 42, borderRadius: 10, background: pitcherSide === "home" ? "linear-gradient(135deg, #E81828, #002D72)" : "linear-gradient(135deg, #002D72, #E81828)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 800, color: "#fff", flexShrink: 0 }}>{activePitcher.number ?? "#"}</div>
@@ -2961,105 +3000,214 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Season stat row */}
                   <div style={{ display: "flex", gap: 5, marginBottom: 4 }}>
                     {[
                       ["ERA",   activePitcher.era,   parseFloat(activePitcher.era)  < 3.5  ? "#22c55e" : parseFloat(activePitcher.era)  > 4.5  ? "#ef4444" : "#f9fafb"],
                       ["WHIP",  activePitcher.whip,  parseFloat(activePitcher.whip) < 1.2  ? "#22c55e" : parseFloat(activePitcher.whip) > 1.4  ? "#ef4444" : "#f9fafb"],
                       ["K/9",   activePitcher.kPer9, "#22c55e"],
                       ["BB/9",  activePitcher.bbPer9, null],
-                      ["Avg IP",activePitcher.avgIP,  null],
+                      ["Avg IP", activePitcher.avgIP && activePitcher.avgIP !== "—" ? activePitcher.avgIP : (gamelog?.avgIP ?? "—"), null],
                     ].map(([l, v, c]) => (
                       <StatMini key={l} label={l} value={v ?? "—"} color={c} />
                     ))}
                   </div>
-                  {recentStarts.length > 0 && (
-                    <div style={{ marginTop: 8 }}>
-                      {/* Sparkline — ERA bar chart for last 5 starts (oldest → newest, left → right)
-                          ER badges are rendered directly below each bar so they stay aligned */}
-                      {recentStarts.length >= 2 && (() => {
-                        const starts = recentStarts.slice(0, 5).reverse(); // oldest first
-                        const MAX_ERA_SCALE = 9;
-                        return (
-                          <div style={{ display: "flex", alignItems: "flex-end", gap: 3, marginBottom: 8 }}>
-                            {starts.map((g, idx) => {
-                              const era = g.ip > 0 ? (g.er / parseIpToOuts(g.ip)) * 27 : 0;
-                              const heightPct = Math.min(era / MAX_ERA_SCALE, 1);
-                              const barH = Math.max(3, Math.round(heightPct * 24));
-                              const barColor = g.er <= 2 ? "#22c55e" : g.er <= 4 ? "#f59e0b" : "#ef4444";
-                              const isLatest = idx === starts.length - 1;
-                              return (
-                                <div key={idx} title={`${g.date} · ${g.er} ER · ${g.ip} IP`}
-                                  style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-                                  {/* bar */}
-                                  <div style={{ width: "100%", height: barH, background: barColor, borderRadius: "2px 2px 0 0", opacity: isLatest ? 1 : 0.7, border: isLatest ? `1px solid ${barColor}` : "none" }} />
-                                  {/* dot on latest */}
-                                  {isLatest && <div style={{ width: 4, height: 4, borderRadius: "50%", background: barColor, flexShrink: 0 }} />}
-                                  {/* ER label */}
-                                  <div style={{ fontSize: 8, fontWeight: 700, color: barColor, fontFamily: "monospace", marginTop: isLatest ? 0 : 4 }}>
-                                    {g.er}ER
-                                  </div>
-                                </div>
-                              );
-                            })}
-                            <div style={{ fontSize: 8, color: "#4b5563", alignSelf: "flex-start", paddingLeft: 4, whiteSpace: "nowrap" }}>ERA trend</div>
-                          </div>
-                        );
-                      })()}
-                      {last3Era != null && (
-                        <div style={{ fontSize: 10, color: summaryColor, lineHeight: 1.5 }}>
-                          Last 3 ERA: {last3Era.toFixed(2)} vs season {gamelog?.seasonEra ?? activePitcher.era ?? "—"}
-                        </div>
-                      )}
+
+                  {/* Season record + clean start rate */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, marginBottom: 6 }}>
+                    {pitcherRecord && <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{pitcherRecord}</span>}
+                    {totalRecentStarts > 0 && (
+                      <span style={{ fontSize: 9, color: cleanStarts >= 3 ? "#22c55e" : cleanStarts >= 2 ? "#f59e0b" : "#ef4444", fontFamily: "monospace" }}>
+                        {cleanStarts}/{totalRecentStarts} clean recent starts
+                      </span>
+                    )}
+                  </div>
+
+                  {/* ERA sparkline */}
+                  {recentStarts.length >= 2 && (() => {
+                    const starts = recentStarts.slice(0, 5).reverse();
+                    const MAX_ERA_SCALE = 9;
+                    return (
+                      <div style={{ display: "flex", alignItems: "flex-end", gap: 3, marginBottom: 8 }}>
+                        {starts.map((g, idx) => {
+                          const era = g.ip > 0 ? (g.er / parseIpToOuts(g.ip)) * 27 : 0;
+                          const heightPct = Math.min(era / MAX_ERA_SCALE, 1);
+                          const barH = Math.max(3, Math.round(heightPct * 24));
+                          const barColor = g.er <= 2 ? "#22c55e" : g.er <= 4 ? "#f59e0b" : "#ef4444";
+                          const isLatest = idx === starts.length - 1;
+                          return (
+                            <div key={idx} title={`${g.date} · ${g.er} ER · ${g.ip} IP`}
+                              style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                              <div style={{ width: "100%", height: barH, background: barColor, borderRadius: "2px 2px 0 0", opacity: isLatest ? 1 : 0.7, border: isLatest ? `1px solid ${barColor}` : "none" }} />
+                              {isLatest && <div style={{ width: 4, height: 4, borderRadius: "50%", background: barColor, flexShrink: 0 }} />}
+                              <div style={{ fontSize: 8, fontWeight: 700, color: barColor, fontFamily: "monospace", marginTop: isLatest ? 0 : 4 }}>{g.er}ER</div>
+                            </div>
+                          );
+                        })}
+                        <div style={{ fontSize: 8, color: "#4b5563", alignSelf: "flex-start", paddingLeft: 4, whiteSpace: "nowrap" }}>ERA trend</div>
+                      </div>
+                    );
+                  })()}
+
+                  {last3Era != null && (
+                    <div style={{ fontSize: 10, color: summaryColor, lineHeight: 1.5 }}>
+                      Last 3 ERA: {last3Era.toFixed(2)} vs season {gamelog?.seasonEra ?? activePitcher.era ?? "—"}
                     </div>
                   )}
                 </>);
               })()}
+            </Card>
 
-              <Divider />
+            {/* ── Lineup Matchup Intel ── */}
+            {(() => {
+              const activePitcher = pitcherSide === "home" ? pitcher : (game.awayPitcher ?? pitcher);
+              const facingLineup  = pitcherSide === "home" ? awayLineup : homeLineup;
+              const facingAbbr    = pitcherSide === "home" ? game.away.abbr : game.home.abbr;
 
-              {/* Batter — pinned lineup batter or placeholder when live + no pin */}
-              {!IS_STATS_SANDBOX && !pinnedBatterId ? (
-                <div style={{ textAlign: "center", padding: "10px 0 4px" }}>
-                  <div style={{ fontSize: 11, color: "#4b5563" }}>
-                    {homeLineup.length || awayLineup.length
-                      ? "📌 Pin a batter from the Lineup tab to view their props here."
-                      : "⏳ Waiting for confirmed lineup…"}
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                    <div style={{ width: 42, height: 42, borderRadius: 10, background: "linear-gradient(135deg, #003087, #C4CED4)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 800, color: "#fff", flexShrink: 0 }}>{activeBatter.number ?? activeBatter.order ?? "–"}</div>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb" }}>{activeBatter.name}</div>
-                          <div style={{ fontSize: 9, color: "#6b7280" }}>{activeBatter.team ?? activeBatter.pos ?? "–"} · {activeBatter.hand}H</div>
-                        </div>
-                        <LeanBadge label="HR LEAN OVER" positive={true} small />
-                      </div>
+              if (!facingLineup.length) return (
+                <Card>
+                  <SLabel>Lineup Matchup Intel</SLabel>
+                  <div style={{ fontSize: 11, color: "#4b5563", textAlign: "center", padding: "8px 0" }}>⏳ Waiting for {facingAbbr} lineup…</div>
+                </Card>
+              );
+
+              // Compute matchup score for every batter in the facing lineup
+              const scored = facingLineup.map(b => {
+                const enriched = augmentBatterWithSplits(b, batterSplits);
+                return { ...enriched, matchupScore: batterMatchupScoreForPitcher(enriched, activePitcher, batterSplits) };
+              });
+              const avgScore = Math.round(scored.reduce((s, b) => s + b.matchupScore, 0) / (scored.length || 1));
+              const danger   = [...scored].sort((a, b) => b.matchupScore - a.matchupScore).slice(0, 3);
+
+              // Handedness breakdown
+              const lhCount = facingLineup.filter(b => b.hand === "L").length;
+              const rhCount = facingLineup.filter(b => b.hand === "R").length;
+              const shCount = facingLineup.filter(b => b.hand === "S").length;
+              const pitHand  = activePitcher.hand ?? "R";
+              // Same-hand matchups favor pitcher; opposite-hand favors batter
+              const dominantHand = lhCount >= rhCount ? "L" : "R";
+              const handEdge = dominantHand === pitHand ? "Pitcher Hand Edge" : "Batter Hand Edge";
+              const handEdgeColor = dominantHand === pitHand ? "#22c55e" : "#ef4444";
+
+              const avgScoreColor = avgScore >= 55 ? "#ef4444" : avgScore >= 35 ? "#f59e0b" : "#22c55e";
+
+              return (
+                <Card>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <SLabel style={{ marginBottom: 0 }}>{facingAbbr} Lineup vs {activePitcher.name?.split(" ").slice(-1)[0]}</SLabel>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 9, color: "#6b7280" }}>Avg score</span>
+                      <span style={{ fontSize: 14, fontWeight: 800, color: avgScoreColor, fontFamily: "monospace" }}>{avgScore}</span>
                     </div>
                   </div>
-                  <div style={{ display: "flex", gap: 5 }}>
-                    {[["AVG", activeBatter.avg, "#22c55e"], ["OPS", activeBatter.ops, "#fbbf24"], ["Avg H", activeBatter.avgH ?? "—", "#22c55e"], ["Avg HR", activeBatter.avgHR ?? "—", "#fbbf24"], ["Avg TB", activeBatter.avgTB ?? activeBatter.tb ?? "—", "#fbbf24"]].map(([l, v, c]) => (
-                      <StatMini key={l} label={l} value={v} color={c} />
-                    ))}
-                  </div>
-                </>
-              )}
-            </Card>
 
-            {/* Hit Rates — only show when data available (mock mode or pinned batter with string hitRate) */}
-            {(IS_STATS_SANDBOX || (pinnedBatterId && activeBatter.hitRate && !Array.isArray(activeBatter.hitRate))) && (
-            <Card>
-              <SLabel>Batter Hit Rates · Last 10 Games</SLabel>
-              <div style={{ display: "flex", gap: 6 }}>
-                {[["Hit Games", activeBatter.hitRate, "#22c55e"], ["HR Games", activeBatter.hrRate, "#fbbf24"], ["2+ TB Games", activeBatter.tbOver, "#fbbf24"]].map(([l, v, c]) => (
-                  <StatMini key={l} label={l} value={v} color={c} />
-                ))}
-              </div>
-            </Card>
-            )}
+                  {/* Handedness row */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#0e0f1a", borderRadius: 8, padding: "6px 10px", marginBottom: 10 }}>
+                    <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace" }}>
+                      {rhCount > 0 && <span>{rhCount} RHB</span>}
+                      {rhCount > 0 && lhCount > 0 && <span style={{ color: "#374151" }}> · </span>}
+                      {lhCount > 0 && <span>{lhCount} LHB</span>}
+                      {shCount > 0 && <span style={{ color: "#374151" }}> · </span>}
+                      {shCount > 0 && <span>{shCount} SH</span>}
+                      <span style={{ color: "#374151" }}> vs </span>
+                      <span style={{ color: pitHand === "L" ? "#a78bfa" : "#f9fafb" }}>{pitHand}HP</span>
+                    </div>
+                    <span style={{ fontSize: 9, fontWeight: 700, color: handEdgeColor }}>{handEdge}</span>
+                  </div>
+
+                  {/* Danger batters */}
+                  <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>Top Matchups</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {danger.map((b, idx) => {
+                      const sc = b.matchupScore;
+                      const scColor = scoreColor(sc);
+                      const hlog = liveHittingLog[b.id];
+                      const avg = hlog?.avg ?? b.avg ?? ".---";
+                      return (
+                        <div key={b.id ?? idx} style={{ display: "flex", alignItems: "center", gap: 8, background: "#0e0f1a", borderRadius: 8, padding: "6px 10px" }}>
+                          <div style={{ width: 18, height: 18, borderRadius: 5, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#6b7280", flexShrink: 0 }}>{b.order ?? idx + 1}</div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{b.name}</div>
+                            <div style={{ fontSize: 9, color: "#6b7280" }}>{b.pos} · {b.hand ?? "?"}H · {avg}</div>
+                          </div>
+                          <div style={{ background: `${scColor}18`, border: `1px solid ${scColor}44`, borderRadius: 6, padding: "2px 7px", fontSize: 11, fontWeight: 700, color: scColor, fontFamily: "monospace", flexShrink: 0 }}>{sc}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              );
+            })()}
+
+            {/* ── Game Lean (NRFI / F5) ── */}
+            {(() => {
+              const homePitcher = pitcher;
+              const awayPitcher = game.awayPitcher ?? null;
+              const homeLog  = homePitcher?.id ? liveGameLog[homePitcher.id] : null;
+              const awayLog  = awayPitcher?.id ? liveGameLog[awayPitcher.id] : null;
+              const homeStarts = homeLog?.games ?? [];
+              const awayStarts = awayLog?.games ?? [];
+
+              // NRFI lean: count recent 0-ER starts (clean outing proxy for clean 1st inning)
+              const homeClean = homeStarts.filter(g => (g.er ?? 99) === 0).length;
+              const awayClean = awayStarts.filter(g => (g.er ?? 99) === 0).length;
+              const homeTot   = homeStarts.length;
+              const awayTot   = awayStarts.length;
+
+              // F5 lean: both SPs' ERA as combined proxy
+              const homeEra = parseFloat(homePitcher?.era);
+              const awayEra = parseFloat(awayPitcher?.era ?? homePitcher?.era);
+              const avgEra  = (!isNaN(homeEra) && !isNaN(awayEra)) ? (homeEra + awayEra) / 2 : null;
+
+              // NRFI signal: both need enough data
+              const hasNrfiData = homeTot >= 3 && awayTot >= 3;
+              const nrfiRate = hasNrfiData ? (homeClean + awayClean) / (homeTot + awayTot) : null;
+              const nrfiLean = nrfiRate !== null
+                ? nrfiRate >= 0.55 ? { label: "LEAN NRFI", color: "#22c55e", positive: true }
+                : nrfiRate >= 0.40 ? { label: "NEUTRAL",   color: "#f59e0b", positive: null }
+                : { label: "LEAN YRFI", color: "#ef4444", positive: false }
+                : null;
+
+              // F5 lean
+              const f5Lean = avgEra !== null
+                ? avgEra < 3.5  ? { label: "F5 UNDER LEAN", color: "#22c55e" }
+                : avgEra > 4.5  ? { label: "F5 OVER LEAN",  color: "#ef4444" }
+                : { label: "F5 NEUTRAL", color: "#f59e0b" }
+                : null;
+
+              if (!nrfiLean && !f5Lean) return null;
+
+              return (
+                <Card>
+                  <SLabel>Game Lean</SLabel>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {nrfiLean && (
+                      <div style={{ flex: 1, background: "#0e0f1a", borderRadius: 8, padding: "10px", textAlign: "center" }}>
+                        <div style={{ fontSize: 14, fontWeight: 800, color: nrfiLean.color, fontFamily: "monospace", marginBottom: 4 }}>{nrfiLean.label}</div>
+                        {hasNrfiData && (
+                          <div style={{ fontSize: 9, color: "#6b7280", lineHeight: 1.5 }}>
+                            {game.home.abbr} SP: {homeClean}/{homeTot} clean<br />
+                            {game.away.abbr} SP: {awayClean}/{awayTot} clean
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {f5Lean && (
+                      <div style={{ flex: 1, background: "#0e0f1a", borderRadius: 8, padding: "10px", textAlign: "center" }}>
+                        <div style={{ fontSize: 14, fontWeight: 800, color: f5Lean.color, fontFamily: "monospace", marginBottom: 4 }}>{f5Lean.label}</div>
+                        {avgEra !== null && (
+                          <div style={{ fontSize: 9, color: "#6b7280", lineHeight: 1.5 }}>
+                            {game.home.abbr} ERA {isNaN(homeEra) ? "—" : homeEra.toFixed(2)}<br />
+                            {game.away.abbr} ERA {isNaN(awayEra) ? "—" : awayEra.toFixed(2)}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              );
+            })()}
           </>)}
 
           {/* ── LINEUP ── */}
@@ -3119,12 +3267,23 @@ export default function App() {
                     <div style={{ fontSize: 11, color: "#6b7280" }}>Check back closer to first pitch.</div>
                   </div>
                 ) : lineup.map((rawB, i) => {
-                  const b = augmentBatterWithSplits(rawB, batterSplits);
+                  const hittingLog = rawB.id ? liveHittingLog[rawB.id] : null;
+                  // Merge season stats from hitting log into batter so stat boxes populate
+                  const rawBEnriched = hittingLog ? {
+                    ...rawB,
+                    avg:     hittingLog.avg    ?? rawB.avg,
+                    hr:      hittingLog.hr     ?? rawB.hr,
+                    tb:      hittingLog.avgTB  ?? rawB.tb,
+                    ops:     hittingLog.ops    ?? rawB.ops,
+                    hitRate: hittingLog.hitRate ?? rawB.hitRate,
+                    // Use gamelog hand if lineup API returned "?" — person endpoint is more reliable
+                    hand:    (hittingLog.hand && hittingLog.hand !== "?") ? hittingLog.hand : rawB.hand,
+                  } : rawB;
+                  const b = augmentBatterWithSplits(rawBEnriched, batterSplits);
                   const sc = batterMatchupScoreForPitcher(b, facingPitcher, batterSplits);
                   const scColor = scoreColor(sc);
                   const isExpanded = expandedBatter === i;
                   const recentHits = (b.hitRate || []).reduce((a, v) => a + v, 0);
-                  const hittingLog = b.id ? liveHittingLog[b.id] : null;
                   const seasonAvgNumRaw = parseFloat(hittingLog?.seasonAvg);
                   const last7AvgNumRaw = parseFloat(hittingLog?.last7Avg);
                   const seasonAvgNum = Number.isNaN(seasonAvgNumRaw) ? null : seasonAvgNumRaw;
@@ -3137,11 +3296,10 @@ export default function App() {
                         : null
                     : null;
 
-                  const isPinned = pinnedBatterId === b.id;
                   return (
                     <div key={i}>
                       {/* Row */}
-                      <div onClick={() => { const opening = !isExpanded; setExpandedBatter(opening ? i : null); onBatterExpand(b, opening); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 8px", cursor: "pointer", borderRadius: 8, background: isExpanded ? "rgba(34,197,94,0.05)" : "transparent", transition: "background 0.15s" }}>
+                      <div onClick={() => { const opening = !isExpanded; setExpandedBatter(opening ? i : null); onBatterExpand(b, opening, facingPitcher?.id); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 8px", cursor: "pointer", borderRadius: 8, background: isExpanded ? "rgba(34,197,94,0.05)" : "transparent", transition: "background 0.15s" }}>
 
                         {/* Order number */}
                         <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#6b7280", flexShrink: 0 }}>{b.order}</div>
@@ -3170,9 +3328,6 @@ export default function App() {
                         {/* Matchup score */}
                         <div style={{ background: `${scColor}18`, border: `1px solid ${scColor}44`, borderRadius: 6, padding: "3px 8px", fontSize: 11, fontWeight: 700, color: scColor, fontFamily: "monospace", flexShrink: 0, minWidth: 34, textAlign: "center" }}>{sc}</div>
 
-                        {/* Pin to Props button */}
-                        <div onClick={e => { e.stopPropagation(); setPinnedBatterId(isPinned ? null : b.id); }} title={isPinned ? "Unpin from Props" : "Pin to Props tab"} style={{ fontSize: 13, flexShrink: 0, cursor: "pointer", opacity: isPinned ? 1 : 0.35, filter: isPinned ? "none" : "grayscale(1)", transition: "opacity 0.15s" }}>📌</div>
-
                         {/* Expand chevron */}
                         <div style={{ color: "#374151", fontSize: 10, flexShrink: 0 }}>{isExpanded ? "▲" : "▼"}</div>
                       </div>
@@ -3193,10 +3348,11 @@ export default function App() {
 
                           {/* Career H2H vs opposing pitcher */}
                           {(() => {
-                            const opposingId = activeMatchupPitcher?.id;
+                            // Use facingPitcher (derived from lineupSide) — always the correct opponent
+                            const opposingId = facingPitcher?.id;
                             const h2hKey = b.id && opposingId ? `${b.id}_${opposingId}` : null;
                             const h2h = h2hKey ? liveH2H[h2hKey] : null;
-                            const pitcherLast = activeMatchupPitcher?.name?.split(" ").slice(-1)[0] ?? "pitcher";
+                            const pitcherLast = facingPitcher?.name?.split(" ").slice(-1)[0] ?? "pitcher";
                             if (!opposingId) return null;
                             if (!h2h) return (
                               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
@@ -3315,7 +3471,7 @@ export default function App() {
               ))}
             </div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-              <div style={{ fontSize: 10, color: "#6b7280", letterSpacing: "0.1em", textTransform: "uppercase" }}>— {arsPitcher.name}'s Arsenal vs {pinnedBatterId ? activeBatter.name : facingTeam + " Lineup"}</div>
+              <div style={{ fontSize: 10, color: "#6b7280", letterSpacing: "0.1em", textTransform: "uppercase" }}>— {arsPitcher.name}'s Arsenal vs {facingTeam} Lineup</div>
               {arsPitcher.arsenalLive
                 ? <div style={{ display: "flex", alignItems: "center", gap: 4 }}><div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 5px #22c55e" }} /><span style={{ fontSize: 9, color: "#22c55e", fontFamily: "monospace" }}>SAVANT LIVE</span></div>
                 : <div style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{!IS_SAVANT_SANDBOX && arsPitcher.id ? "Fetching…" : "DEMO"}</div>
@@ -3554,10 +3710,19 @@ export default function App() {
                       <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 5px #22c55e" }} />
                       <span style={{ fontSize: 9, color: "#22c55e", fontFamily: "monospace" }}>LIVE · {odds.book}</span>
                     </div>
-                  : <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b" }} />
-                      <span style={{ fontSize: 9, color: "#f59e0b", fontFamily: "monospace" }}>DEMO · live when deployed</span>
-                    </div>
+                  : (() => {
+                      const gs = game.status ?? "";
+                      const isGameLive = gs === "In Progress" || gs === "Warmup" || gs === "Final" || gs === "Game Over";
+                      return isGameLive
+                        ? <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#6b7280" }} />
+                            <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>PRE-GAME LINES</span>
+                          </div>
+                        : <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b" }} />
+                            <span style={{ fontSize: 9, color: "#f59e0b", fontFamily: "monospace" }}>DEMO · live when deployed</span>
+                          </div>;
+                    })()
                 }
                 {!IS_ODDS_SANDBOX && (
                   <button
@@ -3679,12 +3844,6 @@ export default function App() {
                 ? <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>
                 : <span style={{ fontSize: 8, fontWeight: 700, color: "#f59e0b", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 4, padding: "2px 6px" }}>DEMO</span>
               }
-              {pinnedLineupBatter && (
-                <span style={{ fontSize: 8, color: "#9ca3af", marginLeft: "auto" }}>
-                  📌 {pinnedLineupBatter.name?.split(" ").slice(-1)[0]}
-                  <span onClick={() => setPinnedBatterId(null)} style={{ marginLeft: 4, cursor: "pointer", color: "#4b5563" }}>✕</span>
-                </span>
-              )}
             </div>
             {displayProps.length === 0 ? (
               <Card>
@@ -3798,15 +3957,6 @@ export default function App() {
                 );
               })}
             </>)}
-            {!IS_STATS_SANDBOX && !pinnedBatterId && (
-              <Card style={{ borderStyle: "dashed", borderColor: "#2d3148" }}>
-                <div style={{ textAlign: "center", padding: "6px 0" }}>
-                  <div style={{ fontSize: 18, marginBottom: 6 }}>📌</div>
-                  <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", marginBottom: 4 }}>Pin a Batter for Hit & TB Props</div>
-                  <div style={{ fontSize: 10, color: "#4b5563", lineHeight: 1.5 }}>Go to Lineup tab → tap 📌 on any batter row<br />to generate real hit & total bases props.</div>
-                </div>
-              </Card>
-            )}
           </>)}
 
           {/* ── BULLPEN TAB ─────────────────────────────────── */}

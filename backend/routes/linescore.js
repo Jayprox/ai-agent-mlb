@@ -31,6 +31,11 @@ router.get("/:gamePk", async (req, res) => {
   try {
     const { data } = await mlb.get(`/game/${gamePk}/linescore`);
 
+    // 1st inning runs — used for NRFI/YRFI result on finished games.
+    // innings[0] is the 1st inning; runs are null if the inning never played.
+    const innings = data.innings ?? [];
+    const inning1 = innings[0] ?? null;
+
     const result = {
       gamePk:     Number(gamePk),
       inning:     data.currentInning      ?? null,
@@ -38,6 +43,11 @@ router.get("/:gamePk", async (req, res) => {
       awayScore:  data.teams?.away?.runs  ?? 0,
       homeScore:  data.teams?.home?.runs  ?? 0,
       outs:       data.outs               ?? 0,
+      // Per-inning breakdown — 1st inning is what matters for NRFI
+      firstInning: inning1 ? {
+        away: inning1.away?.runs ?? null,
+        home: inning1.home?.runs ?? null,
+      } : null,
     };
 
     // 45-second cache — short so scores stay reasonably live

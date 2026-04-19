@@ -21,7 +21,9 @@ router.get("/:gamePk", async (req, res) => {
   }
 
   try {
-    const { data } = await mlb.get(`/game/${gamePk}/officials`);
+    // Officials are embedded in the boxscore response — the dedicated
+    // /officials endpoint is not a valid MLB Stats API path and returns 404.
+    const { data } = await mlb.get(`/game/${gamePk}/boxscore`);
 
     const officials = data.officials ?? [];
     const hp = officials.find((o) => o.officialType === "Home Plate");
@@ -38,19 +40,16 @@ router.get("/:gamePk", async (req, res) => {
       })),
     };
 
-    // Cache for 1 hour — assigned day-of and doesn't change after that
+    // Cache for 1 hour — assigned day-of and doesn't change
     cache.set(cacheKey, result, 60 * 60 * 1000);
     res.setHeader("X-Cache", "MISS");
     res.json(result);
   } catch (err) {
-    // Umpire endpoint can 404 if the game hasn't loaded officials yet —
-    // return empty rather than propagating the error
-    if (err.response?.status === 404) {
-      const empty = { gamePk: parseInt(gamePk), homePlate: null, all: [] };
-      cache.set(cacheKey, empty, 5 * 60 * 1000); // retry in 5 min
-      return res.json(empty);
-    }
-    res.status(502).json({ error: "MLB API unavailable", detail: err.message });
+    // Boxscore can be unavailable before game loads — short TTL so we retry
+    const empty = { gamePk: parseInt(gamePk), homePlate: null, all: [] };
+    cache.set(cacheKey, empty, 3 * 60 * 1000); // retry in 3 min
+    res.setHeader("X-Cache", "MISS");
+    res.json(empty);
   }
 });
 

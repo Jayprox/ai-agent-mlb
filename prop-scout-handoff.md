@@ -1360,3 +1360,214 @@ KC @ NYY  [FINAL]                      4–14
 ---
 
 *Updated April 18 2026 — Session 30b complete · live linescore · final score results (O/U, ML, RL) on slate cards*
+
+---
+
+## ✅ Session 31 — Overview Overhaul · Umpire Stats · Bullpen Fix
+
+All changes are in `prop-scout-v7.jsx` and `backend/routes/bullpen.js` unless noted.
+
+---
+
+### Batter Hand Fix (`?H` → real hand)
+
+**Problem:** Lineup batter cards showed `?H` for batting hand because `batSide` was null in the boxscore roster endpoint.
+
+**Fix:** The `/api/players/:playerId/stats` route already hits `/people/:id` which has reliable `batSide` data. Added `hand: person?.batSide?.code ?? null` to the hitting gamelog response in `backend/routes/players.js`. Lineup enrichment now merges:
+
+```js
+hand: (hittingLog.hand && hittingLog.hand !== "?") ? hittingLog.hand : rawB.hand,
+```
+
+---
+
+### NRFI/YRFI Result Chip on Final Game Cards
+
+Added a small result chip to the final score row on completed game slate cards.
+
+```jsx
+const f1 = liveScore.firstInning;
+const nrfiKnown = f1 && f1.away !== null && f1.home !== null;
+const wasNrfi = nrfiKnown && f1.away === 0 && f1.home === 0;
+{nrfiKnown && (
+  <span style={{ fontSize: 9, fontWeight: 700, color: wasNrfi ? "#22c55e" : "#ef4444", fontFamily: "monospace" }}>
+    · {wasNrfi ? "NRFI ✓" : `YRFI (${f1.away > 0 ? game.away.abbr : game.home.abbr} scored)`}
+  </span>
+)}
+```
+
+**Backend:** Added `firstInning: { away, home }` to `backend/routes/linescore.js` response (1st inning runs from `innings[0]`). `null` values used when inning hasn't been played yet.
+
+---
+
+### Overview Tab — Complete Redesign (Pinning Removed)
+
+**Problem:** The batter pinning feature had cascading state management bugs:
+- `pitcherSide` and `lineupSide` are separate states that can drift, causing wrong-pitcher matchups
+- The away lineup had no pin icon due to a `lineupSide !== pitcherSide` condition that failed when `pitcherSide` drifted
+- An `effectivePitcherSide` lock (attempted fix) broke the pitcher toggle tab
+- H2H in the expanded drawer was using `activeMatchupPitcher?.id` (Overview toggle) instead of the correct `facingPitcher?.id` (Lineup-derived)
+
+**Resolution:** Removed the entire pinning feature and replaced Overview with three data-dense cards:
+
+#### 1. Pitcher Card
+- Same stats (ERA, WHIP, K/9, BB/9, avgIP) + sparkline + season record (W-L-K)
+- `pitcherRecord` computed from season stats
+- "X/Y clean recent starts" count (0 ER in last 5 starts)
+
+#### 2. Lineup Matchup Intel Card
+- Handedness breakdown: count of RHB / LHB / SH in the opposing lineup vs pitcher hand
+- "Pitcher/Batter Hand Edge" label based on platoon advantage
+- Aggregate lineup matchup score (average of `batterMatchupScoreForPitcher` across all opposing batters)
+- Top 3 danger batters sorted by matchup score
+
+#### 3. Game Lean Card
+- NRFI lean from clean-start rates (0 ER starts / total recent starts for SP)
+- F5 lean from combined SP ERA comparison
+
+#### Removed entirely:
+- `pinnedBatterId` state
+- `pinnedBatterSide`, `pinnedLineupBatter`, `activeBatter` derivations
+- H2H score card in Overview
+- Batter section in Overview Pitcher card
+- Hit Rates card
+- Pin button in Lineup batter rows
+- Pin badge in Props header
+- `effectivePitcherSide` / `effectiveToggleSide` locks
+
+`activeBatter` simplified to `batter` (mock featured batter).
+`activeMatchupPitcher` now driven purely by `pitcherSide`.
+
+H2H in expanded Lineup drawer now correctly uses `facingPitcher` (the opponent's actual pitcher) instead of the Overview toggle state.
+
+---
+
+### Umpire Card — TBD Fix
+
+**Problem:** Umpire showed "TBD" even for in-progress games.
+
+**Root cause:** `backend/routes/umpires.js` was calling `GET /game/${gamePk}/officials` — this endpoint does NOT exist in the MLB Stats API and returns 404. Officials are embedded in the boxscore.
+
+**Fix:** Changed to `GET /game/${gamePk}/boxscore` and parse `data.officials`:
+
+```js
+const { data } = await mlb.get(`/game/${gamePk}/boxscore`);
+const officials = data.officials ?? [];
+const hp = officials.find((o) => o.officialType === "Home Plate");
+```
+
+Error cache TTL reduced from 5 min to 3 min to retry faster.
+
+---
+
+### Umpire Card — K Rate / BB Rate Stats
+
+**Problem:** Umpire name populated correctly but K Rate and BB Rate showed `—`.
+
+**Root cause:** The MLB Stats API provides no zone/tendency stats for umpires — only name and ID.
+
+**Solution:** Added a static `UMPIRE_STATS` lookup table (~60 entries) keyed by umpire full name, immediately after the `NEUTRAL_PARK` constant in `prop-scout-v7.jsx`:
+
+```js
+const UMPIRE_STATS = {
+  "Pat Hoberg":   { kRate: "23.4%", bbRate: "7.3%",  tendency: "Wide zone — among highest K rates in MLB", rating: "pitcher" },
+  "Gabe Morales": { kRate: "21.2%", bbRate: "8.5%",  tendency: "Average zone — neutral for props",         rating: "neutral" },
+  // ~60 total entries
+};
+```
+
+Umpire merge logic in `activeSlate`:
+
+```js
+umpire: (() => {
+  const lu = liveUmpires[gamePkKey];
+  if (!lu?.homePlate) return baseGame.umpire;
+  const stats = UMPIRE_STATS[lu.homePlate.name] ?? null;
+  return {
+    ...baseGame.umpire,
+    name: lu.homePlate.name,
+    ...(stats ? { kRate: stats.kRate, bbRate: stats.bbRate, tendency: stats.tendency, rating: stats.rating } : {}),
+  };
+})(),
+```
+
+**Note:** These values are approximations from training knowledge, not live-scraped. Accuracy is generally good year-over-year but should be verified against [umpscorecards.com](https://umpscorecards.com) before high-stakes use. No public API exists for UmpScorecards data — annual manual update is the current plan.
+
+---
+
+### Odds Label Fix — In-Progress / Final Games
+
+**Problem:** The Odds & Line Movement card showed "DEMO · live when deployed" for in-progress and final games, which was misleading (The Odds API removes in-progress games at first pitch — the label should indicate pre-game lines, not sandbox demo).
+
+**Fix:**
+
+```jsx
+const isGameLive = gs === "In Progress" || gs === "Warmup" || gs === "Final" || gs === "Game Over";
+return isGameLive
+  ? <span style={{ color: "#6b7280" }}>PRE-GAME LINES</span>
+  : <span style={{ color: "#f59e0b" }}>DEMO · live when deployed</span>;
+```
+
+---
+
+### Bullpen Tab — All Fields Now Populating
+
+**Problem:** Reliever cards showed ERA correctly but WHIP, LAST APP, PITCHES, vs LHB, vs RHB, status badge, grade color, and lean text were all empty/broken.
+
+**Root cause:** `buildGameBullpen` in `backend/routes/bullpen.js` was doing its own lossy mapping that stripped and renamed fields:
+
+| Field | Before | After |
+|---|---|---|
+| `whip` | ❌ stripped | ✅ included |
+| `vsL` / `vsR` | ❌ stripped | ✅ included (shows `—` until platoon splits built) |
+| `status` | ❌ stripped | ✅ included (FRESH/MODERATE/TIRED badge) |
+| `gradeColor` | ❌ missing | ✅ included (grade badge + lean border) |
+| `lean` / `note` | ❌ missing | ✅ included (lean callout text) |
+| `lastApp` | renamed to `lastUsed` | ✅ back to `lastApp` |
+| `pitches` | renamed to `pitchesLast3` | ✅ back to `pitches` |
+| `role` | converted to "Closer"/"Setup"/"Middle Relief" | ✅ kept as CL/SU/MR (matches `roleColor()` lookup) |
+
+**Fix:** Replaced the two inline `.map()` blocks in `buildGameBullpen` with a shared `mapTeam` helper that passes through all fields:
+
+```js
+const mapTeam = (t) => ({
+  fatigueLevel: t.fatigueLevel,
+  restDays:     t.restDays,
+  pitchesLast3: t.pitchesLast3,
+  grade:        t.grade,
+  gradeColor:   t.gradeColor,
+  setupDepth:   t.setupDepth.toLowerCase(),
+  lrBalance:    t.lrBalance.toLowerCase(),
+  note:         t.note,
+  lean:         t.lean,
+  relievers: t.relievers.map((r) => ({
+    name: r.name, hand: r.hand, era: r.era, whip: r.whip,
+    vsL: r.vsL, vsR: r.vsR, role: r.role,
+    lastApp: r.lastApp, pitches: r.pitches, status: r.status,
+  })),
+});
+```
+
+**Note:** After deploying this backend fix, clear the bullpen cache (restart backend or wait 15 min) so the new shape is served fresh.
+
+---
+
+### Backlog
+
+- **UmpScorecards accuracy** — replace approximated umpire K/BB rates with real values from umpscorecards.com (annual manual update; no public API)
+- **Platoon splits for relievers** — `vsL` / `vsR` currently `"—"` for all live relievers; would require fetching per-reliever splits from Savant
+
+---
+
+### Files Changed in Session 31
+
+- `prop-scout-v7.jsx`
+- `backend/routes/players.js` (added `hand` field to hitting gamelog response)
+- `backend/routes/linescore.js` (added `firstInning` object)
+- `backend/routes/umpires.js` (fixed endpoint: `/officials` → `/boxscore`, reduced error TTL)
+- `backend/routes/bullpen.js` (fixed `buildGameBullpen` field mapping via `mapTeam` helper)
+- `prop-scout-handoff.md`
+
+---
+
+*Updated April 18 2026 — Session 31 complete · Overview redesign · umpire fix · NRFI chip on finals · bullpen field mapping fix*

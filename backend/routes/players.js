@@ -163,22 +163,27 @@ router.get("/:playerId/gamelog", async (req, res) => {
     const sorted = [...splits].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
 
     const result = group === "pitching"
-      ? {
-          group: "pitching",
-          games: sorted
+      ? (() => {
+          const starts = sorted
             .filter(g => (g.stat?.gamesStarted ?? 0) > 0)
-            .slice(0, 5)
-            .map(g => ({
-              date:     g.date,
-              opponent: TEAM_ABBR[g.opponent?.id] ?? g.opponent?.name ?? "?",
-              ip:       g.stat?.inningsPitched ?? "0.0",
-              k:        g.stat?.strikeOuts ?? 0,
-              er:       g.stat?.earnedRuns ?? 0,
-              era:      g.stat?.era ?? "0.00",
-              result:   (g.stat?.wins ?? 0) > 0 ? "W" : (g.stat?.losses ?? 0) > 0 ? "L" : "ND",
-            })),
-          seasonEra: seasonSplit?.era ?? "0.00",
-        }
+            .slice(0, 5);
+          const games = starts.map(g => ({
+            date:     g.date,
+            opponent: TEAM_ABBR[g.opponent?.id] ?? g.opponent?.name ?? "?",
+            ip:       g.stat?.inningsPitched ?? "0.0",
+            k:        g.stat?.strikeOuts ?? 0,
+            er:       g.stat?.earnedRuns ?? 0,
+            era:      g.stat?.era ?? "0.00",
+            result:   (g.stat?.wins ?? 0) > 0 ? "W" : (g.stat?.losses ?? 0) > 0 ? "L" : "ND",
+          }));
+          // avgIP from actual recent starts — avoids relying on gamesStarted in season stats
+          const totalOuts = games.reduce((sum, g) => sum + parseIpToOuts(g.ip), 0);
+          const avgIPOuts  = games.length > 0 ? totalOuts / games.length : 0;
+          const avgIPWhole  = Math.floor(avgIPOuts / 3);
+          const avgIPThirds = Math.round(avgIPOuts % 3);
+          const avgIP = games.length > 0 ? `${avgIPWhole}.${avgIPThirds}` : "—";
+          return { group: "pitching", games, avgIP, seasonEra: seasonSplit?.era ?? "0.00" };
+        })()
       : (() => {
           const games = sorted
             .slice(0, 10)
@@ -198,11 +203,22 @@ router.get("/:playerId/gamelog", async (req, res) => {
           const last7Hits = last7Games.reduce((sum, g) => sum + (g.stat?.hits ?? 0), 0);
           const last7Abs = last7Games.reduce((sum, g) => sum + (g.stat?.atBats ?? 0), 0);
 
+          const gp    = Number(seasonSplit?.gamesPlayed) || 0;
+          const tbTot = Number(seasonSplit?.totalBases) || 0;
           return {
-            group: "hitting",
+            group:     "hitting",
             games,
-            seasonAvg: seasonSplit?.avg ?? ".000",
-            last7Avg: last7Abs > 0 ? `${(last7Hits / last7Abs).toFixed(3).replace(/^0/, "")}` : ".000",
+            seasonAvg: seasonSplit?.avg    ?? ".000",
+            last7Avg:  last7Abs > 0 ? `${(last7Hits / last7Abs).toFixed(3).replace(/^0/, "")}` : ".000",
+            // Season-level stats used by batter stat boxes in the Lineup tab
+            avg:    seasonSplit?.avg      ?? ".000",
+            ops:    seasonSplit?.ops      ?? ".000",
+            hr:     seasonSplit?.homeRuns ?? 0,
+            avgTB:  gp > 0 ? (tbTot / gp).toFixed(1) : "—",
+            // Batting hand from person data — lineup API sometimes misses batSide
+            hand:   person?.batSide?.code ?? null,
+            // Last-5 hit indicator (1 = got a hit, 0 = hitless) for the dot row
+            hitRate: games.slice(0, 5).map(g => g.h > 0 ? 1 : 0),
           };
         })();
 

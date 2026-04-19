@@ -248,39 +248,33 @@ async function buildGameBullpen(gamePk) {
     buildTeamBullpen(homeTeamId),
   ]);
 
+  const mapTeam = (t) => ({
+    fatigueLevel: t.fatigueLevel,
+    restDays:     t.restDays,
+    pitchesLast3: t.pitchesLast3,
+    grade:        t.grade,
+    gradeColor:   t.gradeColor,    // needed for grade badge + lean border colour
+    setupDepth:   t.setupDepth.toLowerCase(),
+    lrBalance:    t.lrBalance.toLowerCase(),
+    note:         t.note,
+    lean:         t.lean,
+    relievers: t.relievers.map((r) => ({
+      name:    r.name,
+      hand:    r.hand,
+      era:     r.era,
+      whip:    r.whip,
+      vsL:     r.vsL,
+      vsR:     r.vsR,
+      role:    r.role,    // short codes: CL / SU / MR
+      lastApp: r.lastApp,
+      pitches: r.pitches,
+      status:  r.status,
+    })),
+  });
+
   const result = {
-    away: {
-      fatigueLevel: awayTeam.fatigueLevel,
-      restDays: awayTeam.restDays,
-      pitchesLast3: awayTeam.pitchesLast3,
-      grade: awayTeam.grade,
-      setupDepth: awayTeam.setupDepth.toLowerCase(),
-      lrBalance: awayTeam.lrBalance.toLowerCase(),
-      relievers: awayTeam.relievers.map((r) => ({
-        name: r.name,
-        hand: r.hand,
-        era: r.era,
-        role: r.role === "CL" ? "Closer" : r.role === "SU" ? "Setup" : "Middle Relief",
-        lastUsed: r.lastApp,
-        pitchesLast3: r.pitches,
-      })),
-    },
-    home: {
-      fatigueLevel: homeTeam.fatigueLevel,
-      restDays: homeTeam.restDays,
-      pitchesLast3: homeTeam.pitchesLast3,
-      grade: homeTeam.grade,
-      setupDepth: homeTeam.setupDepth.toLowerCase(),
-      lrBalance: homeTeam.lrBalance.toLowerCase(),
-      relievers: homeTeam.relievers.map((r) => ({
-        name: r.name,
-        hand: r.hand,
-        era: r.era,
-        role: r.role === "CL" ? "Closer" : r.role === "SU" ? "Setup" : "Middle Relief",
-        lastUsed: r.lastApp,
-        pitchesLast3: r.pitches,
-      })),
-    },
+    away: mapTeam(awayTeam),
+    home: mapTeam(homeTeam),
   };
 
   cache.set(cacheKey, result, GAME_BULLPEN_TTL);
