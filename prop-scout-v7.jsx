@@ -2066,6 +2066,9 @@ export default function App() {
   // Live Stats API state
   const [liveSlate, setLiveSlate] = useState(null);
   const [slateLoading, setSlateLoading] = useState(false);
+  const [researchMode, setResearchMode]   = useState(false);
+  const [logoClicks,   setLogoClicks]     = useState(0);
+  const [slateDate,    setSlateDate]      = useState(null); // null = today
   const [liveLineups, setLiveLineups] = useState({});
   const [liveUmpires, setLiveUmpires] = useState({});
   const [livePitcherStats, setLivePitcherStats] = useState({});
@@ -2105,18 +2108,20 @@ export default function App() {
     });
   }, [selectedId, view, liveSlate]);
 
-  // Fetch live schedule on mount
+  // Fetch live schedule — re-runs when slateDate changes (research mode date nav)
   useEffect(() => {
     if (IS_STATS_SANDBOX) return;
     setSlateLoading(true);
-    apiFetch("/api/schedule")
+    setLiveSlate(null);
+    const url = slateDate ? `/api/schedule?date=${slateDate}` : "/api/schedule";
+    apiFetch(url)
       .then(games => {
         setLiveSlate(games);
         if (games.length > 0) setSelectedId(games[0].gamePk);
       })
       .catch(err => console.error("Schedule fetch failed:", err))
       .finally(() => setSlateLoading(false));
-  }, []);
+  }, [slateDate]);
 
   // Hydrate pick log from backend on mount (Option A: backend-first, localStorage fallback)
   useEffect(() => {
@@ -2816,7 +2821,17 @@ export default function App() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 11, color: "#6b7280", letterSpacing: "0.1em" }}>MLB RESEARCH</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: "#f9fafb" }}>⚾ Prop Scout</div>
+            <div
+              style={{ fontSize: 20, fontWeight: 800, color: "#f9fafb", cursor: "default", userSelect: "none" }}
+              onClick={() => {
+                const next = logoClicks + 1;
+                setLogoClicks(next);
+                if (next >= 7) {
+                  setResearchMode(true);
+                  setLogoClicks(0);
+                }
+              }}
+            >⚾ Prop Scout</div>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             <button onClick={() => setView("slate")} style={{ background: view === "slate" ? "#22c55e" : "#161827", border: `1px solid ${view === "slate" ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "slate" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Slate</button>
@@ -2876,7 +2891,37 @@ export default function App() {
             </Card>
           )}
 
-          <SLabel>Today's Slate — {activeSlate.length} Games{!IS_STATS_SANDBOX && !slateLoading && liveSlate ? " · LIVE" : !IS_STATS_SANDBOX && slateLoading ? " · Loading…" : ""}</SLabel>
+          {/* ── Research Mode: date navigation bar (7-click logo unlock) ── */}
+          {researchMode && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(167,139,250,0.08)", border: "1px solid rgba(167,139,250,0.25)", borderRadius: 10, padding: "8px 12px", marginBottom: 10 }}>
+              <span style={{ fontSize: 9, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace", letterSpacing: "0.08em", flexShrink: 0 }}>📅 RESEARCH</span>
+              <button
+                onClick={() => {
+                  const base = slateDate ? new Date(slateDate + "T12:00:00") : new Date();
+                  base.setDate(base.getDate() - 1);
+                  setSlateDate(base.toISOString().slice(0, 10));
+                }}
+                style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 10px", fontSize: 13, color: "#f9fafb", cursor: "pointer" }}>◀</button>
+              <input
+                type="date"
+                value={slateDate ?? new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" })}
+                onChange={e => setSlateDate(e.target.value)}
+                style={{ flex: 1, background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 8px", fontSize: 11, color: "#f9fafb", fontFamily: "monospace", colorScheme: "dark" }}
+              />
+              <button
+                onClick={() => {
+                  const base = slateDate ? new Date(slateDate + "T12:00:00") : new Date();
+                  base.setDate(base.getDate() + 1);
+                  setSlateDate(base.toISOString().slice(0, 10));
+                }}
+                style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 10px", fontSize: 13, color: "#f9fafb", cursor: "pointer" }}>▶</button>
+              <button
+                onClick={() => { setSlateDate(null); setResearchMode(false); setLogoClicks(0); }}
+                style={{ background: "transparent", border: "none", fontSize: 11, color: "#6b7280", cursor: "pointer", fontFamily: "monospace", flexShrink: 0 }}>✕</button>
+            </div>
+          )}
+
+          <SLabel>{slateDate ? `Slate — ${slateDate}` : "Today's Slate"} — {activeSlate.length} Games{!IS_STATS_SANDBOX && !slateLoading && liveSlate ? " · LIVE" : !IS_STATS_SANDBOX && slateLoading ? " · Loading…" : ""}</SLabel>
           {slateLoading && !liveSlate && (
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 0" }}>
               <div style={{ width: 18, height: 18, border: "2px solid #1f2437", borderTop: "2px solid #22c55e", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />
