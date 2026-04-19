@@ -1214,18 +1214,12 @@ const BullpenCard = ({ label, data }) => {
 
               <div style={{ display: "flex", gap: 5 }}>
                 <div style={{ flex: 1, background: "#161827", borderRadius: 6, padding: "6px 8px" }}>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 2 }}>vs LHB</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: parseFloat(r.vsL) < 0.22 ? "#22c55e" : parseFloat(r.vsL) > 0.26 ? "#ef4444" : "#f59e0b", fontFamily: "monospace" }}>{r.vsL}</div>
+                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 2 }}>K/9</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: parseFloat(r.k9) >= 10 ? "#22c55e" : parseFloat(r.k9) <= 7 ? "#ef4444" : "#f59e0b", fontFamily: "monospace" }}>{r.k9 !== "—" ? parseFloat(r.k9).toFixed(1) : "—"}</div>
                 </div>
                 <div style={{ flex: 1, background: "#161827", borderRadius: 6, padding: "6px 8px" }}>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 2 }}>vs RHB</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: parseFloat(r.vsR) < 0.22 ? "#22c55e" : parseFloat(r.vsR) > 0.26 ? "#ef4444" : "#f59e0b", fontFamily: "monospace" }}>{r.vsR}</div>
-                </div>
-                <div style={{ flex: 2, background: "#161827", borderRadius: 6, padding: "6px 8px" }}>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 2 }}>Platoon Edge</div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: parseFloat(r.vsL) < parseFloat(r.vsR) ? "#c084fc" : "#38bdf8" }}>
-                    {parseFloat(r.vsL) < parseFloat(r.vsR) ? "Better vs LHB" : "Better vs RHB"}
-                  </div>
+                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 2 }}>BB/9</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: parseFloat(r.bb9) <= 3 ? "#22c55e" : parseFloat(r.bb9) >= 5 ? "#ef4444" : "#f59e0b", fontFamily: "monospace" }}>{r.bb9 !== "—" ? parseFloat(r.bb9).toFixed(1) : "—"}</div>
                 </div>
               </div>
             </div>
@@ -2377,20 +2371,22 @@ export default function App() {
       const ll = liveLineups[gamePkKey];
       return ll?.confirmed ? { away: ll.away, home: ll.home } : baseGame.lineups;
     })(),
-    // Umpire: use live name + lookup historical zone stats by name
+    // Umpire: prefer real UmpScorecards accuracy data; keep UMPIRE_STATS static
+    // lookup alongside it for zone tendency text + kRate (used by K prop engine).
     umpire: (() => {
       const lu = liveUmpires[gamePkKey];
       if (!lu?.homePlate) return baseGame.umpire;
-      const stats = UMPIRE_STATS[lu.homePlate.name] ?? null;
+      const staticStats = UMPIRE_STATS[lu.homePlate.name] ?? null;
       return {
         ...baseGame.umpire,
-        name: lu.homePlate.name,
-        // If we have zone stats, overlay them; otherwise keep the "—" defaults
-        ...(stats ? {
-          kRate:    stats.kRate,
-          bbRate:   stats.bbRate,
-          tendency: stats.tendency,
-          rating:   stats.rating,
+        name:       lu.homePlate.name,
+        scorecards: lu.homePlate.stats ?? null,   // real UmpScorecards accuracy data
+        // Static zone stats kept as fallback — still drives K prop engine + tendency text
+        ...(staticStats ? {
+          kRate:    staticStats.kRate,
+          bbRate:   staticStats.bbRate,
+          tendency: staticStats.tendency,
+          rating:   staticStats.rating,
         } : {}),
       };
     })(),
@@ -3637,17 +3633,64 @@ export default function App() {
             {/* Umpire */}
             <SLabel>Home Plate Umpire</SLabel>
             <Card>
+              {/* Header */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
                 <div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "#f9fafb" }}>{umpire.name}</div>
-                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{umpire.tendency}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#f9fafb" }}>{umpire.name}</div>
+                    {umpire.scorecards && (
+                      <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 5px", fontFamily: "monospace" }}>SCORECARD LIVE</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
+                    {umpire.tendency ?? (umpire.scorecards ? "UmpScorecards data loaded" : "Awaiting assignment")}
+                  </div>
                 </div>
-                <LeanBadge label={umpire.rating === "pitcher" ? "PITCHER UMP" : "NEUTRAL UMP"} positive={umpire.rating === "pitcher" ? false : null} small />
+                {/* Badge: derive from real accuracy data when available */}
+                {(() => {
+                  const sc = umpire.scorecards;
+                  if (sc) {
+                    const ace = sc.accuracyAboveExpected ?? 0;
+                    if (ace >= 0.5)  return <LeanBadge label="ACCURATE"     positive={true}  small />;
+                    if (ace <= -1.0) return <LeanBadge label="INCONSISTENT" positive={false} small />;
+                  }
+                  return <LeanBadge label={umpire.rating === "pitcher" ? "PITCHER UMP" : "NEUTRAL UMP"} positive={umpire.rating === "pitcher" ? false : null} small />;
+                })()}
               </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                <StatMini label="K Rate" value={umpire.kRate} color={parseFloat(umpire.kRate) > 21 ? "#22c55e" : "#e5e7eb"} />
-                <StatMini label="BB Rate" value={umpire.bbRate} color={parseFloat(umpire.bbRate) > 9 ? "#ef4444" : "#e5e7eb"} />
-              </div>
+
+              {/* Stats — real scorecards data preferred, static kRate/bbRate as fallback */}
+              {umpire.scorecards ? (() => {
+                const sc = umpire.scorecards;
+                return (
+                  <div style={{ display: "flex", gap: 5 }}>
+                    <StatMini
+                      label="Accuracy"
+                      value={sc.overallAccuracy != null ? `${sc.overallAccuracy.toFixed(1)}%` : "—"}
+                      color={sc.overallAccuracy >= 93.5 ? "#22c55e" : sc.overallAccuracy < 91.5 ? "#f59e0b" : "#e5e7eb"}
+                    />
+                    <StatMini
+                      label="vs Exp"
+                      value={sc.accuracyAboveExpected != null ? `${sc.accuracyAboveExpected >= 0 ? "+" : ""}${sc.accuracyAboveExpected.toFixed(2)}%` : "—"}
+                      color={sc.accuracyAboveExpected >= 0 ? "#22c55e" : "#f59e0b"}
+                    />
+                    <StatMini
+                      label="Consist."
+                      value={sc.consistency != null ? `${sc.consistency.toFixed(1)}%` : "—"}
+                      color={sc.consistency >= 93 ? "#22c55e" : "#e5e7eb"}
+                    />
+                    <StatMini
+                      label="Favor/Gm"
+                      value={sc.averageAbsoluteFavor != null ? sc.averageAbsoluteFavor.toFixed(2) : "—"}
+                      color={sc.averageAbsoluteFavor > 0.5 ? "#f59e0b" : "#e5e7eb"}
+                    />
+                  </div>
+                );
+              })() : (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <StatMini label="K Rate"  value={umpire.kRate}  color={parseFloat(umpire.kRate)  > 21 ? "#22c55e" : "#e5e7eb"} />
+                  <StatMini label="BB Rate" value={umpire.bbRate} color={parseFloat(umpire.bbRate) > 9  ? "#ef4444" : "#e5e7eb"} />
+                </div>
+              )}
             </Card>
 
             {/* NRFI */}
@@ -4742,6 +4785,25 @@ export default function App() {
                   </div>
                 </Section>
 
+                <Section title="🔍 Reading the Intel Tab">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6, marginBottom: 4 }}>
+                    The Intel tab covers four pre-game context layers: umpire, first inning tendencies, bullpen health, and odds/line movement.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["Umpire Card", "Shows the home plate ump with a SCORECARD LIVE badge when real UmpScorecards data is loaded. Four accuracy metrics: Accuracy (overall ball/strike %, avg ~92–93%), vs Exp (how many points above/below expected — positive is sharper), Consistency (zone reliability across the game), and Favor/Gm (run impact per game). Without live data, falls back to historical K Rate / BB Rate estimates. Badge: ACCURATE (≥+0.5% vs expected), INCONSISTENT (≤−1.0%), or PITCHER/NEUTRAL UMP from static data."],
+                      ["NRFI / YRFI Card", "First inning scoring tendencies for both teams — scored % of games and avg 1st inning runs. Lean (NRFI or YRFI) with a confidence %. The NRFI badge on the slate card only shows when confidence hits 62%+."],
+                      ["Bullpen Card", "Grade (A–C), fatigue level (FRESH / MODERATE / HIGH based on pitches thrown last 3 days), setup depth, and L/R balance. Expand the Relievers drawer to see each arm: ERA, WHIP, Last App, Pitches from last outing, K/9 (swing-and-miss rate — 10+ is elite), and BB/9 (walk rate — under 3 is sharp). High fatigue + thin depth = lean toward OVER on totals and caution on F5 unders."],
+                      ["Odds & Line Movement", "Multi-book table (DK / FD / CZR / MGM) showing moneyline, total, O/U odds, and runline for each book. Missing books omitted. Shows PRE-GAME LINES for in-progress and final games (The Odds API removes games at first pitch). Line movement arrow on the slate card shows direction the total shifted from open."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#38bdf8", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+
                 <Section title="🎯 Prop Types Explained">
                   <PropRow type="K" def="Pitcher strikeouts — Over/Under on how many batters the starter fans. High K/9 + green matchup scores = good over spot." />
                   <PropRow type="Outs" def="Pitcher outs recorded — Over/Under on how many outs the starter gets before leaving the game. 3 outs = 1 inning. A line of 17.5 means roughly 6 innings. Elite control (low WHIP + BB/9) and a weak lineup push this over." />
@@ -4771,9 +4833,14 @@ export default function App() {
                     ["PC", "Pitch Count — average pitches thrown per start. High PC + deep IP = efficient pitcher."],
                     ["K%", "Strikeout rate — percentage of batters struck out. 28%+ is high for a pitcher; above 25% is concerning for a hitter facing this pitcher."],
                     ["HR Factor", "Park Factor for home runs — over 1.0 means the stadium inflates HR rates (hitter-friendly), under 1.0 suppresses them (pitcher-friendly)."],
-                    ["Ump K Rate", "Percentage of plate appearances ending in a strikeout when this umpire is behind the plate. Higher K rate = wider zone = pitcher-friendly. Shown in the Intel tab Umpire card."],
-                    ["Ump BB Rate", "Percentage of plate appearances ending in a walk with this umpire. Lower BB rate = tighter ball/strike zone for walks = pitcher-friendly. Shown alongside K Rate in the Umpire card."],
-                    ["PITCHER UMP / NEUTRAL UMP", "Badge on the Umpire card. PITCHER UMP = historically wide zone with above-average K rate. NEUTRAL = average zone. A PITCHER UMP badge is a meaningful edge for K props and Outs overs."],
+                    ["Reliever K/9", "Strikeouts per 9 innings for a bullpen arm. 10+ = swing-and-miss threat, useful for late-inning K props. Under 7 = contact-heavy reliever."],
+                    ["Reliever BB/9", "Walks per 9 innings for a bullpen arm. Under 3 = sharp control. 5+ = walk-prone, increases YRFI and total runs risk in high-leverage spots."],
+                    ["Ump Accuracy", "Overall ball/strike call accuracy for the umpire (from UmpScorecards). MLB average is around 92–93%. Shown when real scorecard data is available; falls back to K Rate / BB Rate otherwise."],
+                    ["vs Expected", "How many accuracy percentage points above or below expected the umpire performs, given pitch difficulty. Positive = sharper than expected. Negative = more errors than expected on the same pitch locations."],
+                    ["Consistency", "How consistently the umpire applies the same strike zone throughout a game. High consistency = reliable zone, low variance. Matters for late-inning K props."],
+                    ["Favor/Gm", "Average absolute run favor per game — how many runs the umpire's calls are worth cumulatively. Higher values (> 0.5) mean the ump's zone meaningfully shifts expected run scoring, which can create an edge on totals."],
+                    ["ACCURATE / INCONSISTENT", "Badge on the Umpire card when real scorecard data is loaded. ACCURATE = above expected accuracy (+0.5% or better). INCONSISTENT = below expected (−1.0% or worse). Falls back to PITCHER UMP / NEUTRAL UMP when only static data is available."],
+                    ["PITCHER UMP / NEUTRAL UMP", "Badge shown when real scorecard data isn't loaded yet. Based on historical K rate estimates — PITCHER UMP = wider zone, above-average strikeout environment. NEUTRAL = average zone."],
                   ].map(([t, d]) => <Stat key={t} term={t} def={d} />)}
                 </Section>
               </>);

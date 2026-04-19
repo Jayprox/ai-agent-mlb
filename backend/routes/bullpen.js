@@ -84,9 +84,9 @@ async function buildTeamBullpen(teamId) {
         mlb.get(`/people/${personId}`, {}),
       ]);
 
-      const stat     = seasonRes.data.stats?.[0]?.splits?.[0]?.stat ?? {};
-      const games    = gameLogRes.data.stats?.[0]?.splits ?? [];
-      const person   = personRes.data.people?.[0] ?? {};
+      const stat  = seasonRes.data.stats?.[0]?.splits?.[0]?.stat ?? {};
+      const games = gameLogRes.data.stats?.[0]?.splits ?? [];
+      const person = personRes.data.people?.[0] ?? {};
 
       // Most recent appearance
       const lastGame    = games[games.length - 1];
@@ -115,10 +115,10 @@ async function buildTeamBullpen(teamId) {
         name:    person.fullName ?? p.person.fullName,
         role:    roleFromStats(saves, holds),
         hand:    person.pitchHand?.code ?? "R",
-        era:     stat.era ?? "—",
-        whip:    stat.whip ?? "—",
-        vsL:     "—",  // platoon splits skipped for now
-        vsR:     "—",
+        era:  stat.era  ?? "—",
+        whip: stat.whip ?? "—",
+        k9:   stat.strikeoutsPer9Inn ?? "—",
+        bb9:  stat.walksPer9Inn      ?? "—",
         lastApp: lastDate ? lastAppLabel(days) : "—",
         pitches: lastPitches,
         status,
@@ -261,11 +261,11 @@ async function buildGameBullpen(gamePk) {
     relievers: t.relievers.map((r) => ({
       name:    r.name,
       hand:    r.hand,
-      era:     r.era,
-      whip:    r.whip,
-      vsL:     r.vsL,
-      vsR:     r.vsR,
-      role:    r.role,    // short codes: CL / SU / MR
+      era:  r.era,
+      whip: r.whip,
+      k9:   r.k9,
+      bb9:  r.bb9,
+      role: r.role,    // short codes: CL / SU / MR
       lastApp: r.lastApp,
       pitches: r.pitches,
       status:  r.status,

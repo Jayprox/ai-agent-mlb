@@ -1,7 +1,40 @@
 const express = require("express");
 const router  = express.Router();
+const fs      = require("fs");
+const path    = require("path");
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
+
+const UMPIRES_DATA_PATH = path.join(__dirname, "..", "data", "umpires.json");
+
+function normalizeName(name = "") {
+  return String(name)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9 ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function loadUmpireStats() {
+  try {
+    const raw = fs.readFileSync(UMPIRES_DATA_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    const byName = parsed?.umpiresByName ?? {};
+    const normalized = Object.fromEntries(
+      Object.entries(byName).map(([name, stats]) => [normalizeName(name), stats])
+    );
+    return { byName, normalized };
+  } catch {
+    return { byName: {}, normalized: {} };
+  }
+}
+
+function getUmpireStatsByName(name) {
+  const store = loadUmpireStats();
+  return store.byName[name] ?? store.normalized[normalizeName(name)] ?? null;
+}
 
 // ── GET /api/umpires/:gamePk ─────────────────────────────────
 // Returns the umpire crew for a given game.
@@ -31,7 +64,11 @@ router.get("/:gamePk", async (req, res) => {
     const result = {
       gamePk:    parseInt(gamePk),
       homePlate: hp
-        ? { id: hp.official.id, name: hp.official.fullName }
+        ? {
+            id: hp.official.id,
+            name: hp.official.fullName,
+            stats: getUmpireStatsByName(hp.official.fullName),
+          }
         : null,
       all: officials.map((o) => ({
         id:       o.official.id,

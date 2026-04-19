@@ -1571,3 +1571,105 @@ const mapTeam = (t) => ({
 ---
 
 *Updated April 18 2026 — Session 31 complete · Overview redesign · umpire fix · NRFI chip on finals · bullpen field mapping fix*
+
+---
+
+## ✅ Session 32 — UmpScorecards Live Data · Bullpen K/9 + BB/9 · Schedule Timezone
+
+---
+
+### Umpire Card — UmpScorecards Live Integration (Frontend)
+
+Codex had already built the backend (`backend/data/umpires.json`, updated `backend/routes/umpires.js`). This session wired it into the frontend.
+
+**What Codex built (backend):**
+- `backend/data/umpires.json` — 85 umpires scraped from `https://umpscorecards.com/api/umpires?startDate=2026-01-01&endDate=2026-12-31&seasonType=R`
+- `backend/routes/umpires.js` — enriches `homePlate` with `stats: { ... }` from the JSON file; includes name normalization for accented names (e.g. Alfonso Márquez)
+- `homePlate` shape is now: `{ id, name, stats: { overallAccuracy, accuracyAboveExpected, consistency, averageAbsoluteFavor, weightedScore, ... } | null }`
+- Note: UmpScorecards does NOT provide kRate / bbRate — only accuracy metrics
+
+**What CW built (frontend) — `prop-scout-v7.jsx`:**
+
+Updated umpire merge logic in `buildLiveGame` to pass `lu.homePlate.stats` through as `umpire.scorecards`, while keeping the existing `UMPIRE_STATS` static lookup for `kRate`/`bbRate`/`tendency`/`rating` (still used by K prop engine and as fallback display):
+
+```js
+umpire: (() => {
+  const lu = liveUmpires[gamePkKey];
+  if (!lu?.homePlate) return baseGame.umpire;
+  const staticStats = UMPIRE_STATS[lu.homePlate.name] ?? null;
+  return {
+    ...baseGame.umpire,
+    name:       lu.homePlate.name,
+    scorecards: lu.homePlate.stats ?? null,
+    ...(staticStats ? { kRate, bbRate, tendency, rating } : {}),
+  };
+})(),
+```
+
+Umpire card now has three display states:
+1. **SCORECARD LIVE** (`umpire.scorecards` populated) — shows 4 real metrics: Accuracy, vs Exp, Consistency, Favor/Gm. Badge derived from `accuracyAboveExpected`: ≥ +0.5% → ACCURATE (green), ≤ −1.0% → INCONSISTENT (amber), otherwise falls back to PITCHER/NEUTRAL UMP from static data.
+2. **Static only** (ump not in dataset) — shows K Rate + BB Rate from `UMPIRE_STATS`. PITCHER/NEUTRAL UMP badge.
+3. **TBD** — no assignment yet, shows defaults.
+
+K prop engine unchanged — still reads `umpire.kRate` from static table.
+
+**Backlog:** UmpScorecards dataset refresh — no public API for automated scraping. Plan: small Node script + Cowork scheduled task to re-fetch once daily. Stable year-over-year so low urgency.
+
+---
+
+### Bullpen Relievers — vs LHB / vs RHB → K/9 + BB/9
+
+**Problem:** `vsL` / `vsR` platoon splits never populated — the MLB Stats API `statSplits` endpoint and `vsLeft`/`vsRight` stat types both returned no data (too early in season / insufficient AB threshold).
+
+**Decision:** Removed platoon splits entirely. Replaced with **K/9** and **BB/9** — both come from the `season` stats call already in the bullpen route, so no new API calls needed.
+
+**Backend changes — `backend/routes/bullpen.js`:**
+- Removed `statSplits` / `vsLeft` / `vsRight` fetch attempts
+- Reverted `Promise.all` back to 3 calls (season, gameLog, person)
+- Added `k9: stat.strikeoutsPer9Inn ?? "—"` and `bb9: stat.walksPer9Inn ?? "—"` to reliever return object
+- Updated `mapTeam` in `buildGameBullpen` to pass `k9` and `bb9` through
+
+**Frontend changes — `prop-scout-v7.jsx`:**
+- Replaced vs LHB / vs RHB / Platoon Edge section with K/9 + BB/9 two-stat row
+- Color coding: K/9 green ≥ 10 / amber 7–10 / red ≤ 7; BB/9 green ≤ 3 / amber 3–5 / red ≥ 5
+
+---
+
+### Schedule Timezone — ET → Hawaii
+
+**Problem:** Schedule was using ET to determine "today's date", which rolled to tomorrow after ~8 PM Pacific, showing the wrong slate.
+
+**Fix — `backend/routes/schedule.js` line 47:**
+```js
+// Before
+timeZone: "America/New_York"
+// After
+timeZone: "Pacific/Honolulu"   // UTC−10, no DST — never rolls mid-slate
+```
+
+The `formatGameTime` helper still formats display times in ET (harmless — frontend uses raw `gameTime` ISO string for local TZ display anyway).
+
+Cache key is date-based (`schedule:YYYY-MM-DD`) so PT/HI date differences generate separate cache entries without conflict.
+
+---
+
+### Help Guide Updates (`prop-scout-v7.jsx`)
+
+- **New section: "🔍 Reading the Intel Tab"** — added before Prop Types. Covers all four Intel cards: Umpire (SCORECARD LIVE vs fallback), NRFI/YRFI, Bullpen (grade/fatigue/K9/BB9), Odds & Line Movement
+- **Pitch scouting notes tip** — removed stale pinning reference, updated to describe Lineup drawer H2H flow
+- **Stat Glossary** — added: Ump Accuracy, vs Expected, Consistency, Favor/Gm, ACCURATE/INCONSISTENT badge, PITCHER/NEUTRAL UMP fallback, Reliever K/9, Reliever BB/9
+
+---
+
+### Files Changed in Session 32
+
+- `prop-scout-v7.jsx`
+- `backend/routes/umpires.js` (Codex — backend only)
+- `backend/data/umpires.json` (Codex — 85 umpires from UmpScorecards)
+- `backend/routes/bullpen.js` (platoon splits removed, K/9 + BB/9 added)
+- `backend/routes/schedule.js` (timezone ET → Pacific/Honolulu)
+- `prop-scout-handoff.md`
+
+---
+
+*Updated April 18 2026 — Session 32 complete · UmpScorecards live integration · Bullpen K/9+BB/9 · Schedule timezone fix*
