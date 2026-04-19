@@ -4654,6 +4654,8 @@ export default function App() {
                       ["NRFI badge", "Model leans toward No Run First Inning with 62%+ confidence. Only shown on green-bordered cards where the signal is strong enough to act on — gray or amber borders mean the lean isn't confident enough to display."],
                       ["Temperature / DOME badge", "Live weather at game time from Open-Meteo. Cold temps suppress offense. DOME = retractable roof stadium, climate controlled."],
                       ["↑ OVER / ↓ UNDER badge", "Line movement detected — the total shifted up or down from its opening number. Sharp bettors often drive these moves, so it's a useful fade or follow signal."],
+                      ["FINAL score row", "On completed games the right column switches to results: final score, O/U result (green O or red U), ML winner + their line, and RL result (−1.5 if the favorite covered, +1.5 if the dog covered). A small NRFI ✓ or YRFI chip shows whether the first inning was scoreless."],
+                      ["● LIVE  3–1 ▼6", "In-progress games show a live score chip: away–home runs, a ▲/▼ arrow for top/bottom of the inning, and the current inning number. Updates every 60 seconds."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                         <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#22c55e", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
@@ -4708,7 +4710,7 @@ export default function App() {
                       <span style={{ color: "#f9fafb" }}>"Drives sinker well"</span> — solid contact on sinkers. Good AVG vs that pitch.<br />
                       <span style={{ color: "#f9fafb" }}>"Chases down and away"</span> — gets fooled by sliders/changeups off the outer edge.<br />
                       <span style={{ color: "#f9fafb" }}>"Severe weakness — high K exposure"</span> — AVG under .180 or whiff over 40%. Prime K prop pitch.<br /><br />
-                      <span style={{ color: "#818cf8" }}>💡 Tip: go to the <strong>Lineup tab</strong>, expand a batter, and pin them to the Overview tab — their notes will update with that batter's real Statcast splits against this pitcher's arsenal.</span>
+                      <span style={{ color: "#818cf8" }}>💡 Tip: go to the <strong>Lineup tab</strong> and expand any batter — their drawer shows real Statcast splits against this pitcher's arsenal along with a live H2H matchup score.</span>
                     </div>
                   </div>
                   <div style={{ background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 8, padding: "10px 12px" }}>
@@ -4719,6 +4721,24 @@ export default function App() {
                   </div>
                   <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
                     The <span style={{ color: "#f9fafb", fontWeight: 700 }}>Confidence Meter</span> (0–100%) on each prop shows how strongly the engine leans. <span style={{ color: "#22c55e" }}>70%+</span> is a strong signal worth considering.
+                  </div>
+                </Section>
+
+                <Section title="📋 Overview Tab — What's on Each Card">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6, marginBottom: 4 }}>
+                    The Overview tab gives you a quick pre-game read on the starter and how the opposing lineup matches up. Three cards:
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["Pitcher Card", "Season ERA, WHIP, K/9, BB/9, avg IP/K/PC/ER, and a sparkline of recent outings. Shows W-L record and how many of his last 5 starts were clean (0 ER). Use this for K props and Outs lines."],
+                      ["Lineup Matchup Intel", "Counts how many RHB, LHB, and switch hitters are in the opposing lineup vs the pitcher's hand — higher same-hand count = pitcher edge. Shows the aggregate matchup score across all opposing batters and flags the top 3 danger hitters by score. Use this for deciding whether to lean Over or Under on team runs."],
+                      ["Game Lean Card", "NRFI lean derived from both SPs' clean-start rate (0 ER starts / recent starts). F5 lean from combined SP ERA. Quick directional read for F5 and NRFI props."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
                   </div>
                 </Section>
 
@@ -4751,6 +4771,9 @@ export default function App() {
                     ["PC", "Pitch Count — average pitches thrown per start. High PC + deep IP = efficient pitcher."],
                     ["K%", "Strikeout rate — percentage of batters struck out. 28%+ is high for a pitcher; above 25% is concerning for a hitter facing this pitcher."],
                     ["HR Factor", "Park Factor for home runs — over 1.0 means the stadium inflates HR rates (hitter-friendly), under 1.0 suppresses them (pitcher-friendly)."],
+                    ["Ump K Rate", "Percentage of plate appearances ending in a strikeout when this umpire is behind the plate. Higher K rate = wider zone = pitcher-friendly. Shown in the Intel tab Umpire card."],
+                    ["Ump BB Rate", "Percentage of plate appearances ending in a walk with this umpire. Lower BB rate = tighter ball/strike zone for walks = pitcher-friendly. Shown alongside K Rate in the Umpire card."],
+                    ["PITCHER UMP / NEUTRAL UMP", "Badge on the Umpire card. PITCHER UMP = historically wide zone with above-average K rate. NEUTRAL = average zone. A PITCHER UMP badge is a meaningful edge for K props and Outs overs."],
                   ].map(([t, d]) => <Stat key={t} term={t} def={d} />)}
                 </Section>
               </>);
