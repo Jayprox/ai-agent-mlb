@@ -3181,74 +3181,91 @@ export default function App() {
               );
             })()}
 
-            {/* ── Game Lean (NRFI / F5) ── */}
+            {/* ── F5 Lean ── */}
             {(() => {
               const homePitcher = pitcher;
               const awayPitcher = game.awayPitcher ?? null;
-              const homeLog  = homePitcher?.id ? liveGameLog[homePitcher.id] : null;
-              const awayLog  = awayPitcher?.id ? liveGameLog[awayPitcher.id] : null;
-              const homeStarts = homeLog?.games ?? [];
-              const awayStarts = awayLog?.games ?? [];
-
-              // NRFI lean: count recent 0-ER starts (clean outing proxy for clean 1st inning)
-              const homeClean = homeStarts.filter(g => (g.er ?? 99) === 0).length;
-              const awayClean = awayStarts.filter(g => (g.er ?? 99) === 0).length;
-              const homeTot   = homeStarts.length;
-              const awayTot   = awayStarts.length;
 
               // F5 lean: both SPs' ERA as combined proxy
               const homeEra = parseFloat(homePitcher?.era);
               const awayEra = parseFloat(awayPitcher?.era ?? homePitcher?.era);
               const avgEra  = (!isNaN(homeEra) && !isNaN(awayEra)) ? (homeEra + awayEra) / 2 : null;
 
-              // NRFI signal: both need enough data
-              const hasNrfiData = homeTot >= 3 && awayTot >= 3;
-              const nrfiRate = hasNrfiData ? (homeClean + awayClean) / (homeTot + awayTot) : null;
-              const nrfiLean = nrfiRate !== null
-                ? nrfiRate >= 0.55 ? { label: "LEAN NRFI", color: "#22c55e", positive: true }
-                : nrfiRate >= 0.40 ? { label: "NEUTRAL",   color: "#f59e0b", positive: null }
-                : { label: "LEAN YRFI", color: "#ef4444", positive: false }
-                : null;
-
-              // F5 lean
               const f5Lean = avgEra !== null
                 ? avgEra < 3.5  ? { label: "F5 UNDER LEAN", color: "#22c55e" }
                 : avgEra > 4.5  ? { label: "F5 OVER LEAN",  color: "#ef4444" }
                 : { label: "F5 NEUTRAL", color: "#f59e0b" }
                 : null;
 
-              if (!nrfiLean && !f5Lean) return null;
+              if (!f5Lean) return null;
 
               return (
                 <Card>
-                  <SLabel>Game Lean</SLabel>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {nrfiLean && (
-                      <div style={{ flex: 1, background: "#0e0f1a", borderRadius: 8, padding: "10px", textAlign: "center" }}>
-                        <div style={{ fontSize: 14, fontWeight: 800, color: nrfiLean.color, fontFamily: "monospace", marginBottom: 4 }}>{nrfiLean.label}</div>
-                        {hasNrfiData && (
-                          <div style={{ fontSize: 9, color: "#6b7280", lineHeight: 1.5 }}>
-                            {game.home.abbr} SP: {homeClean}/{homeTot} clean<br />
-                            {game.away.abbr} SP: {awayClean}/{awayTot} clean
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {f5Lean && (
-                      <div style={{ flex: 1, background: "#0e0f1a", borderRadius: 8, padding: "10px", textAlign: "center" }}>
-                        <div style={{ fontSize: 14, fontWeight: 800, color: f5Lean.color, fontFamily: "monospace", marginBottom: 4 }}>{f5Lean.label}</div>
-                        {avgEra !== null && (
-                          <div style={{ fontSize: 9, color: "#6b7280", lineHeight: 1.5 }}>
-                            {game.home.abbr} ERA {isNaN(homeEra) ? "—" : homeEra.toFixed(2)}<br />
-                            {game.away.abbr} ERA {isNaN(awayEra) ? "—" : awayEra.toFixed(2)}
-                          </div>
-                        )}
+                  <SLabel>F5 Lean</SLabel>
+                  <div style={{ background: "#0e0f1a", borderRadius: 8, padding: "12px", textAlign: "center" }}>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: f5Lean.color, fontFamily: "monospace", marginBottom: 6 }}>{f5Lean.label}</div>
+                    {avgEra !== null && (
+                      <div style={{ display: "flex", justifyContent: "center", gap: 20 }}>
+                        <div style={{ fontSize: 10, color: "#6b7280" }}>
+                          <span style={{ color: "#9ca3af", fontWeight: 600 }}>{game.home.abbr}</span> ERA {isNaN(homeEra) ? "—" : homeEra.toFixed(2)}
+                        </div>
+                        <div style={{ fontSize: 10, color: "#6b7280" }}>
+                          <span style={{ color: "#9ca3af", fontWeight: 600 }}>{game.away.abbr}</span> ERA {isNaN(awayEra) ? "—" : awayEra.toFixed(2)}
+                        </div>
                       </div>
                     )}
                   </div>
                 </Card>
               );
             })()}
+
+            {/* ── First Inning Tendencies ── */}
+            <SLabel>First Inning Tendencies</SLabel>
+            <Card>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <LeanBadge label={`${nrfi.lean} ${nrfi.confidence}%`} positive={nrfi.lean === "NRFI"} />
+                  {nrfi.live && <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>}
+                </div>
+                {(() => {
+                  const nrfiLogged = propLog.some(p => p.gamePk === selectedId && p.propType === "NRFI");
+                  return (
+                    <button
+                      onClick={() => !nrfiLogged && logPick({
+                        label:      `NRFI · ${game.away.abbr} @ ${game.home.abbr}`,
+                        lean:       nrfi.lean,
+                        confidence: nrfi.confidence,
+                        propType:   "NRFI",
+                      })}
+                      title={nrfiLogged ? "Already logged" : "Log this pick"}
+                      style={{ background: nrfiLogged ? "rgba(34,197,94,0.12)" : "rgba(167,139,250,0.1)", border: `1px solid ${nrfiLogged ? "rgba(34,197,94,0.3)" : "rgba(167,139,250,0.3)"}`, borderRadius: 6, padding: "3px 8px", fontSize: 11, color: nrfiLogged ? "#22c55e" : "#a78bfa", cursor: nrfiLogged ? "default" : "pointer", fontWeight: 700, lineHeight: 1 }}>
+                      {nrfiLogged ? "✓" : "＋"}
+                    </button>
+                  );
+                })()}
+              </div>
+              {(nrfi.awayFirst?.avgRuns !== undefined || nrfi.liveTendency) && (
+                <div style={{ fontSize: 10, color: "#9ca3af", background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)", borderRadius: 6, padding: "6px 10px", marginBottom: 10, lineHeight: 1.5 }}>
+                  {nrfi.awayFirst?.avgRuns !== undefined
+                    ? `📊 ${game.away.abbr} avg ${nrfi.awayFirst.avgRuns} R/1st inn · ${game.home.abbr} avg ${nrfi.homeFirst?.avgRuns ?? "—"} R/1st inn`
+                    : `📊 ${nrfi.liveTendency}`}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                <div style={{ flex: 1, background: "#1e2030", borderRadius: 8, padding: "10px" }}>
+                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{game.away.abbr} 1ST INN</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#f9fafb" }}>{nrfi.awayFirst.scoredPct}</div>
+                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>scored</div>
+                  <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6, lineHeight: 1.4 }}>{nrfi.awayFirst.tendency}</div>
+                </div>
+                <div style={{ flex: 1, background: "#1e2030", borderRadius: 8, padding: "10px" }}>
+                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{game.home.abbr} 1ST INN</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "#f9fafb" }}>{nrfi.homeFirst.scoredPct}</div>
+                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>scored</div>
+                  <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6, lineHeight: 1.4 }}>{nrfi.homeFirst.tendency}</div>
+                </div>
+              </div>
+            </Card>
           </>)}
 
           {/* ── LINEUP ── */}
@@ -3736,57 +3753,6 @@ export default function App() {
                   <StatMini label="BB Rate" value={umpire.bbRate} color={parseFloat(umpire.bbRate) > 9  ? "#ef4444" : "#e5e7eb"} />
                 </div>
               )}
-            </Card>
-
-            {/* NRFI */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <SLabel style={{ marginBottom: 0 }}>First Inning Tendencies</SLabel>
-              {nrfi.live && <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>}
-            </div>
-            <Card>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: "#f9fafb" }}>NRFI / YRFI Lean</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <LeanBadge label={`${nrfi.lean} ${nrfi.confidence}%`} positive={nrfi.lean === "NRFI"} small />
-                  {(() => {
-                    const nrfiLogged = propLog.some(p => p.gamePk === selectedId && p.propType === "NRFI");
-                    return (
-                      <button
-                        onClick={() => !nrfiLogged && logPick({
-                          label:      `NRFI · ${game.away.abbr} @ ${game.home.abbr}`,
-                          lean:       nrfi.lean,
-                          confidence: nrfi.confidence,
-                          propType:   "NRFI",
-                        })}
-                        title={nrfiLogged ? "Already logged" : "Log this pick"}
-                        style={{ background: nrfiLogged ? "rgba(34,197,94,0.12)" : "rgba(167,139,250,0.1)", border: `1px solid ${nrfiLogged ? "rgba(34,197,94,0.3)" : "rgba(167,139,250,0.3)"}`, borderRadius: 6, padding: "3px 8px", fontSize: 11, color: nrfiLogged ? "#22c55e" : "#a78bfa", cursor: nrfiLogged ? "default" : "pointer", fontWeight: 700, lineHeight: 1 }}>
-                        {nrfiLogged ? "✓" : "＋"}
-                      </button>
-                    );
-                  })()}
-                </div>
-              </div>
-              {(nrfi.awayFirst?.avgRuns !== undefined || nrfi.liveTendency) && (
-                <div style={{ fontSize: 10, color: "#9ca3af", background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)", borderRadius: 6, padding: "6px 10px", marginBottom: 10, lineHeight: 1.5 }}>
-                  {nrfi.awayFirst?.avgRuns !== undefined
-                    ? `📊 ${game.away.abbr} avg ${nrfi.awayFirst.avgRuns} R/1st inn · ${game.home.abbr} avg ${nrfi.homeFirst?.avgRuns ?? "—"} R/1st inn`
-                    : `📊 ${nrfi.liveTendency}`}
-                </div>
-              )}
-              <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-                <div style={{ flex: 1, background: "#1e2030", borderRadius: 8, padding: "10px" }}>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{game.away.abbr} 1ST INN</div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "#f9fafb" }}>{nrfi.awayFirst.scoredPct}</div>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>scored</div>
-                  <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6, lineHeight: 1.4 }}>{nrfi.awayFirst.tendency}</div>
-                </div>
-                <div style={{ flex: 1, background: "#1e2030", borderRadius: 8, padding: "10px" }}>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{game.home.abbr} 1ST INN</div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "#f9fafb" }}>{nrfi.homeFirst.scoredPct}</div>
-                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>scored</div>
-                  <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6, lineHeight: 1.4 }}>{nrfi.homeFirst.tendency}</div>
-                </div>
-              </div>
             </Card>
 
             {/* Odds & Line Movement */}
