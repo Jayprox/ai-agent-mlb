@@ -263,17 +263,89 @@ The mock SLATE array is always present as a fallback scaffold. Live data overlay
 
 ---
 
-## Future Enhancements (Logged, Not Started)
+## Future Enhancements — Consolidated Backlog
 
-- **Prediction market odds (Kalshi / Polymarket)** — The Odds API does not cover prediction markets. OddsPapi (oddspapi.io) aggregates Kalshi + Polymarket + sportsbooks in one normalized response. Could add a prediction market row to the multi-book odds table.
-- **Baseball Savant arsenal feed** — ✅ DONE. Backend routes `/api/arsenal/:pitcherId` and `/api/splits/:batterId` fetch from Savant's Statcast search CSV. Arsenal overlays into pitcher object on game open. Batter splits fetched lazily when lineup drawer opens. `good`/`note` auto-computed from live stats. Column names logged on first fetch for debugging.
-- **Prop engine** — Once arsenal data lands, generate prop confidence scores from pitcher matchup data, park factors, weather, umpire zone.
-- **Trends layer** — Prop hit rate on specific lines (e.g. Judge OVER 1.5 TB last 10 games), pitcher K prop home vs away hit rate, NRFI streaks
-- **Injury flags** — Manual flag system to mark players questionable/out
-- **Park factors** — HR factor, hit factor, K factor per stadium integrated into game card
-- **Prop tracker** — Log picks, track hit rate over time
-- **Bullpen dedicated tab** — Currently in Intel tab; full dedicated tab discussed
-- **PostgreSQL** — Pre-aggregated splits, arsenal snapshots, historical logs, park factors, umpire history
+Ordered from least to most complex. New user feedback has been merged with existing backlog items where they overlap.
+
+---
+
+### 🟢 Low Complexity — Frontend only, data already exists
+
+**1. Better pitch type matchup surfacing** *(user feedback)*
+Batter vs pitch type data already exists in the Lineup tab's expanded drawer and vulnerability bar. This is about visibility, not new data. Surface it more prominently — e.g. a callout when a batter particularly handles or struggles with the pitcher's primary pitch. Quick win.
+
+**2. Pitcher last 3 starts breakdown** *(pro bettor feature)*
+We already fetch the pitcher game log for the sparkline. Extend the pitcher card to show a mini table: last 3 starts with ER, IP, K, and PC per outing. Gives bettors a recency picture beyond season ERA. Frontend-only change.
+
+**3. Team K% confluence note** *(pro bettor feature)*
+Use the pitcher's K/9 and the opposing lineup's aggregate matchup score (already computed) to surface a single callout like "High K environment — pitcher K/9 10.2, lineup weak vs breaking balls." No new data needed.
+
+---
+
+### 🟡 Medium Complexity — New data, single API call
+
+**4. Out-of-position player flag** *(user feedback)*
+When live lineups are fetched, the MLB API returns each player's defensive position for that game. Compare it to their primary position from their profile. If they differ, badge the batter row in the Lineup tab — e.g. `⚠️ 2B (norm. SS)`. Signals roster moves, fatigue substitutions, or platoon decisions that affect lineup construction. No new backend route needed — data is already in the lineup response.
+
+**5. UmpScorecards auto-refresh** *(backlog)*
+Small Node script that re-fetches `backend/data/umpires.json` from the UmpScorecards API once per day. Low urgency — umpire data is stable year-over-year. Plan: Cowork scheduled task or node-cron job. Already designed conceptually; just needs the script written and wired.
+
+**6. Pitcher vs L/R splits** *(user feedback + backlog)*
+Attempted early season via MLB Stats API — returned empty data (insufficient AB sample). Worth revisiting mid-May/June when sample sizes build. Alternatively, Baseball Savant has reliable platoon splits year-round via the same CSV endpoint already used for batter splits (`/api/splits/:batterId` pattern). Would show pitcher ERA/WHIP vs LHH and RHH on the pitcher card. Same complexity as the batter splits route already built.
+
+---
+
+### 🔵 Higher Complexity — AI integration
+
+**7. AI Trends Summary** *(planned — replaces Game Notes)*
+Replace the existing Game Notes section with an Anthropic API-generated narrative per game. Pass the full game object (pitchers, bullpen, weather, umpire, odds, lineup) as structured context. Model returns a 1–2 paragraph bettor-focused summary covering pitcher trends, bullpen fatigue, weather impact, umpire tendency, and standout matchups. Data-only — no web search. Key implementation notes:
+- Cache per `gamePk` (2–4 hour TTL) — do not fire on every page load
+- Use Claude Haiku (fast, cheap, sufficient for short narrative)
+- Backend route: `POST /api/trends/:gamePk` or inline in existing game object
+- Fallback: show nothing if API call fails (don't show an error state)
+
+**8. Injury flags + Lineup scratch alerts** *(user feedback + pro bettor feature — same feature)*
+Real-time injury and lineup scratch news is the same problem. Static manual flags are too slow to be useful. Best path: let the AI-powered Props Tab (item #9) handle this via web search — injury context flows in automatically when the AI searches for player news. Out-of-position flag (item #4) covers the in-game roster signal without needing a separate injury feed.
+
+**9. AI-powered Props Tab** *(planned — overhauls Props tab)*
+Full Props tab overhaul using Anthropic API + web search. Pass the full game object as structured context, then let the AI search for real-time news (injuries, scratches, beat reporter notes) to supplement. Returns structured JSON:
+```json
+[{ "prop": "Judge OVER 1.5 TB", "odds": "-115", "confidence": 68, "reasoning": "..." }]
+```
+Frontend filters: confidence ≥ 55% and odds ≥ −200. Sort by confidence descending. Each prop card shows the line, confidence %, and one-sentence reason. Key implementation notes:
+- Web search provider needs to be chosen before Codex starts (Brave Search, Serper, or Tavily — all have free tiers)
+- Cache per `gamePk` (30–60 min TTL) — web search + LLM is the most expensive call combo
+- Prompt must instruct the model to **omit a prop entirely** rather than guess a low confidence score — a wrong confidence is worse than no rating
+- Injury/lineup info from web search covers item #8 automatically
+
+---
+
+### ⚫ Infrastructure (separate branch / longer term)
+
+**10. PostgreSQL data layer** *(feat/postgres-data-layer — fully designed)*
+Fully designed in `handoff-postgres-data-layer.md`. Branch needs to be created and handed to Codex. Enables all items below that require historical data.
+
+**11. Historical prop hit rates + CLV tracking** *(pro bettor feature)*
+Track whether props hit over time and compare final line vs line at pick time (Closing Line Value). Depends on PostgreSQL being live — picks need to be stored with timestamps and graded after game completion. Also requires capturing pre-game odds at pick time for CLV calculation.
+
+**12. Public % / Sharp money split** *(pro bettor feature)*
+Show public betting % vs sharp money direction per game. Requires a paid third-party data source — Action Network, Bet Labs, or a similar sharp data aggregator. Most external-dependent item in the backlog. No free equivalent exists for reliable sharp/public splits.
+
+**13. Prediction market odds** *(backlog)*
+Kalshi + Polymarket odds alongside sportsbook lines. OddsPapi (oddspapi.io) aggregates both in a normalized response. Would add a prediction market row to the multi-book odds table in the Intel tab.
+
+---
+
+### ✅ Completed
+- Baseball Savant arsenal + batter splits (`/api/arsenal/:pitcherId`, `/api/splits/:batterId`)
+- Park factors (HR/hit/K factor per stadium — static table in frontend)
+- Prop tracker (pick log with hit/miss grading)
+- Bullpen tab (live data in Intel tab, expandable reliever cards)
+- Live NRFI data (`/api/nrfi/:gamePk`)
+- Live bullpen data (`/api/bullpen/:gamePk`)
+- Live linescore + final score results on slate cards
+- UmpScorecards live accuracy data (backend + frontend wired)
+- Responsive layout (tablet + desktop 2-column grid)
 
 ---
 
@@ -1673,3 +1745,64 @@ Cache key is date-based (`schedule:YYYY-MM-DD`) so PT/HI date differences genera
 ---
 
 *Updated April 18 2026 — Session 32 complete · UmpScorecards live integration · Bullpen K/9+BB/9 · Schedule timezone fix*
+
+---
+
+## ✅ Session 33 — Overview Cleanup · Backlog Reorganization
+
+All changes in `prop-scout-v7.jsx` unless noted.
+
+---
+
+### First Inning Tendencies — Moved to Overview Tab
+
+Relocated the entire First Inning Tendencies card (NRFI/YRFI lean, team scoring %, LIVE badge, log pick button) from the Intel tab to the bottom of the Overview tab, below the F5 Lean card. No logic changes — pure UI relocation. The `nrfi` variable is defined above tab rendering so it's in scope in both tabs.
+
+---
+
+### Overview Tab — F5 Lean + First Inning Tendencies Cleanup
+
+**Problem:** The old "Game Lean" card showed both an NRFI lean (computed from SP clean starts) and an F5 lean side by side. The NRFI lean conflicted with the more accurate live API data in the First Inning Tendencies card directly below it — two contradictory signals from different data sources.
+
+**Fix:**
+- Removed NRFI lean entirely from the Game Lean card
+- Renamed card to "F5 Lean" — now shows only the F5 signal (avg ERA of both SPs), with a cleaner side-by-side ERA display for both teams
+- First Inning Tendencies is now the single authoritative NRFI source
+- NRFI lean badge and LIVE chip moved to the top of the First Inning Tendencies card; redundant inner header "NRFI / YRFI Lean" removed
+
+**Result:** F5 and NRFI are clearly separated topics. No conflicting signals.
+
+---
+
+### Future Enhancements Backlog — Full Reorganization
+
+Consolidated all backlog items (previous sessions + pro bettor features + new user feedback) into a single prioritized list ordered by complexity:
+- 🟢 Low complexity (3 items) — frontend only, data already exists
+- 🟡 Medium complexity (3 items) — new data, single API call
+- 🔵 Higher complexity (3 items) — AI integration
+- ⚫ Infrastructure (3 items) — separate branch / longer term
+- ✅ Completed items listed
+
+Key merges:
+- "Injury flags" + "Lineup scratch alerts" + new user feedback on injuries → consolidated into item #8 (handled by AI Props web search)
+- "Batter tendencies vs pitch types" (new feedback) → merged with existing pitch type matchup surfacing (item #1 — data already exists)
+- "Pitcher vs L/R splits" (new feedback) → merged with existing platoon splits backlog item (item #6)
+
+---
+
+### Three Planned Updates (In Progress)
+
+1. ✅ Move First Inning Tendencies → Overview tab — **DONE this session**
+2. 🔵 AI Trends Summary (replace Game Notes) — see backlog item #7
+3. 🔵 AI-powered Props Tab — see backlog item #9
+
+---
+
+### Files Changed in Session 33
+
+- `prop-scout-v7.jsx`
+- `prop-scout-handoff.md`
+
+---
+
+*Updated April 19 2026 — Session 33 complete · Overview cleanup · F5/NRFI separation · Backlog consolidated and reprioritized*
