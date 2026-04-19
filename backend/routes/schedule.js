@@ -2,6 +2,9 @@ const express = require("express");
 const router  = express.Router();
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
+const { query, isConnected } = require("../services/db");
+
+const SCHEDULE_TTL = 60 * 60 * 1000;
 
 // MLB team ID → abbreviation lookup (all 30 teams)
 const TEAM_ABBR = {
@@ -38,6 +41,84 @@ const transformPitcher = (p, abbr) => {
   };
 };
 
+async function enrichPitchers(games) {
+  const pitcherIds = [
+    ...new Set(
+      games
+        .flatMap((g) => [g.probablePitchers.away?.id, g.probablePitchers.home?.id])
+        .filter(Boolean)
+    ),
+  ];
+
+  if (pitcherIds.length === 0) return games;
+
+  try {
+    const { data: peopleData } = await mlb.get("/people", {
+      params: { personIds: pitcherIds.join(",") },
+    });
+    const peopleMap = {};
+    (peopleData.people ?? []).forEach((p) => { peopleMap[p.id] = p; });
+
+    games.forEach((g) => {
+      ["away", "home"].forEach((side) => {
+        const p = g.probablePitchers[side];
+        if (p && peopleMap[p.id]) {
+          p.number = peopleMap[p.id].primaryNumber ?? "?";
+          p.hand   = peopleMap[p.id].pitchHand?.code ?? "?";
+        }
+      });
+    });
+  } catch (enrichErr) {
+    console.warn("Pitcher enrichment failed:", enrichErr.message);
+  }
+
+  return games;
+}
+
+async function buildSchedulePayload(date) {
+  const { data } = await mlb.get("/schedule", {
+    params: {
+      sportId: 1,
+      date,
+      hydrate: "probablePitcher,linescore,team,venue",
+    },
+  });
+
+  const games = data.dates?.[0]?.games ?? [];
+
+  const transformed = games.map((g) => {
+    const away     = g.teams.away;
+    const home     = g.teams.home;
+    const awayAbbr = TEAM_ABBR[away.team.id] ?? away.team.abbreviation ?? "???";
+    const homeAbbr = TEAM_ABBR[home.team.id] ?? home.team.abbreviation ?? "???";
+
+    return {
+      gamePk:   g.gamePk,
+      id:       g.gamePk,
+      status:   g.status.detailedState,
+      time:     formatGameTime(g.gameDate),
+      gameTime: g.gameDate,
+      stadium:  g.venue.name,
+      away: {
+        id:   away.team.id,
+        name: away.team.name,
+        abbr: awayAbbr,
+      },
+      home: {
+        id:   home.team.id,
+        name: home.team.name,
+        abbr: homeAbbr,
+      },
+      probablePitchers: {
+        away: transformPitcher(away.probablePitcher, awayAbbr),
+        home: transformPitcher(home.probablePitcher, homeAbbr),
+      },
+    };
+  });
+
+  return enrichPitchers(transformed);
+}
+
 // ── GET /api/schedule?date=YYYY-MM-DD ────────────────────────
 // Returns today's MLB slate with probable pitchers.
 // Falls back to today's date if no `date` param supplied.
@@ -54,82 +135,24 @@ router.get("/", async (req, res) => {
     return res.json(cached);
   }
 
-  try {
-    const { data } = await mlb.get("/schedule", {
-      params: {
-        sportId: 1,
-        date,
-        hydrate: "probablePitcher,linescore,team,venue",
-      },
-    });
-
-    const games = data.dates?.[0]?.games ?? [];
-
-    const transformed = games.map((g) => {
-      const away     = g.teams.away;
-      const home     = g.teams.home;
-      const awayAbbr = TEAM_ABBR[away.team.id] ?? away.team.abbreviation ?? "???";
-      const homeAbbr = TEAM_ABBR[home.team.id] ?? home.team.abbreviation ?? "???";
-
-      return {
-        gamePk:   g.gamePk,
-        id:       g.gamePk,
-        status:   g.status.detailedState,
-        time:     formatGameTime(g.gameDate), // ET fallback
-        gameTime: g.gameDate,                 // raw ISO — frontend formats in user's local TZ
-        stadium:  g.venue.name,
-        away: {
-          id:   away.team.id,
-          name: away.team.name,
-          abbr: awayAbbr,
-        },
-        home: {
-          id:   home.team.id,
-          name: home.team.name,
-          abbr: homeAbbr,
-        },
-        probablePitchers: {
-          away: transformPitcher(away.probablePitcher, awayAbbr),
-          home: transformPitcher(home.probablePitcher, homeAbbr),
-        },
-      };
-    });
-
-    // Enrich probable pitchers with hand + jersey number via a single
-    // batched /people call. The schedule hydration only returns id + fullName.
-    const pitcherIds = [
-      ...new Set(
-        transformed
-          .flatMap((g) => [g.probablePitchers.away?.id, g.probablePitchers.home?.id])
-          .filter(Boolean)
-      ),
-    ];
-
-    if (pitcherIds.length > 0) {
-      try {
-        const { data: peopleData } = await mlb.get("/people", {
-          params: { personIds: pitcherIds.join(",") },
-        });
-        const peopleMap = {};
-        (peopleData.people ?? []).forEach((p) => { peopleMap[p.id] = p; });
-
-        transformed.forEach((g) => {
-          ["away", "home"].forEach((side) => {
-            const p = g.probablePitchers[side];
-            if (p && peopleMap[p.id]) {
-              p.number = peopleMap[p.id].primaryNumber ?? "?";
-              p.hand   = peopleMap[p.id].pitchHand?.code ?? "?";
-            }
-          });
-        });
-      } catch (enrichErr) {
-        // Non-fatal — pitcher hand/number stays "?" rather than failing the whole request
-        console.warn("Pitcher enrichment failed:", enrichErr.message);
-      }
+  if (isConnected()) {
+    const row = await query(
+      "SELECT games, fetched_at FROM slate_snapshots WHERE slate_date = $1",
+      [date]
+    );
+    const entry = row?.rows?.[0];
+    if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < SCHEDULE_TTL) {
+      cache.set(cacheKey, entry.games, SCHEDULE_TTL);
+      res.setHeader("X-Cache", "DB-HIT");
+      return res.json(entry.games);
     }
+  }
+
+  try {
+    const transformed = await buildSchedulePayload(date);
 
     // Cache for 1 hour — pitchers are set well before game time
-    cache.set(cacheKey, transformed, 60 * 60 * 1000);
+    cache.set(cacheKey, transformed, SCHEDULE_TTL);
     res.setHeader("X-Cache", "MISS");
     res.json(transformed);
   } catch (err) {
@@ -138,3 +161,4 @@ router.get("/", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buildSchedulePayloadForJob = buildSchedulePayload;

@@ -4,6 +4,9 @@ const fs      = require("fs");
 const path    = require("path");
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
+const { query, isConnected } = require("../services/db");
+
+const UMPIRES_TTL = 60 * 60 * 1000;
 
 const UMPIRES_DATA_PATH = path.join(__dirname, "..", "data", "umpires.json");
 
@@ -53,6 +56,19 @@ router.get("/:gamePk", async (req, res) => {
     return res.json(cached);
   }
 
+  if (isConnected()) {
+    const row = await query(
+      "SELECT data, fetched_at FROM umpire_snapshots WHERE game_pk = $1",
+      [Number(gamePk)]
+    );
+    const entry = row?.rows?.[0];
+    if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < UMPIRES_TTL) {
+      cache.set(cacheKey, entry.data, UMPIRES_TTL);
+      res.setHeader("X-Cache", "DB-HIT");
+      return res.json(entry.data);
+    }
+  }
+
   try {
     // Officials are embedded in the boxscore response — the dedicated
     // /officials endpoint is not a valid MLB Stats API path and returns 404.
@@ -78,7 +94,7 @@ router.get("/:gamePk", async (req, res) => {
     };
 
     // Cache for 1 hour — assigned day-of and doesn't change
-    cache.set(cacheKey, result, 60 * 60 * 1000);
+    cache.set(cacheKey, result, UMPIRES_TTL);
     res.setHeader("X-Cache", "MISS");
     res.json(result);
   } catch (err) {

@@ -265,15 +265,79 @@ The mock SLATE array is always present as a fallback scaffold. Live data overlay
 
 ## Future Enhancements (Logged, Not Started)
 
-- **Prediction market odds (Kalshi / Polymarket)** — The Odds API does not cover prediction markets. OddsPapi (oddspapi.io) aggregates Kalshi + Polymarket + sportsbooks in one normalized response. Could add a prediction market row to the multi-book odds table.
-- **Baseball Savant arsenal feed** — ✅ DONE. Backend routes `/api/arsenal/:pitcherId` and `/api/splits/:batterId` fetch from Savant's Statcast search CSV. Arsenal overlays into pitcher object on game open. Batter splits fetched lazily when lineup drawer opens. `good`/`note` auto-computed from live stats. Column names logged on first fetch for debugging.
-- **Prop engine** — Once arsenal data lands, generate prop confidence scores from pitcher matchup data, park factors, weather, umpire zone.
-- **Trends layer** — Prop hit rate on specific lines (e.g. Judge OVER 1.5 TB last 10 games), pitcher K prop home vs away hit rate, NRFI streaks
-- **Injury flags** — Manual flag system to mark players questionable/out
-- **Park factors** — HR factor, hit factor, K factor per stadium integrated into game card
-- **Prop tracker** — Log picks, track hit rate over time
-- **Bullpen dedicated tab** — Currently in Intel tab; full dedicated tab discussed
-- **PostgreSQL** — Pre-aggregated splits, arsenal snapshots, historical logs, park factors, umpire history
+### ✅ Completed
+- **Baseball Savant arsenal feed** — Backend routes `/api/arsenal/:pitcherId` and `/api/splits/:batterId` fetch from Savant's Statcast search CSV. Arsenal overlays into pitcher object on game open. Batter splits fetched lazily when lineup drawer opens.
+- **Prop engine** — Live confidence scores from pitcher matchup data, park factors, weather, umpire zone.
+- **Park factors** — HR factor, hit factor, K factor per stadium integrated into game card.
+- **Prop tracker** — Picks log with hit/miss grading and digest.
+- **PostgreSQL** — In progress on `feat/postgres-data-layer` branch (see `handoff-postgres-data-layer.md`).
+
+---
+
+### 🔵 High Priority — Pro Bettor Edge Features
+
+These six were identified as the most impactful additions for increasing research value and bet conviction. Ranked by leverage:
+
+**1. Public % / Sharp Money Split**
+The single highest-leverage missing feature. Currently the app shows *that* a line moved — not *why*. When public % and line movement diverge (reverse line movement), that's sharp action — one of the strongest signals in sports betting.
+- Add a "Sharp Action" row to the Odds & Line Movement card showing public bet % and public money % per side
+- Flag reverse line movement explicitly: e.g. "68% public on OVER but line dropped 0.5 — sharp UNDER"
+- Data source: [Action Network API](https://api.actionnetwork.com) (paid) or [Bet Labs](https://www.sportsinsights.com) — both provide public %/sharp % splits
+- Frontend: add to Intel tab Odds card alongside the existing multi-book table
+
+**2. Historical Prop Hit Rates**
+Empirical backing for the confidence meter. Model says 72% — but has this pitcher's K prop actually hit at that rate? Market-tested conviction is more reliable than calculated conviction alone.
+- Per pitcher: K prop over/under hit rate last 10 starts, last 30 days, season
+- Per batter: hits prop, TB prop hit rate on specific lines (e.g. O0.5 hits last 15 games)
+- NRFI: team-specific NRFI streak and hit rate
+- Data source: historical props data from [OddsJam](https://oddsjam.com) or [Bet Labs Props](https://www.sportsinsights.com) — or build from scratch by logging prop outcomes against MLB results nightly (feasible with the PostgreSQL layer)
+- Frontend: add a small "last 10: 7/10 ✓" line under each prop confidence bar
+
+**3. Closing Line Value (CLV) Tracking**
+Separates skillful picks from lucky ones. If you bet K over at -115 and the line closed at -145, you had CLV — you were ahead of the market. Tracking this over time is the only real proof of edge.
+- Add a "closing line" field to the picks log (manual entry or auto-fetched post-game)
+- Compute CLV per pick: `(closing line - your line)` in implied probability terms
+- Show CLV average in the Picks/Digest tab — positive CLV over 50+ picks = real edge
+- Frontend: add CLV column to picks table, CLV average to digest card
+
+**4. Lineup Scratch Alerts with Prop Impact**
+When a key batter is scratched 90 minutes before first pitch, every connected prop shifts. The app shows confirmed lineups but doesn't flag the change or recalculate.
+- Compare confirmed lineup to previous confirmed lineup — flag missing names as "SCRATCHED"
+- Auto-recalculate matchup scores and prop confidence for affected props
+- Surface a banner: "⚠ Soto scratched — K prop and total confidence updated"
+- Data: already available via lineup polling — just needs a diff check
+
+**5. Pitcher Last 3 Starts Breakdown**
+Season ERA is noise by May. A pro needs trajectory: is this pitcher getting better or worse right now? Velocity trending down, walk rate spiking, or BABIP masking true performance?
+- Add a "Last 3 Starts" mini-table to the pitcher card: date, opp, IP, K, BB, ER, PC
+- Add a TRENDING UP / TRENDING DOWN / STABLE flag based on ERA and K rate last 3 vs season
+- Data: already available from `/api/players/:id/stats?group=pitching` game log — just needs surfacing
+- Frontend: expand the pitcher sparkline section in the Overview tab
+
+**6. Team K% Confluence Note**
+Quick one-liner that a pro checks manually on every K prop. When team K% aligns with pitcher K rate, the over is in a great spot.
+- Add a single confluence line to the K prop card: "NYM K% 27.4% · Pitcher K rate 28.1% → Strong K environment"
+- Also surface on the Overview Lineup Matchup Intel card
+- Data: team K% from MLB Stats API season stats — already fetched for schedule, just not aggregated
+
+---
+
+### 🟡 Medium Priority
+
+- **Same-Game Parlay Correlation Guide** — Show which props from the same game are positively correlated (K over + game under) vs conflicting. SGPs are the fastest-growing betting market and most bettors don't understand correlation restrictions. Data derived from existing matchup and weather data.
+- **Prediction market odds (Kalshi / Polymarket)** — OddsPapi (oddspapi.io) aggregates Kalshi + Polymarket + sportsbooks. Could add a prediction market row to the multi-book table.
+- **Injury flags** — Manual flag system to mark players questionable/out, with downstream prop impact.
+- **UmpScorecards auto-refresh** — Daily cron job to re-fetch `backend/data/umpires.json` from UmpScorecards API. Low urgency (data is stable year-over-year) but worth automating once PostgreSQL layer is live.
+- **Trends layer** — NRFI streaks, pitcher K prop home vs away hit rate, batter hot/cold streaks.
+- **Research mode history** — Save past date slate views to DB so backtesting loads instantly without re-fetching.
+
+---
+
+### 🟢 Nice to Have
+
+- **Ballpark-specific pitcher splits** — Some pitchers perform significantly differently at specific parks. Pitcher-level park performance beyond the static HR/hit factor.
+- **F5-specific pitcher stats** — F5 is a popular market. Showing pitcher's F5 ERA/stats specifically (not just overall) would directly improve F5 prop confidence.
+- **Bullpen dedicated tab** — Currently in Intel tab; a full standalone Bullpen tab with matchup-specific reliever recommendations was discussed.
 
 ---
 
