@@ -487,3 +487,51 @@ ADMIN_SECRET=replace_me
 ---
 
 *Created April 2026 — feat/postgres-data-layer task brief*
+
+---
+
+## ✅ Implementation Status — Codex Complete (April 19 2026)
+
+All backend work has been built and verified on this branch. The following files were created/modified:
+
+- `backend/services/db.js` — pg.Pool, graceful no-op when `DATABASE_URL` unset
+- `backend/migrations/001_init.sql` — 6 tables (slate, odds, player_stats, bullpen, linescore, umpire snapshots)
+- `backend/scripts/migrate.js` — run once on deploy
+- `backend/jobs/snapshotJobs.js` — all 5 snapshot functions
+- `backend/jobs/scheduler.js` — node-cron schedules
+- `backend/routes/schedule.js` — DB-first read added
+- `backend/routes/bullpen.js` — DB-first read added + `buildGameBullpenForJob` export
+- `backend/routes/linescore.js` — DB-first read added
+- `backend/routes/umpires.js` — DB-first read added
+- `backend/server.js` — scheduler mount + admin endpoint wired
+- `backend/.env.example` — updated with `DATABASE_URL`, `ENABLE_JOBS`, `ADMIN_SECRET`
+
+Module load verified cleanly with no `DATABASE_URL` set — falls back to in-memory cache with no crash.
+
+---
+
+## 🔲 What Still Needs to Happen Before Merging to Main
+
+This branch is code-complete but **not yet wired to a real database**. Before merging:
+
+1. **Add Railway environment variables:**
+   - `DATABASE_URL` — Railway Postgres connection string (provision addon in Railway dashboard)
+   - `ENABLE_JOBS=true` — activates the cron scheduler in production
+   - `ADMIN_SECRET` — any secret string for the `/api/admin/jobs/run` endpoint
+
+2. **Run the migration once after deploy:**
+   ```bash
+   node backend/scripts/migrate.js
+   ```
+   This creates the 6 tables. Safe to run multiple times (all `CREATE IF NOT EXISTS`).
+
+3. **Trigger an initial snapshot manually** to seed the DB before cron takes over:
+   ```bash
+   curl -H "x-admin-secret: YOUR_SECRET" https://your-railway-app.up.railway.app/api/admin/jobs/run
+   ```
+
+4. **Verify DB-HIT responses** — after the snapshot runs, `GET /api/schedule` should return `X-Cache: DB-HIT`.
+
+5. **Merge to main** once verified live on Railway.
+
+This branch was intentionally kept separate from `main` until the Railway env vars are confirmed working end-to-end.
