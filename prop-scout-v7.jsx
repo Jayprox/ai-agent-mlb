@@ -5518,6 +5518,70 @@ export default function App() {
                   <div style={{ width: `${pct}%`, height: "100%", background: pct >= 55 ? "#22c55e" : pct >= 45 ? "#f59e0b" : "#ef4444", borderRadius: 2, transition: "width 0.4s" }} />
                 </div>
               )}
+
+              {/* ── ROI row ── */}
+              {graded > 0 && (() => {
+                // Flat -110 assumption: win returns +0.909u, loss costs -1u
+                const netUnits   = hits * 0.909 - misses;
+                const roiPct     = ((netUnits / graded) * 100).toFixed(1);
+                const netColor   = netUnits > 0 ? "#22c55e" : netUnits < 0 ? "#ef4444" : "#9ca3af";
+                const netLabel   = `${netUnits >= 0 ? "+" : ""}${netUnits.toFixed(1)}u`;
+
+                // Best prop type — highest hit rate with ≥3 graded picks
+                const getPropType = (p) => {
+                  if (p.propType) return p.propType;
+                  const lbl = p.label || "";
+                  if (/\bK\b|strikeout/i.test(lbl)) return "K";
+                  if (/\bF5\b|first.?5/i.test(lbl)) return "F5";
+                  if (/\bNRFI\b/i.test(lbl))        return "NRFI";
+                  if (/\bHR\b|home run/i.test(lbl)) return "HR";
+                  if (/\bRBI\b/i.test(lbl))         return "RBI";
+                  if (/TB|total base/i.test(lbl))   return "TB";
+                  if (/hit/i.test(lbl))              return "Hits";
+                  return "Other";
+                };
+                const typeMap = {};
+                propLog.filter(p => p.result !== null).forEach(p => {
+                  const t = getPropType(p);
+                  if (!typeMap[t]) typeMap[t] = { h: 0, tot: 0 };
+                  typeMap[t].tot++;
+                  if (p.result === "hit") typeMap[t].h++;
+                });
+                const bestType = Object.entries(typeMap)
+                  .filter(([, v]) => v.tot >= 3)
+                  .sort(([, a], [, b]) => (b.h / b.tot) - (a.h / a.tot))[0];
+
+                return (
+                  <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "stretch" }}>
+                    {/* Net units — big number */}
+                    <div style={{ flex: 1, background: `${netColor}10`, border: `1px solid ${netColor}30`, borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
+                      <div style={{ fontSize: 22, fontWeight: 900, color: netColor, fontFamily: "monospace", lineHeight: 1 }}>{netLabel}</div>
+                      <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 4, letterSpacing: "0.06em" }}>Net units</div>
+                      <div style={{ fontSize: 8, color: "#4b5563", marginTop: 2 }}>at −110</div>
+                    </div>
+
+                    {/* ROI % */}
+                    <div style={{ flex: 1, background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
+                      <div style={{ fontSize: 22, fontWeight: 900, color: parseFloat(roiPct) >= 0 ? "#22c55e" : "#ef4444", fontFamily: "monospace", lineHeight: 1 }}>{roiPct}%</div>
+                      <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 4, letterSpacing: "0.06em" }}>ROI</div>
+                      <div style={{ fontSize: 8, color: "#4b5563", marginTop: 2 }}>{graded} graded</div>
+                    </div>
+
+                    {/* Best prop type */}
+                    <div style={{ flex: 1, background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
+                      {bestType ? (<>
+                        <div style={{ fontSize: 16, fontWeight: 900, color: "#a78bfa", fontFamily: "monospace", lineHeight: 1 }}>{bestType[0]}</div>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: "#22c55e", marginTop: 2 }}>{Math.round((bestType[1].h / bestType[1].tot) * 100)}%</div>
+                        <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 2, letterSpacing: "0.06em" }}>Best type</div>
+                      </>) : (<>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: "#4b5563", lineHeight: 1 }}>—</div>
+                        <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 6, letterSpacing: "0.06em" }}>Best type</div>
+                        <div style={{ fontSize: 8, color: "#4b5563", marginTop: 2 }}>need 3+ per type</div>
+                      </>)}
+                    </div>
+                  </div>
+                );
+              })()}
             </Card>
 
             {/* ── TRENDS ───────────────────────────────────── */}
@@ -6221,6 +6285,7 @@ export default function App() {
                       ["↑ OVER / ↓ UNDER badge", "Line movement detected — the total shifted up or down from its opening number. Sharp bettors often drive these moves, so it's a useful fade or follow signal."],
                       ["FINAL score row", "On completed games the right column switches to results: final score, O/U result (green O or red U), ML winner + their line, and RL result (−1.5 if the favorite covered, +1.5 if the dog covered). A small NRFI ✓ or YRFI chip shows whether the first inning was scoreless."],
                       ["● LIVE  3–1 ▼6", "In-progress games show a live score chip: away–home runs, a ▲/▼ arrow for top/bottom of the inning, and the current inning number. Updates every 60 seconds."],
+                      ["⚠ SP IL", "One of the probable starting pitchers has an active IL placement in the last 14 days. Could mean a bullpen game — verify before betting K props or Outs lines."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                         <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#22c55e", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
@@ -6295,7 +6360,7 @@ export default function App() {
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {[
-                      ["Pitcher Card", "Season ERA, WHIP, K/9, BB/9, avg IP/K/PC/ER, and a sparkline of recent outings. Shows W-L record and how many of his last 5 starts were clean (0 ER). Use this for K props and Outs lines."],
+                      ["Pitcher Card", "Season ERA, WHIP, K/9, BB/9, avg IP/K/PC/ER, and a sparkline of recent outings. Shows W-L record and how many of his last 5 starts were clean (0 ER). A red ⚠ IL badge next to the pitcher name means he has an active IL placement — verify before logging any K or Outs props. Use this for K props and Outs lines."],
                       ["Lineup Matchup Intel", "Counts how many RHB, LHB, and switch hitters are in the opposing lineup vs the pitcher's hand — higher same-hand count = pitcher edge. Shows the aggregate matchup score across all opposing batters and flags the top 3 danger hitters by score. Use this for deciding whether to lean Over or Under on team runs."],
                       ["Game Lean Card", "NRFI lean derived from both SPs' clean-start rate (0 ER starts / recent starts). F5 lean from combined SP ERA. Quick directional read for F5 and NRFI props."],
                     ].map(([label, desc]) => (
@@ -6320,6 +6385,28 @@ export default function App() {
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                         <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#38bdf8", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                </Section>
+
+                <Section title="🏆 Board View — HR & Hits Ranked List">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                    The <span style={{ color: "#fbbf24", fontWeight: 700 }}>Board</span> tab ranks every confirmed batter across the full day's slate by their likelihood of hitting a home run or getting a hit. Use it to quickly spot the best individual player props on the slate without opening each game manually.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["⚾ Home Runs tab", "Scores batters using SLG (30 pts), HR pace (25 pts), park HR factor (20 pts), wind (10 pts), batting order (10 pts), and platoon hand split (5 pts). Coors Field and hitter-friendly parks push scores up significantly."],
+                      ["🎯 Hits tab", "Scores batters using season AVG (35 pts), last-7 form (25 pts), park hit factor (15 pts), batting order (15 pts), and platoon hand split (10 pts). Leadoff and 2-hole hitters get a boost."],
+                      ["Score badge", "0–95 composite score. Green (70+) = strong candidate, amber (55–69) = worth a look, red (40–54) = weaker play, gray (<40) = skip."],
+                      ["↑ WIND badge", "On the HR tab, flags games where wind is blowing out to center/right — historically adds ~5–8% to HR rates."],
+                      ["L5 dots", "Last 5 games: green dot = got a hit that game, dark dot = hitless. Quick read on recent plate production."],
+                      ["Prop line", "If sportsbook lines are loaded, shows the DraftKings/FanDuel HR or Hits over line and odds inline. Tap the card to open that game's Lineup tab for the full matchup breakdown."],
+                      ["X/Y loaded", "How many batters have stats loaded vs total batters across the slate. Fills in as lineups post and stats fetch in the background."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
                         <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
                       </div>
                     ))}
@@ -6363,6 +6450,10 @@ export default function App() {
                     ["Favor/Gm", "Average absolute run favor per game — how many runs the umpire's calls are worth cumulatively. Higher values (> 0.5) mean the ump's zone meaningfully shifts expected run scoring, which can create an edge on totals."],
                     ["ACCURATE / INCONSISTENT", "Badge on the Umpire card when real scorecard data is loaded. ACCURATE = above expected accuracy (+0.5% or better). INCONSISTENT = below expected (−1.0% or worse). Falls back to PITCHER UMP / NEUTRAL UMP when only static data is available."],
                     ["PITCHER UMP / NEUTRAL UMP", "Badge shown when real scorecard data isn't loaded yet. Based on historical K rate estimates — PITCHER UMP = wider zone, above-average strikeout environment. NEUTRAL = average zone."],
+                    ["Net Units", "Your total profit or loss in units assuming flat −110 betting. Each win returns +0.909u (the standard −110 payout), each loss costs −1u. Shown in the Pick Log header once you have graded picks."],
+                    ["ROI %", "Return on investment as a percentage — net units divided by total graded picks × 100. Positive ROI over a large sample (50+ picks) is the key long-term edge indicator. Break-even at −110 is roughly 52.4%."],
+                    ["Best Type", "The prop type (K, Hits, TB, HR, etc.) where your hit rate is highest, based on picks with at least 3 graded results. Use this to identify where the model's signals align best with your own research."],
+                    ["⚠ IL", "Injured List flag — shown next to a player name in the Lineup tab or pitcher card when that player has an active IL placement in the last 14 days. Data from the MLB Stats API transactions feed, updated every 30 minutes."],
                   ].map(([t, d]) => <Stat key={t} term={t} def={d} />)}
                 </Section>
               </>);

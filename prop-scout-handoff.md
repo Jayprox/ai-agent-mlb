@@ -2619,3 +2619,29 @@ The `DB-HIT` confirms Railway Postgres is migrated, populated, and serving the s
 - Only fires when `IS_STATS_SANDBOX = false`
 
 *Updated April 20 2026 — Session 42 complete · Injury feed live*
+
+---
+
+## ✅ Session 43 — ROI Dashboard
+
+**What was added:** A unit P&L row appended inside the existing "My Pick Log" stats card at the top of the Picks view. Only renders when `graded > 0`.
+
+**Three tiles (flex row, equal width):**
+1. **Net Units** — `hits × 0.909 − misses` (flat −110 assumption). Big monospace number, green/red. Shows `+X.Xu` or `−X.Xu`.
+2. **ROI%** — `(netUnits / graded) × 100`. Green when positive, red when negative. Shows graded count below.
+3. **Best Prop Type** — highest hit-rate prop type with ≥3 graded picks. Shows type label (K, Hits, TB, etc.) + hit rate %. Falls back to "—" + "need 3+ per type" when no type has enough data.
+
+**Unit math:** flat −110 standard (industry default). Win = +0.909u, loss = −1u. No parlay or alternate line weighting — each pick is treated as 1 unit risked.
+
+**getPropType resolver** (inline, same logic as Trends section): uses `p.propType` structured field first, then regex fallback on `p.label` for old picks logged before the structured field was added.
+
+**No new state, no new API calls** — pure derivation from existing `propLog`, `hits`, `misses`, `graded` values already computed at the top of the picks IIFE.
+
+**Backlog — closed out:**
+- ✅ ROI dashboard
+- ✅ Injury feed
+- ✅ Board view (HR + Hits)
+- Lineup lock warning — still open but low priority
+- CLV tracking — still open, requires Odds API snapshot job
+
+*Updated April 20 2026 — Session 43 complete · ROI dashboard · All major features shipped · On standby for feedback*

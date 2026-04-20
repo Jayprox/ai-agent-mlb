@@ -35,7 +35,7 @@
       "pitcherName": "Joey Cantillo",
       "playerId": null,
       "playerName": null,
-      "result": null,
+      "result": "miss",
       "userId": "user10"
     },
     {
@@ -54,7 +54,7 @@
       "pitcherName": "Joey Cantillo",
       "playerId": null,
       "playerName": null,
-      "result": null,
+      "result": "hit",
       "userId": "user10"
     }
   ]
