@@ -2292,27 +2292,47 @@ All other cache consumers use `if (cached)` truthiness checks, so `undefined` vs
 
 ---
 
-## 📋 Current Backlog (post-Session 40)
+## 📋 Current Backlog (post-Session 44)
 
-### 🔵 Medium Complexity
+### 🟢 New Features
 
-**Extended splits — complete**
-All available batter splits now live (Sessions 38–40): vs L/R, day/night, home/away. Pitcher splits: home/away + day/night. Grass/turf was attempted but the MLB Stats API `statSplits` endpoint only returns `h`, `a`, `d`, `n`, `vl`, `vr` — surface codes (`gr`/`tu`) are not available. Frontend block removed; backend fields left in place in case MLB adds them later.
+- **Lineup lock warning** — alert when a game's lineups haven't posted within 30 min of first pitch. Useful to avoid acting on stale data. Can derive from `game.time` + lineup confirmed status already tracked.
+- **CLV tracking** — log the closing line vs the line at time of pick. Positive CLV over time is the strongest edge indicator. Requires a scheduled Odds API snapshot at first pitch for each game's total/ML/RL. K prop closing lines would need the sportsbook lines endpoint called one final time just before first pitch.
 
-**CLV tracking**
-Log the closing line vs the line at time of pick. Positive CLV over time is the strongest edge indicator. Requires a scheduled Odds API snapshot at first pitch for each game's total/ML/RL. K prop closing lines would need the sportsbook lines endpoint called one final time just before first pitch.
+### ♿ Accessibility (WCAG 2.1 AA — pre-public release)
+
+Required before any public launch to avoid ADA Title III exposure. Work periodically — each item below is independently shippable.
+
+- **Font sizes** — increase minimum from 8–9px to 12px+ throughout. Most tedious fix; touches nearly every component.
+- **Color-only signals** — add shape/text backup alongside all color indicators (green/red hit-miss dots, score badge colors, streak colors). E.g. add ✓/✗ icons, pattern fills, or text labels so colorblind users get the same info.
+- **Semantic HTML** — replace interactive `<div>`/`<span>` with `<button>`, `<nav>`, `<main>`, `<section>`, `<header>`. Add `role` and `aria-*` attributes throughout.
+- **`aria-label` on icon buttons** — the `?`, ✕ close, copy, and other icon-only buttons need accessible names.
+- **Keyboard navigation** — all interactive elements need visible focus rings and keyboard event handlers (Enter/Space on custom buttons). Tab order should follow visual layout.
+- **Contrast audit** — dark gray text on dark backgrounds in several areas fails 4.5:1 ratio. Run axe or Lighthouse and fix flagged elements.
+- **`aria-live` regions** — dynamic updates (live score, AI props loading, sync status) need `aria-live="polite"` so screen readers announce changes.
+
+Estimated effort: 2–3 weeks of focused work touching the entire JSX file.
+
+### 🔒 Cybersecurity Hardening (pre-public release)
+
+Lighter lift than accessibility. Can be done in a focused sprint.
+
+- **`helmet.js`** — one-line addition to `server.js`. Gets CSP, HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy headers for free.
+- **Rate limiting** — add `express-rate-limit` on all routes, stricter limits on `/api/auth/login` and `/api/auth/register` to prevent brute force.
+- **Lock CORS** — change `origin: "*"` to the actual production domain(s) only.
+- **Move Odds API key server-side** — `VITE_ODDS_API_KEY` is currently exposed in the browser bundle. Flip player prop fetching to go through the existing `backend/routes/playerProps.js` route (already built) and remove the client-side key.
+- **Input validation** — add `zod` schema validation on all `POST`/`PATCH` body payloads (picks, notes, auth). Currently unsanitized.
+- **Migrate picks/notes to Postgres** — flat JSON files (`picks.json`, notes) are fine for personal use but not at public scale. Railway Postgres is already set up; just needs the routes migrated.
+- **Admin endpoint hardening** — `/api/admin/jobs/run` uses a single header secret. Add IP allowlist or convert to a proper cron job.
+- **Request size limits** — add `express.json({ limit: "10kb" })` to prevent large payload attacks.
+
+Estimated effort: 2–4 days for a focused backend security pass.
 
 ### ⚫ Infrastructure
 
 - **Pick persistence on Railway** — Railway Postgres is now merged into `main` and production verified for schedule snapshots. See Session 37 below. Remaining follow-up: monitor scheduled jobs, confirm tomorrow's automatic slate refresh, and eventually move user picks/notes/digest off flat JSON if desired.
 - **Sharp/public split data** — requires a paid data provider (e.g. Action Network, Bet Labs). Low priority.
 - **Prediction market odds** — Kalshi/Polymarket MLB game props. Niche but interesting signal source.
-
-### 🟢 New Features (not yet started)
-
-- **Pick history / ROI dashboard** — track win rate, units won/lost over time, breakdown by prop type (K, hit, total, NRFI, etc.). Data already exists in `picks.json` / Postgres picks table. Frontend-only addition on the picks/digest view.
-- **Injury feed** — flag IL players or recent scratches in the lineup tab. MLB Stats API has an injury endpoint. Show a warning badge on the player row and exclude them from matchup scoring.
-- **Lineup lock warning** — alert when a game's lineups haven't posted within 30 min of first pitch. Useful to avoid acting on stale data. Can derive from `game.time` + lineup confirmed status already tracked.
 
 ### 🧹 Housekeeping
 
@@ -2645,3 +2665,42 @@ The `DB-HIT` confirms Railway Postgres is migrated, populated, and serving the s
 - CLV tracking — still open, requires Odds API snapshot job
 
 *Updated April 20 2026 — Session 43 complete · ROI dashboard · All major features shipped · On standby for feedback*
+
+---
+
+## ✅ Session 44 — Board View Expanded: K Props + Outs Tabs
+
+**What changed:**
+Board tab expanded from 2 tabs (HR, Hits) to 4 tabs — added ⚡ K Props and 📋 Outs for starting pitcher rankings.
+
+**New scoring functions (module scope, after `hitBoardScore`):**
+- `kBoardScore(pStats, gamelog, pf, umpire)` → 0–95: K/9 (35 pts), umpire K rating (20 pts), whiff pitch mix (20 pts), park K factor (15 pts), L3 avg K (10 pts)
+- `outsBoardScore(pStats, gamelog, pf)` → 0–95: avg IP (35 pts), WHIP/control (25 pts), recent IP stability (20 pts), park factor (15 pts), opp K% (5 pts)
+- `computePitcherBoard(type, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps)` → top-20 SPs sorted by score
+
+**Board view JSX changes (all in `prop-scout-v7.jsx`):**
+- Tab toggle: `[["hr","⚾ HR"], ["hits","🎯 Hits"], ["k","⚡ K Props"], ["outs","📋 Outs"]]`
+- `isPitcherBoard` flag: `boardTab === "k" || boardTab === "outs"`
+- Compute branch: pitcher board uses `computePitcherBoard(...)`, batter board uses `computeBatterBoard(...)`
+- Sub-header: unique ranking description for each of the 4 tabs
+- `.map()` card branch: pitcher card shows ERA, K/9 (K tab only), WHIP, IP/gs, L3 avg K, `⚖ UMP+K` badge; batter card unchanged
+- Pitcher cards click to `setTab("pitcher")`, batter cards click to `setTab("lineup")`
+- Empty state message: "Waiting for slate to load…" for pitcher boards vs "Waiting for lineups to post…"
+
+**PLAYER_PROP_MARKETS + LABELS (done in earlier session, referenced here):**
+- Added `pitcher_outs_recorded` to `PLAYER_PROP_MARKETS` and `PLAYER_PROP_LABELS`
+
+**Pre-fetch useEffect (done in earlier session):**
+- Branches on `boardTab` — for k/outs, fetches `livePitcherStats` + `liveGameLog` for all slate SPs
+
+**Help overlay update:**
+- Board View section retitled "🏆 Board View — HR / Hits / K Props / Outs"
+- Intro text updated to describe all 4 tabs
+- Added entries: ⚡ K Props tab, 📋 Outs tab, ⚖ UMP+K badge, L3 avg K
+- Updated L5 dots entry to clarify "Batter tabs only"
+- Updated Prop line and X/Y loaded entries
+
+**Backlog — closed out this session:**
+- ✅ Board view expanded to 4 tabs (K Props + Outs for pitchers)
+
+*Updated April 20 2026 — Session 44 complete · Board K Props + Outs tabs · pitcher card render*

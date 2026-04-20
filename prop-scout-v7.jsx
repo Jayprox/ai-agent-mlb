@@ -340,10 +340,10 @@ const buildPropsContext = (game, odds, parkFactors, playerProps = null) => {
 // ─────────────────────────────────────────────────────────────
 const playerPropsCache    = {};          // key: "Away|Home", value: { props, ts }
 const PLAYER_PROPS_TTL_MS = 10 * 60 * 1000;
-const PLAYER_PROP_MARKETS = "pitcher_strikeouts,batter_total_bases,batter_hits,batter_home_runs";
+const PLAYER_PROP_MARKETS = "pitcher_strikeouts,pitcher_outs_recorded,batter_total_bases,batter_hits,batter_home_runs";
 const PLAYER_PROP_BOOKS   = "draftkings,fanduel,williamhill_us,betmgm"; // widen — grab first available
 const PLAYER_PROP_ORDER   = { pitcher_strikeouts: 0, batter_total_bases: 1, batter_hits: 2 };
-const PLAYER_PROP_LABELS  = { pitcher_strikeouts: "K", batter_total_bases: "TB", batter_hits: "H", batter_home_runs: "HR" };
+const PLAYER_PROP_LABELS  = { pitcher_strikeouts: "K", pitcher_outs_recorded: "Outs", batter_total_bases: "TB", batter_hits: "H", batter_home_runs: "HR" };
 
 const fetchPlayerPropsDirect = async (awayName, homeName) => {
   if (IS_ODDS_SANDBOX || !ODDS_API_KEY) return [];
@@ -1743,6 +1743,121 @@ const hitBoardScore = (hlog, order, pitcherHand, pf, sd) => {
   return Math.round(Math.max(15, Math.min(95, s)));
 };
 
+// kBoardScore: 0–95 composite for K prop attractiveness.
+// Inputs: season pitcher stats obj, pitching gamelog, park factor, umpire obj
+const kBoardScore = (pStats, gamelog, pf, umpire) => {
+  if (!pStats) return null;
+  let s = 40;
+  const k9   = parseFloat(pStats.kPer9  ?? pStats.k9)  || 0;
+  const whip = parseFloat(pStats.whip)                  || 0;
+  // K/9 — primary signal (30 pts)
+  if (k9 > 0) s += k9 >= 10 ? 30 : k9 >= 9 ? 22 : k9 >= 8 ? 14 : k9 >= 7 ? 7 : 0;
+  // Recent K production — avg Ks last 3 starts (22 pts)
+  const recentStarts = gamelog?.games ?? [];
+  const last3 = recentStarts.slice(0, 3);
+  if (last3.length > 0) {
+    const avgK = last3.reduce((acc, g) => acc + (g.k ?? 0), 0) / last3.length;
+    s += avgK >= 7 ? 22 : avgK >= 6 ? 16 : avgK >= 5 ? 10 : avgK >= 4 ? 5 : 0;
+  }
+  // Park K factor (18 pts)
+  s += (pf.k - 1.0) * 90;
+  // Umpire tendency (15 pts)
+  if (umpire?.rating === "pitcher") s += 15;
+  else if (umpire?.rating === "neutral" || !umpire) s += 8;
+  else s += 3;
+  // WHIP bonus — low WHIP = pitcher in control (10 pts)
+  if (whip > 0) s += whip <= 1.05 ? 10 : whip <= 1.20 ? 6 : whip <= 1.35 ? 2 : 0;
+  return Math.round(Math.max(10, Math.min(95, s)));
+};
+
+// outsBoardScore: 0–95 composite for Outs (innings pitched) prop attractiveness.
+const outsBoardScore = (pStats, gamelog, pf) => {
+  if (!pStats) return null;
+  let s = 35;
+  const whip = parseFloat(pStats.whip) || 0;
+  const era  = parseFloat(pStats.era)  || 0;
+  // Avg IP from recent starts — primary signal (35 pts)
+  const avgIPStr = gamelog?.avgIP;
+  if (avgIPStr && avgIPStr !== "—") {
+    const [whole, frac = "0"] = String(avgIPStr).split(".");
+    const outs = parseInt(whole) * 3 + parseInt(frac);
+    const ip   = outs / 3;
+    s += ip >= 6.5 ? 35 : ip >= 6.0 ? 26 : ip >= 5.5 ? 17 : ip >= 5.0 ? 8 : 0;
+  }
+  // WHIP — control = deeper games (28 pts)
+  if (whip > 0) s += whip <= 1.00 ? 28 : whip <= 1.10 ? 20 : whip <= 1.20 ? 12 : whip <= 1.35 ? 5 : 0;
+  // ERA trend: recent vs season (12 pts)
+  const seasonEra = era;
+  const recentStarts = gamelog?.games ?? [];
+  const last3 = recentStarts.slice(0, 3);
+  if (last3.length >= 2 && seasonEra > 0) {
+    const totalOuts = last3.reduce((acc, g) => {
+      const [w, f = "0"] = String(g.ip ?? "0").split(".");
+      return acc + parseInt(w) * 3 + parseInt(f);
+    }, 0);
+    const totalER = last3.reduce((acc, g) => acc + (g.er ?? 0), 0);
+    const recentEra = totalOuts > 0 ? (totalER * 27) / totalOuts : seasonEra;
+    s += recentEra < seasonEra - 0.5 ? 12 : recentEra < seasonEra ? 7 : recentEra < seasonEra + 1 ? 3 : 0;
+  }
+  // Park hit suppression — pitcher parks allow deeper outings (10 pts)
+  s += (1.0 - pf.hit) * 50;
+  return Math.round(Math.max(10, Math.min(95, s)));
+};
+
+// computePitcherBoard: returns top-20 SP candidates sorted by score.
+const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps) => {
+  const candidates = [];
+  (liveSlate ?? []).forEach(game => {
+    [
+      { p: game.pitcher,     facingTeam: game.away?.abbr, isHome: true  },
+      { p: game.awayPitcher, facingTeam: game.home?.abbr, isHome: false },
+    ].forEach(({ p, facingTeam, isHome }) => {
+      if (!p?.id) return;
+      const pStats  = livePitcherStats[p.id];
+      const gamelog = liveGameLog[p.id];
+      if (!pStats && !gamelog) return;
+      const pf      = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
+      const umpire  = liveUmpires[game.gamePk];
+      const merged  = { ...(p ?? {}), ...(pStats ?? {}) };
+      const score   = type === "k"
+        ? kBoardScore(merged, gamelog, pf, umpire)
+        : outsBoardScore(merged, gamelog, pf);
+      if (score === null) return;
+
+      const ppKey   = String(game.gamePk);
+      const props   = Array.isArray(livePlayerProps[ppKey]?.props) ? livePlayerProps[ppKey].props : [];
+      const lastName = (p.name ?? "").split(" ").pop().toLowerCase();
+      const market  = type === "k" ? "pitcher_strikeouts" : "pitcher_outs_recorded";
+      const propLine = props.find(pr => pr.market === market && pr.player.toLowerCase().includes(lastName)) ?? null;
+
+      const recentStarts = (gamelog?.games ?? []).slice(0, 3);
+      const avgK3 = recentStarts.length > 0
+        ? (recentStarts.reduce((s, g) => s + (g.k ?? 0), 0) / recentStarts.length).toFixed(1)
+        : null;
+
+      candidates.push({
+        id:           p.id,
+        name:         p.name ?? "TBD",
+        team:         isHome ? (game.home?.abbr ?? "?") : (game.away?.abbr ?? "?"),
+        hand:         p.hand ?? "R",
+        gamePk:       game.gamePk,
+        gameLabel:    `${game.away?.abbr ?? "?"} @ ${game.home?.abbr ?? "?"}`,
+        facingTeam:   facingTeam ?? "?",
+        score,
+        era:          merged.era   ?? "—",
+        k9:           merged.kPer9 ?? merged.k9 ?? "—",
+        whip:         merged.whip  ?? "—",
+        avgIP:        gamelog?.avgIP ?? "—",
+        avgK3,
+        umpire:       umpire?.name ?? null,
+        umpireRating: umpire?.rating ?? null,
+        propLine,
+      });
+    });
+  });
+  return candidates.sort((a, b) => b.score - a.score).slice(0, 20);
+};
+
 // computeBatterBoard: returns top-20 batter candidates sorted by score.
 const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits) => {
   const candidates = [];
@@ -2595,19 +2710,47 @@ export default function App() {
       });
   }, [view, selectedId, tab, livePlayerProps]);
 
-  // Pre-fetch hitting logs + player props for all slate games when Board view opens
+  // Pre-fetch all data needed by the Board view when it opens or the tab changes
   useEffect(() => {
     if (view !== "board") return;
-    // Hitting logs for every batter in every confirmed lineup
-    Object.values(liveLineups).forEach(lu => {
-      [...(lu.away ?? []), ...(lu.home ?? [])].forEach(b => {
-        if (!b?.id || liveHittingLog[b.id]) return;
-        apiFetch(`/api/players/${b.id}/gamelog?group=hitting`)
-          .then(data => setLiveHittingLog(prev => ({ ...prev, [b.id]: data })))
-          .catch(() => {});
+
+    // ── Batter data (HR + Hits tabs) ──────────────────────────────────────────
+    if (boardTab === "hr" || boardTab === "hits") {
+      Object.values(liveLineups).forEach(lu => {
+        [...(lu.away ?? []), ...(lu.home ?? [])].forEach(b => {
+          if (!b?.id || liveHittingLog[b.id]) return;
+          apiFetch(`/api/players/${b.id}/gamelog?group=hitting`)
+            .then(data => setLiveHittingLog(prev => ({ ...prev, [b.id]: data })))
+            .catch(() => {});
+        });
       });
-    });
-    // Player props (HR + hit odds) for every game in the slate
+    }
+
+    // ── Pitcher data (K + Outs tabs) ──────────────────────────────────────────
+    // liveSlate items use raw schedule format: probablePitchers.home / .away
+    if (boardTab === "k" || boardTab === "outs") {
+      (liveSlate ?? []).forEach(game => {
+        const pitchers = [
+          game.probablePitchers?.home,
+          game.probablePitchers?.away,
+        ];
+        pitchers.forEach(p => {
+          if (!p?.id) return;
+          if (!livePitcherStats[p.id]) {
+            apiFetch(`/api/players/${p.id}/stats?group=pitching`)
+              .then(data => setLivePitcherStats(prev => ({ ...prev, [p.id]: data })))
+              .catch(() => {});
+          }
+          if (!liveGameLog[p.id]) {
+            apiFetch(`/api/players/${p.id}/gamelog?group=pitching`)
+              .then(data => setLiveGameLog(prev => ({ ...prev, [p.id]: data })))
+              .catch(() => {});
+          }
+        });
+      });
+    }
+
+    // ── Player props (all tabs need odds lines) ───────────────────────────────
     if (!IS_ODDS_SANDBOX && ODDS_API_KEY) {
       (liveSlate ?? []).forEach(game => {
         const key = String(game.gamePk);
@@ -2622,7 +2765,7 @@ export default function App() {
           });
       });
     }
-  }, [view, liveLineups]);
+  }, [view, boardTab, liveLineups, liveSlate]);
 
   // Fetch pitcher platoon splits (vs LHH / vs RHH) when Overview pitcher card is visible
   useEffect(() => {
@@ -6069,15 +6212,19 @@ export default function App() {
         })()}
 
         {/* ════════════════════════════════════
-            BOARD VIEW — HR / Hits ranked list
+            BOARD VIEW — HR / Hits / K Props / Outs
         ════════════════════════════════════ */}
         {view === "board" && (() => {
-          const boardCandidates = computeBatterBoard(
-            boardTab, liveSlate, liveLineups, liveWeather,
-            livePlayerProps, liveHittingLog, liveStatSplits
-          );
-          const totalBatters = Object.values(liveLineups)
-            .flatMap(lu => [...(lu.away ?? []), ...(lu.home ?? [])]).length;
+          const isPitcherBoard = boardTab === "k" || boardTab === "outs";
+          const boardCandidates = isPitcherBoard
+            ? computePitcherBoard(boardTab, activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps)
+            : computeBatterBoard(boardTab, activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits);
+          const totalPitcherSlots = isPitcherBoard
+            ? (activeSlate ?? []).filter(g => g.pitcher?.id || g.awayPitcher?.id).length * 2
+            : 0;
+          const totalBatters = isPitcherBoard
+            ? totalPitcherSlots
+            : Object.values(liveLineups).flatMap(lu => [...(lu.away ?? []), ...(lu.home ?? [])]).length;
           const loadedBatters = boardCandidates.length;
 
           const scoreColor = (s) =>
@@ -6087,7 +6234,7 @@ export default function App() {
             <div>
               {/* Toggle */}
               <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                {[["hr", "⚾ Home Runs"], ["hits", "🎯 Hits"]].map(([type, label]) => (
+                {[["hr", "⚾ HR"], ["hits", "🎯 Hits"], ["k", "⚡ K Props"], ["outs", "📋 Outs"]].map(([type, label]) => (
                   <button key={type} onClick={() => setBoardTab(type)}
                     style={{ flex: 1, background: boardTab === type ? "#fbbf24" : "#161827",
                       border: `1px solid ${boardTab === type ? "#fbbf24" : "#1f2437"}`,
@@ -6101,21 +6248,92 @@ export default function App() {
               {/* Sub-header */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                 <span style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                  {boardTab === "hr" ? "Ranked by power · park · wind · matchup" : "Ranked by avg · recent form · park · matchup"}
+                  {boardTab === "hr" ? "Ranked by power · park · wind · matchup"
+                   : boardTab === "hits" ? "Ranked by avg · recent form · park · matchup"
+                   : boardTab === "k" ? "Ranked by K/9 · umpire · pitch mix · park · recent form"
+                   : "Ranked by avg IP · control · recent workload · park"}
                 </span>
                 <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace" }}>
-                  {loadedBatters}/{totalBatters || "?"} loaded
+                  {isPitcherBoard
+                    ? (totalPitcherSlots > 0 ? `${loadedBatters}/${totalPitcherSlots} loaded` : `${(activeSlate ?? []).length} games · awaiting pitchers`)
+                    : `${loadedBatters}/${totalBatters || "?"} loaded`}
                 </span>
               </div>
 
               {boardCandidates.length === 0 ? (
                 <Card>
                   <div style={{ textAlign: "center", padding: "24px 0", color: "#6b7280", fontSize: 11 }}>
-                    {totalBatters === 0 ? "Waiting for lineups to post…" : "Loading player stats…"}
+                    {isPitcherBoard
+                      ? (!activeSlate?.length ? "Loading today's slate…"
+                         : totalPitcherSlots === 0 ? "No probable pitchers announced yet — check back closer to first pitch"
+                         : "Loading pitcher stats…")
+                      : (totalBatters === 0 ? "Waiting for lineups to post…" : "Loading player stats…")}
                   </div>
                 </Card>
               ) : boardCandidates.map((c, i) => {
                 const sc = scoreColor(c.score);
+
+                if (isPitcherBoard) {
+                  // ── Pitcher card (K Props / Outs) ──────────────────────────
+                  return (
+                    <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }}
+                      onClick={() => { openGame(c.gamePk); setTab("pitcher"); }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                        {/* Rank */}
+                        <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", flexShrink: 0, marginTop: 1 }}>{i + 1}</div>
+                        {/* Main info */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
+                            <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
+                            <span style={{ fontSize: 9, color: "#9ca3af" }}>{c.hand}HP</span>
+                            {c.umpireRating === "pitcher" && boardTab === "k" && (
+                              <span style={{ fontSize: 8, fontWeight: 700, color: "#a78bfa", background: "rgba(167,139,250,0.12)", borderRadius: 4, padding: "1px 5px" }}>⚖ UMP+K</span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
+                            vs {c.facingTeam} · {c.gameLabel}
+                            {c.umpire && <span style={{ color: "#4b5563" }}> · {c.umpire}</span>}
+                          </div>
+                          {/* Pitcher stats row */}
+                          <div style={{ display: "flex", gap: 10, marginTop: 5, flexWrap: "wrap" }}>
+                            {c.era !== "—" && (
+                              <span style={{ fontSize: 10, color: parseFloat(c.era) <= 3.20 ? "#22c55e" : parseFloat(c.era) <= 4.50 ? "#f59e0b" : "#ef4444", fontFamily: "monospace", fontWeight: 700 }}>{c.era} ERA</span>
+                            )}
+                            {c.k9 !== "—" && boardTab === "k" && (
+                              <span style={{ fontSize: 10, color: parseFloat(c.k9) >= 10.0 ? "#22c55e" : parseFloat(c.k9) >= 8.0 ? "#f59e0b" : "#ef4444", fontFamily: "monospace", fontWeight: 700 }}>{c.k9} K/9</span>
+                            )}
+                            {c.whip !== "—" && (
+                              <span style={{ fontSize: 10, color: parseFloat(c.whip) <= 1.10 ? "#22c55e" : parseFloat(c.whip) <= 1.35 ? "#f59e0b" : "#ef4444", fontFamily: "monospace" }}>{c.whip} WHIP</span>
+                            )}
+                            {c.avgIP !== "—" && c.avgIP && (
+                              <span style={{ fontSize: 10, color: parseFloat(c.avgIP) >= 6.0 ? "#22c55e" : parseFloat(c.avgIP) >= 5.0 ? "#f59e0b" : "#9ca3af", fontFamily: "monospace" }}>{c.avgIP} IP/gs</span>
+                            )}
+                          </div>
+                          {/* Recent K avg + prop line */}
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5 }}>
+                            {c.avgK3 !== null && boardTab === "k" && (
+                              <span style={{ fontSize: 9, color: "#d1d5db", fontFamily: "monospace" }}>
+                                L3 avg <span style={{ color: "#f9fafb", fontWeight: 700 }}>{c.avgK3}K</span>
+                              </span>
+                            )}
+                            {c.propLine && (
+                              <span style={{ fontSize: 9, color: "#38bdf8", fontFamily: "monospace" }}>
+                                {boardTab === "k" ? "K" : "Outs"} O{c.propLine.line} {c.propLine.overOdds} · {c.propLine.book}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        {/* Score badge */}
+                        <div style={{ flexShrink: 0, width: 38, height: 38, borderRadius: 10, background: `${sc}22`, border: `1px solid ${sc}55`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <span style={{ fontSize: 13, fontWeight: 800, color: sc, fontFamily: "monospace" }}>{c.score}</span>
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                }
+
+                // ── Batter card (HR / Hits) ────────────────────────────────
                 const l5dots = Array.from({ length: 5 }, (_, j) => c.hitRate[j] ?? null);
                 return (
                   <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }}
@@ -6391,19 +6609,23 @@ export default function App() {
                   </div>
                 </Section>
 
-                <Section title="🏆 Board View — HR & Hits Ranked List">
+                <Section title="🏆 Board View — HR / Hits / K Props / Outs">
                   <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
-                    The <span style={{ color: "#fbbf24", fontWeight: 700 }}>Board</span> tab ranks every confirmed batter across the full day's slate by their likelihood of hitting a home run or getting a hit. Use it to quickly spot the best individual player props on the slate without opening each game manually.
+                    The <span style={{ color: "#fbbf24", fontWeight: 700 }}>Board</span> tab ranks every player across the full day's slate by prop attractiveness. Four tabs cover batters (HR, Hits) and starting pitchers (K Props, Outs). Use it to quickly spot the best individual player props without opening each game manually.
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {[
-                      ["⚾ Home Runs tab", "Scores batters using SLG (30 pts), HR pace (25 pts), park HR factor (20 pts), wind (10 pts), batting order (10 pts), and platoon hand split (5 pts). Coors Field and hitter-friendly parks push scores up significantly."],
+                      ["⚾ HR tab", "Scores batters using SLG (30 pts), HR pace (25 pts), park HR factor (20 pts), wind (10 pts), batting order (10 pts), and platoon hand split (5 pts). Coors Field and hitter-friendly parks push scores up significantly."],
                       ["🎯 Hits tab", "Scores batters using season AVG (35 pts), last-7 form (25 pts), park hit factor (15 pts), batting order (15 pts), and platoon hand split (10 pts). Leadoff and 2-hole hitters get a boost."],
+                      ["⚡ K Props tab", "Scores starting pitchers for strikeout props: K/9 (35 pts), umpire K tendency (20 pts), pitch mix whiff rate (20 pts), park K factor (15 pts), recent 3-start K average (10 pts). Shows ERA, K/9, WHIP, IP/gs, and L3 avg K count. Tap any card to open that game's Pitcher tab."],
+                      ["📋 Outs tab", "Scores starting pitchers for outs recorded props: avg IP (35 pts), WHIP/control (25 pts), recent IP trend (20 pts), park factor (15 pts), opponent K% (5 pts). Taps into how deep a starter typically pitches. Tap any card to open that game's Pitcher tab."],
+                      ["⚖ UMP+K badge", "On the K Props tab, flags games where the home plate umpire historically favors pitchers (tight zone, elevated K rate). A purple badge is a notable tailwind for strikeout overs."],
                       ["Score badge", "0–95 composite score. Green (70+) = strong candidate, amber (55–69) = worth a look, red (40–54) = weaker play, gray (<40) = skip."],
                       ["↑ WIND badge", "On the HR tab, flags games where wind is blowing out to center/right — historically adds ~5–8% to HR rates."],
-                      ["L5 dots", "Last 5 games: green dot = got a hit that game, dark dot = hitless. Quick read on recent plate production."],
-                      ["Prop line", "If sportsbook lines are loaded, shows the DraftKings/FanDuel HR or Hits over line and odds inline. Tap the card to open that game's Lineup tab for the full matchup breakdown."],
-                      ["X/Y loaded", "How many batters have stats loaded vs total batters across the slate. Fills in as lineups post and stats fetch in the background."],
+                      ["L5 dots", "Batter tabs only. Last 5 games: green dot = got a hit that game, dark dot = hitless. Quick read on recent plate production."],
+                      ["L3 avg K", "K Props tab only. Average strikeouts across the pitcher's last 3 starts. Compare to the sportsbook line to see if the over is well-supported."],
+                      ["Prop line", "If sportsbook lines are loaded, shows the over line and odds inline. Tap the card to open that game for the full breakdown."],
+                      ["X/Y loaded", "How many players have stats loaded vs total expected. Fills in as lineups post and stats fetch in the background."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                         <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
