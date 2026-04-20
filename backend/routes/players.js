@@ -173,6 +173,7 @@ router.get("/:playerId/gamelog", async (req, res) => {
             ip:       g.stat?.inningsPitched ?? "0.0",
             k:        g.stat?.strikeOuts ?? 0,
             er:       g.stat?.earnedRuns ?? 0,
+            pc:       g.stat?.numberOfPitches ?? null,
             era:      g.stat?.era ?? "0.00",
             result:   (g.stat?.wins ?? 0) > 0 ? "W" : (g.stat?.losses ?? 0) > 0 ? "L" : "ND",
           }));

@@ -271,33 +271,44 @@ Ordered from least to most complex. New user feedback has been merged with exist
 
 ### 🟢 Low Complexity — Frontend only, data already exists
 
-**1. Better pitch type matchup surfacing** *(user feedback)*
-Batter vs pitch type data already exists in the Lineup tab's expanded drawer and vulnerability bar. This is about visibility, not new data. Surface it more prominently — e.g. a callout when a batter particularly handles or struggles with the pitcher's primary pitch. Quick win.
+**1. ✅ Better pitch type matchup surfacing** *(DONE Session 35)*
+Primary Chase Pitch callout added to Lineup Matchup Intel card (Overview tab). Finds the highest-whiff pitch in the pitcher's live arsenal, shows an ELITE (≥38%) or SOLID badge, and optionally shows the aggregate lineup AVG vs that pitch type when 3+ batter splits are loaded.
 
-**2. Pitcher last 3 starts breakdown** *(pro bettor feature)*
-We already fetch the pitcher game log for the sparkline. Extend the pitcher card to show a mini table: last 3 starts with ER, IP, K, and PC per outing. Gives bettors a recency picture beyond season ERA. Frontend-only change.
+**2. ✅ Pitcher last 3 starts breakdown** *(DONE Session 35)*
+7-column mini table added to pitcher card (Overview tab): OPP | Date | IP | K | ER | RES | PC. K values shown in purple, ER color-coded green/amber/red. `pc` field added to `backend/routes/players.js` pitching gamelog objects (`numberOfPitches`).
 
-**3. Team K% confluence note** *(pro bettor feature)*
-Use the pitcher's K/9 and the opposing lineup's aggregate matchup score (already computed) to surface a single callout like "High K environment — pitcher K/9 10.2, lineup weak vs breaking balls." No new data needed.
+**3. ✅ Team K% confluence note** *(DONE Session 35)*
+K% confluence callout shown below the Primary Chase Pitch section. Two thresholds:
+- Green: K/9 ≥ 9.0 AND lineup avg matchup score ≤ 45 → "High K environment"
+- Amber/Red: K/9 ≤ 6.5 AND lineup avg matchup score ≥ 42 → "Contact matchup"
 
 ---
 
 ### 🟡 Medium Complexity — New data, single API call
 
-**4. Out-of-position player flag** *(user feedback)*
-When live lineups are fetched, the MLB API returns each player's defensive position for that game. Compare it to their primary position from their profile. If they differ, badge the batter row in the Lineup tab — e.g. `⚠️ 2B (norm. SS)`. Signals roster moves, fatigue substitutions, or platoon decisions that affect lineup construction. No new backend route needed — data is already in the lineup response.
+**4. ✅ Out-of-position player flag** *(DONE Session 35)*
+`⚠ {pos} (norm. {primaryPos})` badge in Lineup tab batter rows when a player is fielding outside their primary position. DH excluded (not meaningful). Same-outfield moves (LF↔CF↔RF) excluded — these are platoon decisions, not meaningful flags. Data source: `primaryPos` from `player.person.primaryPosition?.abbreviation` in the boxscore hydrate — requires `?hydrate=person` on the lineups endpoint.
 
-**5. UmpScorecards auto-refresh** *(backlog)*
-Small Node script that re-fetches `backend/data/umpires.json` from the UmpScorecards API once per day. Low urgency — umpire data is stable year-over-year. Plan: Cowork scheduled task or node-cron job. Already designed conceptually; just needs the script written and wired.
+Backend change: `backend/routes/lineups.js` updated — URL changed from `?hydrate=person` (was missing) — added `primaryPos: player.person.primaryPosition?.abbreviation ?? null` to `transformTeam`.
 
-**6. Pitcher vs L/R splits** *(user feedback + backlog)*
-Attempted early season via MLB Stats API — returned empty data (insufficient AB sample). Worth revisiting mid-May/June when sample sizes build. Alternatively, Baseball Savant has reliable platoon splits year-round via the same CSV endpoint already used for batter splits (`/api/splits/:batterId` pattern). Would show pitcher ERA/WHIP vs LHH and RHH on the pitcher card. Same complexity as the batter splits route already built.
+**5. UmpScorecards auto-refresh** *(backlogged by user choice)*
+Small Node script + Cowork scheduled task. Low urgency — umpire data is stable year-over-year. Skipped for now.
+
+**6. ✅ Pitcher vs L/R splits** *(DONE Session 35)*
+New backend route `GET /api/pitcher-splits/:pitcherId` — `backend/routes/pitcherSplits.js`. Two parallel Savant CSV fetches (`stand=L`, `stand=R`). Aggregates pitch-level events (HIT_EVENTS/K_EVENTS/OUT_EVENTS/walk/HBP), requires min 15 PA. Returns `{ vsL, vsR, pitcherId, season }` with `{ avg, kPct, bbPct, pa }` per side. Falls back to prior year if current season has < 15 PA. 6-hour cache.
+
+Frontend: compact two-box card (vs LHH / vs RHH) in pitcher card between stat boxes and W/L record line. AVG color-coded: **green ≤ .220** (pitcher dominant), **red ≥ .280** (batters hit hard), white = neutral. Shows as `.247 AVG` with K%, BB%, PA below. Loading skeleton shown while fetching. "Platoon splits unavailable (small sample)" fallback if both sides return null.
+
+Mounted in `backend/server.js`:
+```js
+app.use("/api/pitcher-splits", require("./routes/pitcherSplits")); // Baseball Savant: pitcher vs LHH/RHH
+```
 
 ---
 
 ### 🔵 Higher Complexity — AI integration
 
-**7. AI Trends Summary** *(planned — replaces Game Notes)*
+**7. ✅ AI Trends Summary** *(DONE Session 34 — replaces Game Notes)*
 Replace the existing Game Notes section with an Anthropic API-generated narrative per game. Pass the full game object (pitchers, bullpen, weather, umpire, odds, lineup) as structured context. Model returns a 1–2 paragraph bettor-focused summary covering pitcher trends, bullpen fatigue, weather impact, umpire tendency, and standout matchups. Data-only — no web search. Key implementation notes:
 - Cache per `gamePk` (2–4 hour TTL) — do not fire on every page load
 - Use Claude Haiku (fast, cheap, sufficient for short narrative)
@@ -307,7 +318,7 @@ Replace the existing Game Notes section with an Anthropic API-generated narrativ
 **8. Injury flags + Lineup scratch alerts** *(user feedback + pro bettor feature — same feature)*
 Real-time injury and lineup scratch news is the same problem. Static manual flags are too slow to be useful. Best path: let the AI-powered Props Tab (item #9) handle this via web search — injury context flows in automatically when the AI searches for player news. Out-of-position flag (item #4) covers the in-game roster signal without needing a separate injury feed.
 
-**9. AI-powered Props Tab** *(planned — overhauls Props tab)*
+**9. ✅ AI-powered Props Tab** *(DONE Session 34 — AI Analysis section in Props tab)*
 Full Props tab overhaul using Anthropic API + web search. Pass the full game object as structured context, then let the AI search for real-time news (injuries, scratches, beat reporter notes) to supplement. Returns structured JSON:
 ```json
 [{ "prop": "Judge OVER 1.5 TB", "odds": "-115", "confidence": 68, "reasoning": "..." }]
@@ -1790,11 +1801,11 @@ Key merges:
 
 ---
 
-### Three Planned Updates (In Progress)
+### Three Planned Updates
 
-1. ✅ Move First Inning Tendencies → Overview tab — **DONE this session**
-2. 🔵 AI Trends Summary (replace Game Notes) — see backlog item #7
-3. 🔵 AI-powered Props Tab — see backlog item #9
+1. ✅ Move First Inning Tendencies → Overview tab — **DONE Session 33**
+2. ✅ AI Trends Summary (replace Game Notes) — **DONE Session 34**
+3. ✅ AI-powered Props Tab — **DONE Session 34**
 
 ---
 
@@ -1806,3 +1817,523 @@ Key merges:
 ---
 
 *Updated April 19 2026 — Session 33 complete · Overview cleanup · F5/NRFI separation · Backlog consolidated and reprioritized*
+
+---
+
+## ✅ Session 34 — AI Trends Bug Fix · AI-powered Props Tab
+
+All changes in `prop-scout-v7.jsx` and `backend/` unless noted.
+
+---
+
+### AI Trends Bug Fix — `apiFetch` → `apiMutate`
+
+**Problem:** AI Trends summary appeared briefly then disappeared every time.
+
+**Root cause:** The trends fetch was calling `apiFetch(path, options)` — but `apiFetch` only accepts `(path)` and silently ignores any second argument. Every trends request was sent as a GET instead of POST. The backend has no GET route for `/api/trends/:gamePk`, so it failed, the `.catch()` ran, and `liveTrends[key]` was set to `null`, blanking the card.
+
+**Fix:** One-line change — replaced `apiFetch(...)` with `apiMutate(path, "POST", { context })`.
+
+`apiMutate` signature: `(path, method, body)` — handles Content-Type header, auth token, and `JSON.stringify` internally.
+
+**Key distinction to remember:**
+- `apiFetch(path)` — GET only, one argument, ignores options
+- `apiMutate(path, method, body)` — POST/PATCH/DELETE with JSON body
+
+---
+
+### AI-powered Props Tab (Item #3)
+
+Full AI Analysis section added below the existing deterministic props in the Props tab.
+
+#### Backend — `backend/routes/props.js` (new file)
+
+```
+POST /api/props/:gamePk
+Body: { context: string }
+Returns: { props: [...], gamePk: number }
+Cache TTL: 45 minutes
+Model: claude-haiku-4-5-20251001
+Max tokens: 1000
+```
+
+Same lazy-init Anthropic client pattern as `trends.js`. System prompt instructs the model to return **only** a JSON array — no markdown fences, no wrapper text. Backend extracts the array via regex (`/\[[\s\S]*\]/`) to handle any stray formatting, then validates each prop object has all required fields before caching.
+
+Prop object shape:
+```json
+{
+  "label": "Game Total UNDER 8.5",
+  "propType": "Total",
+  "confidence": 58,
+  "lean": "UNDER",
+  "positive": false,
+  "reason": "ATL bullpen carries 187pc fatigue vs PHI's fresh Grade A– pen, suppressing late-inning offense."
+}
+```
+
+Prop types: `"K"` | `"Total"` | `"NRFI"` | `"F5"` | `"Outs"` | `"RL"`
+
+`positive` rules: OVER/NRFI/OVER F5/HOME -1.5/AWAY -1.5 → `true`; UNDER/YRFI/UNDER F5 → `false`
+
+The prompt instructs the model to **omit a prop entirely** rather than guess — only include if confidence is genuinely ≥ 55.
+
+Mounted in `backend/server.js`:
+```js
+app.use("/api/props", require("./routes/props")); // Anthropic: AI-generated prop recommendations per game
+```
+
+#### Frontend — `prop-scout-v7.jsx`
+
+**`buildPropsContext(game, odds, parkFactors)`** — new module-level helper (after `buildTrendsContext`). Richer than the trends context builder — includes:
+- Both SP full stat lines + arsenal (pitch type, usage %, whiff %)
+- Weather (temp, wind, conditions, rain chance)
+- Umpire (K rate, BB rate, tendency)
+- Both bullpen grades with top 3 relievers + pitches/rest
+- First-inning scoring data (NRFI lean, %, both teams)
+- Lineup handedness (RHB/LHB count vs SP hand)
+- Odds (O/U, ML, RL)
+- Park factors (HR/hit multiplier)
+
+**New state:**
+```js
+const [liveAiProps,  setLiveAiProps]  = useState({});  // gamePk → [...] | "loading" | null
+const aiPropsFetched = useRef(new Set());               // stale-closure guard
+```
+
+**useEffect** — fires when `tab === "props"`, same `useRef` guard pattern as `trendsFetched` to prevent stale-closure re-fetches.
+
+**Props tab render** — "AI ANALYSIS" section with purple `AI` badge appears below existing prop cards:
+- Loading: pulsing purple dot + "Analyzing game data…"
+- Loaded: prop cards with same `ConfBar`, `LeanBadge`, parlay 🔗, and log ＋ buttons as deterministic props
+- Failure: silent null (no error state shown)
+
+AI props fully integrate with the parlay slip and pick log — they use the same `logPick`, `isLogged`, and `parlayLabels` state.
+
+#### What line sources the AI uses
+- **Game total O/U line** (e.g. "8.5") — comes from The Odds API data passed in context
+- **K prop line** — still from the deterministic `computeLiveProps` engine (K/9 × avgIP derived estimate), not a sportsbook line
+- **NRFI/YRFI, F5, RL** — AI-generated lean, no sportsbook line attached
+
+**Backlogged:** Sportsbook player prop lines (actual DK/FD K/TB props via The Odds API `markets=pitcher_strikeouts,batter_total_bases` endpoint). Would give the AI real market lines to anchor against instead of computed estimates. Costs additional API quota.
+
+---
+
+### Backlog Update
+
+Items #7 (AI Trends) and #9 (AI Props) in the Future Enhancements section are now complete. New backlog addition:
+
+**Sportsbook prop lines** *(medium complexity)*
+Pull actual sportsbook K/TB/hits prop lines from The Odds API using `markets=pitcher_strikeouts,batter_total_bases,batter_hits`. Pass the real market lines (e.g. "Cole K's O/U 7.5 at -115") in the props context so the AI anchors its recommendations against actual listed lines instead of computed estimates. Costs additional API quota per request.
+
+---
+
+### Files Changed in Session 34
+
+- `prop-scout-v7.jsx`
+- `backend/routes/props.js` (new)
+- `backend/server.js` (mounted `/api/props`)
+- `prop-scout-handoff.md`
+
+---
+
+*Updated April 19 2026 — Session 34 complete · AI Trends bug fix · AI-powered Props Tab shipped*
+
+---
+
+## ✅ Session 35 — Low Complexity Backlog Items (1–3) + Medium Complexity Items (4, 6)
+
+All changes in `prop-scout-v7.jsx` and `backend/` unless noted.
+
+---
+
+### Item 1 — Primary Chase Pitch Callout (Pitch Type Matchup Surfacing)
+
+Added to the **Lineup Matchup Intel card** in the Overview tab, below the danger batters list.
+
+- Scans `activePitcher.arsenalLive` for the highest-whiff pitch
+- Shows **ELITE** badge (≥ 38% whiff) or **SOLID** badge otherwise
+- When 3+ lineup batters have splits loaded (`batterSplits` state), computes and shows the lineup's aggregate AVG vs that pitch type
+- If no arsenal live data, the section doesn't render
+
+---
+
+### Item 2 — Last 3 Starts Mini Table
+
+Added to the **pitcher card** in the Overview tab, between the ERA sparkline and the "Last 3 ERA" summary line.
+
+- 7-column CSS grid: **OPP | Date | IP | K | ER | RES | PC**
+- K values: purple monospace
+- ER: green (0), amber (1–2), red (3+)
+- RES (win/loss/no-decision): green W, red L, muted ND
+- PC (pitch count): from `g.pc` — added `pc: g.stat?.numberOfPitches ?? null` to `backend/routes/players.js` pitching gamelog objects
+
+**Backend change:** `backend/routes/players.js` — added `pc` field to each game in the pitching gamelog response.
+
+---
+
+### Item 3 — K% Confluence Note
+
+Added below the Primary Chase Pitch section in the Lineup Matchup Intel card.
+
+**Thresholds:**
+- **Green** ("High K environment — pitcher K/9 X.X, lineup weak vs breaking balls"): K/9 ≥ 9.0 AND avg lineup matchup score ≤ 45
+- **Amber/Red** ("Contact matchup — pitcher K/9 X.X, lineup makes solid contact"): K/9 ≤ 6.5 AND avg lineup matchup score ≥ 42
+
+Both conditions must be met for the note to show. Neither threshold alone is sufficient. Values tuned after testing with real pitchers (Painter K/9 10.05, Keller K/9 5.90).
+
+---
+
+### Item 4 — Out-of-Position Player Flag
+
+Added `⚠ {pos} (norm. {primaryPos})` badge to each batter row in the **Lineup tab**.
+
+**Logic:**
+```js
+const oop = b.primaryPos && b.pos !== b.primaryPos
+  && b.pos !== "DH" && b.primaryPos !== "DH"
+  && !(OF.has(b.pos) && OF.has(b.primaryPos));  // same-outfield moves not flagged
+```
+
+Outfield set: `LF`, `CF`, `RF` — rotations within the outfield are platoon decisions, not meaningful flags.
+
+**Backend change — `backend/routes/lineups.js`:**
+- URL changed to `?hydrate=person` (was missing the hydrate param)
+- Added `primaryPos: player.person.primaryPosition?.abbreviation ?? null` to `transformTeam()`
+
+---
+
+### Batter Hand Fix — Overview Danger Batters (`?H`)
+
+**Problem:** Overview tab danger batter rows showed `?H` for batting hand.
+
+**Root cause:** The hand was read from `b.hand` (raw lineup data from boxscore, often null/`?`), not from `liveHittingLog` which has reliable `batSide` data from the `/people/:id` call.
+
+**Fix:** Same pattern already used in the Lineup tab — now also applied to Overview danger batters:
+```js
+const hlog = liveHittingLog[b.id];
+const hand = (hlog?.hand && hlog.hand !== "?") ? hlog.hand : (b.hand ?? "?");
+```
+
+---
+
+### Item 6 — Pitcher vs L/R Splits
+
+#### Backend — `backend/routes/pitcherSplits.js` (new file)
+
+```
+GET /api/pitcher-splits/:pitcherId
+Cache TTL: 6 hours
+```
+
+Two parallel Baseball Savant CSV fetches — `stand=L` and `stand=R` — via the same Statcast CSV endpoint used by `splits.js`. Aggregates pitch-level events:
+- `HIT_EVENTS`: single, double, triple, home_run
+- `K_EVENTS`: strikeout, strikeout_double_play
+- `OUT_EVENTS`: field_out, grounded_into_double_play, force_out, etc.
+- Also: walk, hit_by_pitch
+
+Computes per handedness: `avg`, `kPct`, `bbPct`, `pa`. Minimum 15 PA required — returns `null` for that side if sample too small. Falls back to prior year if current season has no qualifying data.
+
+Return shape:
+```json
+{ "pitcherId": 669456, "season": 2026, "vsL": { "avg": ".261", "kPct": "24%", "bbPct": "8%", "pa": 47 }, "vsR": { "avg": ".218", "kPct": "31%", "bbPct": "6%", "pa": 89 } }
+```
+
+Mounted in `backend/server.js`:
+```js
+app.use("/api/pitcher-splits", require("./routes/pitcherSplits")); // Baseball Savant: pitcher vs LHH/RHH
+```
+
+#### Frontend — `prop-scout-v7.jsx`
+
+**New state:**
+```js
+const [pitcherPlatoonSplits, setPitcherPlatoonSplits] = useState({});
+// pitcherId → { vsL, vsR, season } | "loading" | null
+```
+
+**useEffect** — fires when `view === "game"` and `pitcherSide` changes. Lazy fetch with `key in pitcherPlatoonSplits` guard to avoid re-fetching.
+
+**Pitcher card render** — compact two-box row (vs LHH / vs RHH) between the stat boxes and W/L record line:
+- AVG color: green ≤ .220 (pitcher dominant), red ≥ .280 (batters hit hard), white = neutral range
+- Format: `.247 AVG` (monospace, 11px bold)
+- Sub-line: `{kPct} K · {bbPct} BB · {pa} PA`
+- **Loading skeleton**: "loading…" shown while fetch is in-flight (was previously invisible)
+- **Small sample fallback**: italic "Platoon splits unavailable (small sample)" if both vsL and vsR are null
+
+---
+
+### Backlog Status After Session 35
+
+All three 🟢 Low Complexity items: **COMPLETE**
+Medium complexity items 4 and 6: **COMPLETE**
+Item 5 (UmpScorecards auto-refresh): **Backlogged** — user chose to skip for now
+
+Remaining open items:
+- **Item 8** (Injury flags / lineup scratch alerts) — covered by AI Props web search when that's upgraded
+- **AI Props sportsbook lines** — pull actual DK/FD K/TB prop lines via Odds API `markets=pitcher_strikeouts,batter_total_bases` to give AI real market lines to anchor against
+- ⚫ Infrastructure items (PostgreSQL, CLV tracking, sharp/public splits, prediction market odds)
+
+---
+
+### Files Changed in Session 35
+
+- `prop-scout-v7.jsx`
+- `backend/routes/players.js` (added `pc` field to pitching gamelog)
+- `backend/routes/lineups.js` (added `?hydrate=person`, added `primaryPos` field)
+- `backend/routes/pitcherSplits.js` (new file)
+- `backend/server.js` (mounted `/api/pitcher-splits`)
+- `prop-scout-handoff.md`
+
+---
+
+*Updated April 19 2026 — Session 35 complete · Backlog items 1–4 + 6 shipped · Platoon splits loading skeleton + fallback UX*
+
+---
+
+## ✅ Session 36 — Sportsbook Lines + Tavily Web Search + Cache Bug Fix
+
+All changes in `prop-scout-v7.jsx` and `backend/` unless noted.
+
+---
+
+### Sportsbook Prop Lines (Client-Side Fetch)
+
+Added a **SPORTSBOOK LINES** section to the Props tab, showing real DraftKings/FanDuel player prop lines for K, Total Bases, and Hits.
+
+#### Architecture decision — client-side fetch
+
+Initially built as a backend route (`backend/routes/playerProps.js`), but moved to a direct client-side fetch after discovering `ODDS_API_KEY` was not in `backend/.env` (the frontend uses `VITE_ODDS_API_KEY` already set in Vite's env). Avoids adding another key to the backend and reuses the event IDs already fetched during the existing `fetchOdds` call.
+
+#### `oddsCache` — added `eventIdMap`
+
+```js
+const oddsCache = { data: null, ts: 0, remaining: null, used: null, fetchedAt: null, error: null, eventIdMap: null };
+```
+
+In `fetchOdds`, the event ID from the Odds API response is now stored per game key:
+
+```js
+const eventIdMap = {};
+games.forEach(g => {
+  eventIdMap[`${g.away_team}|${g.home_team}`] = g.id;
+  // ... existing mapping
+});
+oddsCache.eventIdMap = eventIdMap;
+```
+
+#### `fetchPlayerPropsDirect` — new module-level function
+
+```js
+const playerPropsCache    = {};
+const PLAYER_PROPS_TTL_MS = 10 * 60 * 1000;
+const PLAYER_PROP_MARKETS = "pitcher_strikeouts,batter_total_bases,batter_hits";
+const PLAYER_PROP_BOOKS   = "draftkings,fanduel,williamhill_us,betmgm";
+
+const fetchPlayerPropsDirect = async (awayName, homeName) => {
+  if (IS_ODDS_SANDBOX || !ODDS_API_KEY) return [];
+  const cacheKey = `${awayName}|${homeName}`;
+  const cached   = playerPropsCache[cacheKey];
+  if (cached && (Date.now() - cached.ts) < PLAYER_PROPS_TTL_MS) return cached.props;
+  if (!oddsCache.eventIdMap) await fetchOdds();
+  const eventId = oddsCache.eventIdMap?.[cacheKey];
+  if (!eventId) { playerPropsCache[cacheKey] = { props: [], ts: Date.now() }; return []; }
+  const res = await fetch(
+    `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${eventId}/odds` +
+    `?apiKey=${ODDS_API_KEY}&markets=${PLAYER_PROP_MARKETS}&regions=us&oddsFormat=american&bookmakers=${PLAYER_PROP_BOOKS}`
+  );
+  if (!res.ok) throw new Error(`Odds API ${res.status}`);
+  // ... parse outcomes into flat prop list, sort, cache, return
+};
+```
+
+#### `livePlayerProps` state + useEffect
+
+```js
+const [livePlayerProps, setLivePlayerProps] = useState({});
+// gamePk → undefined (not fetched) | "loading" | { props } | { props, error: true }
+const playerPropsFetched = useRef(new Set());
+```
+
+useEffect fires when `tab === "props"` — same lazy-fetch pattern with `useRef` guard. Sets `"loading"` state, then resolves to `{ props }` on success or `{ props: [], error: true }` on failure (never `null` — keeps section visible).
+
+#### `ppReady` — timing guard for AI props
+
+```js
+const ppReady = IS_ODDS_SANDBOX || (ppState !== undefined && ppState !== "loading" && typeof ppState === "object");
+```
+
+AI props useEffect depends on `[..., livePlayerProps]` so it re-fires when player props load. `ppReady` blocks AI fetch until player props are settled, so the AI has real market lines in context.
+
+#### Props tab render — SPORTSBOOK LINES section
+
+- Shows between Prop Confidence Meters and AI Analysis
+- Groups props by market: K lines first, then TB, then H
+- Each row: player name · line · over/under odds · book name
+- "No player prop lines posted yet" shown if `props` is empty (early in day or sandbox)
+
+---
+
+### Tavily Web Search Integration
+
+Added real-time injury and lineup news to the AI Props context via Tavily.
+
+#### Backend — `backend/routes/props.js`
+
+**`tavilySearch(query)` helper:**
+
+```js
+const tavilySearch = async (query) => {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) return null; // key not configured — skip silently
+
+  const cacheKey = `tavily:${Buffer.from(query).toString("base64").slice(0, 40)}`;
+  const cached   = cache.get(cacheKey);
+  if (cached !== undefined) return cached; // null is a valid cached result (prior failure)
+
+  try {
+    const res = await axios.post("https://api.tavily.com/search", {
+      api_key: apiKey, query,
+      search_depth: "basic", max_results: 3, include_answer: true,
+    }, { timeout: 8000 });
+    const answer = res.data.answer ?? null;
+    cache.set(cacheKey, answer, SEARCH_TTL); // 20-minute TTL
+    return answer;
+  } catch (err) {
+    cache.set(cacheKey, null, SEARCH_TTL);
+    return null;
+  }
+};
+```
+
+**3 parallel searches** before each AI call:
+1. Away SP injury status
+2. Home SP injury status
+3. `{awayAbbr} {homeAbbr}` lineup / scratch news
+
+News injected into context:
+```
+Real-time news (factor into confidence if relevant):
+1. [Tavily answer for SP 1]
+2. [Tavily answer for SP 2]
+3. [Tavily answer for lineup news]
+```
+
+Returns `{ props, gamePk, searchUsed }`. `searchUsed: true` when at least one Tavily answer was non-null.
+
+**Setup:** Add `TAVILY_API_KEY=tvly-…` to `backend/.env`. Free tier at tavily.com. Gracefully skips if key is absent.
+
+#### Frontend — `prop-scout-v7.jsx`
+
+`liveAiProps` state now stores the full response object `{ props, searchUsed }` instead of just the array:
+
+```js
+const result = props ? { props, searchUsed: d.searchUsed ?? false } : null;
+setLiveAiProps(prev => ({ ...prev, [key]: result }));
+```
+
+Reads:
+```js
+const aiProps    = Array.isArray(aiState?.props) ? aiState.props : [];
+const searchUsed = aiState?.searchUsed === true;
+```
+
+Blue **WEB** badge shown in AI ANALYSIS header when `searchUsed === true`:
+```jsx
+{searchUsed && <span style={{ fontSize: 8, fontWeight: 700, color: "#38bdf8", ... }}>WEB</span>}
+```
+
+---
+
+### Cache Bug Fix — `cache.get()` returning `null` for missing keys
+
+**Root cause:** `backend/services/cache.js` returned `null` for a cache miss:
+
+```js
+if (!entry) return null; // BUG — should be undefined
+```
+
+But `tavilySearch` checked `if (cached !== undefined) return cached;` to distinguish "not cached yet" from "cached as null (prior failure)". Since `null !== undefined` is `true`, **every Tavily call returned `null` immediately on the first hit** — the API was never reached.
+
+**Fix — `backend/services/cache.js`:**
+
+```js
+// Before
+if (!entry) return null;
+if (Date.now() > entry.expiresAt) { delete store[key]; return null; }
+// After
+if (!entry) return undefined;
+if (Date.now() > entry.expiresAt) { delete store[key]; return undefined; }
+```
+
+All other cache consumers use `if (cached)` truthiness checks, so `undefined` vs `null` for a miss is backward compatible. Only `tavilySearch` needed the `undefined` signal.
+
+---
+
+### Backend route kept but unused
+
+`backend/routes/playerProps.js` was built and mounted at `/api/player-props` in `server.js` as a backend alternative for sportsbook lines. The frontend switched to client-side fetch instead (see above), but the route is still registered and functional if needed.
+
+---
+
+### Files Changed in Session 36
+
+- `prop-scout-v7.jsx`
+- `backend/routes/props.js` (Tavily integration + `searchUsed` in response)
+- `backend/routes/playerProps.js` (new — backend route, currently unused by frontend)
+- `backend/server.js` (mounted `/api/player-props`)
+- `backend/services/cache.js` (bug fix: `null` → `undefined` for cache misses)
+- `backend/.env` (user added `TAVILY_API_KEY`)
+- `prop-scout-handoff.md`
+
+---
+
+*Updated April 19 2026 — Session 36 complete · Sportsbook Lines · Tavily web search · cache.get() bug fix*
+
+---
+
+## 📋 Current Backlog (post-Session 36)
+
+### 🔵 Medium Complexity
+
+**Boxscore view + auto-grading (planned together)**
+Build these as one feature — the boxscore data serves both purposes.
+
+- **New BOXSCORE tab** — sits alongside Overview, Lineup, Arsenal, Intel, Props, Bullpen. Works for live AND completed games (MLB boxscore endpoint is real-time, same endpoint, partial data while in progress).
+  - **Batting section** — hit/AB/RBI/HR per batter, both teams
+  - **Pitching section** — IP/K/ER/BB per pitcher. SP line + any relievers who've appeared
+  - **Linescore grid** — runs per inning (1–9+), R/H/E totals. Complements the live score chip already on slate cards.
+  - Live games show partial boxscore through current inning. Polling reuses the existing 60s linescore interval — just add boxscore to the same cycle.
+- **Auto-grading K and Outs props** — SP strikeout and outs totals come from the same boxscore call. Once boxscore is fetched, grading K and Outs picks is trivial.
+- **Auto-grading other prop types** — Total, NRFI/YRFI, Runline, and F5 can all be graded from the existing linescore data (inning-by-inning scores already available). No new API calls needed for these.
+- **Pick log UI** — after grading, show hit ✓ / miss ✗ chips on logged picks. The 7-day digest already filters to graded picks for win rate — it's just starved for data.
+
+Grading trigger: when linescore polling detects `status === "Final"`, queue a grading pass for all ungraded picks for that gamePk.
+
+Line parsing: the numeric line is embedded in the pick label ("Cole K's O/U **7.5**") — parse via regex or store `line` as a separate field on the pick object at log time.
+
+API: `GET /api/v1/game/{gamePk}/boxscore` — free MLB Stats API, no auth. Already used by the umpires route so the pattern exists. Add a new `backend/routes/boxscore.js` with 60s TTL for live games, 24h TTL for finals.
+
+**Extended splits view (after boxscore session)**
+Currently we have pitcher vs L/R (Baseball Savant) and batter vs pitch type (Baseball Savant). Expand to cover the full Yahoo-style splits suite using the MLB Stats API `statSplits` endpoint already used elsewhere — no new keys or data sources needed.
+
+Priority order:
+1. **Pitcher Home/Away splits** — some starters are dramatically different at home vs road. Add to pitcher card in Overview alongside the existing vs L/R row.
+2. **Batter vs L/R splits** — we have this for pitchers but not batters. Add to Lineup drawer expanded view. Most directly useful for matchup analysis.
+3. **Pitcher Day/Night splits** — secondary signal, easy to add once Home/Away is wired.
+4. **Batter Home/Away, Day/Night, Grass/Turf** — lower priority, nice completeness but less actionable than L/R.
+
+API: `/people/{playerId}/stats?stats=statSplits&group=hitting&season={yr}` (batters) and `group=pitching` (pitchers). Returns all split categories in one call. Display full slash line (AVG/OBP/SLG/OPS) per split, same style as Yahoo splits tab.
+
+**CLV tracking**
+Log the closing line vs the line at time of pick. Positive CLV over time is the strongest edge indicator. Requires a scheduled Odds API snapshot at first pitch for each game's total/ML/RL. K prop closing lines would need the sportsbook lines endpoint called one final time just before first pitch.
+
+### ⚫ Infrastructure
+
+- **Pick persistence on Railway** — picks/notes currently stored as flat JSON, wiped on every redeploy. Upgrade to SQLite (zero-config, single file) or Railway's Postgres add-on for durable storage.
+- **Sharp/public split data** — requires a paid data provider (e.g. Action Network, Bet Labs). Low priority.
+- **Prediction market odds** — Kalshi/Polymarket MLB game props. Niche but interesting signal source.
+
+### 🧹 Housekeeping
+
+- **Remove or document `backend/routes/playerProps.js`** — built as a backend alternative for sportsbook lines, frontend switched to client-side fetch instead. Route is mounted but unused. Either delete or add a comment explaining why it exists.
+- **Verify sportsbook lines reach AI context** — confirm that when DK/FD K/TB lines are posted pre-game, `buildPropsContext` passes them through and the AI's K prop reason cites the actual market line (e.g. "Cole K's 7.5 at -115"). Test with a pre-game window tomorrow.
