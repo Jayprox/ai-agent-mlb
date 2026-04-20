@@ -335,70 +335,36 @@ const buildPropsContext = (game, odds, parkFactors, playerProps = null) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// PLAYER PROPS — client-side fetch (browser-direct, same as game odds)
-// Reuses event IDs stored by fetchOdds so no extra API call needed.
+// PLAYER PROPS — routed through backend (shared server-side 10-min cache)
+// Passes the Odds API eventId (from oddsCache) to the backend so it can skip
+// its own events-list lookup — saves a credit per game.
 // ─────────────────────────────────────────────────────────────
-const playerPropsCache    = {};          // key: "Away|Home", value: { props, ts }
-const PLAYER_PROPS_TTL_MS = 10 * 60 * 1000;
-const PLAYER_PROP_MARKETS = "pitcher_strikeouts,pitcher_outs_recorded,batter_total_bases,batter_hits,batter_home_runs";
-const PLAYER_PROP_BOOKS   = "draftkings,fanduel,williamhill_us,betmgm"; // widen — grab first available
-const PLAYER_PROP_ORDER   = { pitcher_strikeouts: 0, batter_total_bases: 1, batter_hits: 2 };
-const PLAYER_PROP_LABELS  = { pitcher_strikeouts: "K", pitcher_outs_recorded: "Outs", batter_total_bases: "TB", batter_hits: "H", batter_home_runs: "HR" };
+const playerPropsCache   = {};  // browser-side dedup: key = gamePk string
+const PLAYER_PROP_LABELS = { pitcher_strikeouts: "K", pitcher_outs_recorded: "Outs", batter_total_bases: "TB", batter_hits: "H", batter_home_runs: "HR" };
 
-const fetchPlayerPropsDirect = async (awayName, homeName) => {
-  if (IS_ODDS_SANDBOX || !ODDS_API_KEY) return [];
-  const cacheKey = `${awayName}|${homeName}`;
+const fetchPlayerPropsDirect = async (awayName, homeName, gamePk) => {
+  if (IS_ODDS_SANDBOX) return [];
+  const cacheKey = String(gamePk ?? `${awayName}|${homeName}`);
   const cached   = playerPropsCache[cacheKey];
-  if (cached && (Date.now() - cached.ts) < PLAYER_PROPS_TTL_MS) return cached.props;
+  if (cached) return cached;
 
-  // Ensure game odds have been fetched so eventIdMap is populated
-  if (!oddsCache.eventIdMap) await fetchOdds();
+  // Pass eventId to backend so it can skip the Odds API events-list fetch
+  const eventIdKey = `${awayName}|${homeName}`;
+  const eventId    = oddsCache.eventIdMap?.[eventIdKey] ?? null;
+  const qs         = eventId ? `?eventId=${encodeURIComponent(eventId)}` : "";
 
-  const eventId = oddsCache.eventIdMap?.[cacheKey];
-  if (!eventId) {
-    console.log(`  · Player props: no Odds API event for ${awayName} @ ${homeName}`);
-    playerPropsCache[cacheKey] = { props: [], ts: Date.now() };
-    return [];
-  }
-
-  const res = await fetch(
-    `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${eventId}/odds` +
-    `?apiKey=${ODDS_API_KEY}&markets=${PLAYER_PROP_MARKETS}&regions=us&oddsFormat=american&bookmakers=${PLAYER_PROP_BOOKS}`
-  );
-  if (!res.ok) throw new Error(`Odds API ${res.status}`);
+  const res = await fetch(`${API_BASE}/api/player-props/${gamePk}${qs}`);
+  if (!res.ok) throw new Error(`player-props ${res.status}`);
   const data = await res.json();
 
-  const fmtOdds = (n) => (n == null ? null : n > 0 ? `+${n}` : String(n));
-  const props   = [];
-  const seen    = new Set();
-
-  for (const book of (data.bookmakers ?? [])) {
-    for (const market of (book.markets ?? [])) {
-      const marketLabel = PLAYER_PROP_LABELS[market.key];
-      if (!marketLabel) continue;
-      const byPlayer = {};
-      for (const outcome of (market.outcomes ?? [])) {
-        const player = outcome.description || outcome.name;
-        const side   = outcome.name.toLowerCase();
-        if (!byPlayer[player]) byPlayer[player] = {};
-        byPlayer[player][side] = { price: outcome.price, point: outcome.point };
-      }
-      for (const [player, sides] of Object.entries(byPlayer)) {
-        const dupeKey = `${player}:${market.key}`;
-        if (seen.has(dupeKey)) continue;
-        seen.add(dupeKey);
-        const over  = sides["over"];
-        const under = sides["under"];
-        if (!over?.point) continue;
-        props.push({ player, market: market.key, marketLabel, line: over.point, overOdds: fmtOdds(over.price), underOdds: fmtOdds(under?.price ?? null), book: book.title });
-      }
-    }
-  }
-
-  props.sort((a, b) => (PLAYER_PROP_ORDER[a.market] ?? 9) - (PLAYER_PROP_ORDER[b.market] ?? 9) || a.player.localeCompare(b.player));
-  playerPropsCache[cacheKey] = { props, ts: Date.now() };
+  const props = (data.props ?? []).map(p => ({
+    ...p,
+    marketLabel: PLAYER_PROP_LABELS[p.market] ?? p.marketLabel ?? p.market,
+  }));
+  playerPropsCache[cacheKey] = props;
   return props;
 };
+
 
 // Format an ISO datetime string in the user's local timezone
 const formatLocalTime = (isoStr) => {
@@ -535,111 +501,36 @@ const apiMutate = async (path, method, body) => {
   return res.json();
 };
 
+// GAME ODDS — routed through backend (shared 20-min server cache)
+// Replaces the old client-side fetch. The backend builds the same map
+// structure and also returns eventIdMap so player-props calls can skip
+// the Odds API events-list lookup.
 const oddsCache = { data: null, ts: 0, remaining: null, used: null, fetchedAt: null, error: null, eventIdMap: null };
-const ODDS_CACHE_TTL_MS = 15 * 60 * 1000;
+const ODDS_CACHE_TTL_MS = 20 * 60 * 1000; // mirror backend TTL
 
 const fetchOdds = async (forceRefresh = false) => {
   if (IS_ODDS_SANDBOX) return null;
 
-  // Return cached data if still fresh
+  // Return browser-side cache if still fresh (avoids even hitting the backend)
   if (!forceRefresh && oddsCache.data && (Date.now() - oddsCache.ts) < ODDS_CACHE_TTL_MS) {
     return oddsCache;
   }
 
   oddsCache.error = null;
   try {
-    const res = await fetch(
-      `https://api.the-odds-api.com/v4/sports/baseball_mlb/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,totals,spreads&oddsFormat=american&dateFormat=iso`
-    );
-
+    const res = await fetch(`${API_BASE}/api/odds`);
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.message ?? `HTTP ${res.status}`);
+      throw new Error(body.detail ?? body.error ?? `HTTP ${res.status}`);
     }
+    const data = await res.json();
 
-    const remaining = res.headers.get("x-requests-remaining");
-    const used      = res.headers.get("x-requests-used");
-    const games     = await res.json();
-
-    // Build lookup map keyed by "AwayTeamFullName|HomeTeamFullName"
-    // Books to extract, in display order
-    const TARGET_BOOKS = [
-      { key: "draftkings",    label: "DK"      },
-      { key: "fanduel",       label: "FD"      },
-      { key: "williamhill_us",label: "CZR"     },
-      { key: "betmgm",        label: "MGM"     },
-    ];
-
-    const extractBook = (bk, awayTeam) => {
-      let awayML = null, homeML = null, total = null, overOdds = null, underOdds = null, f5Total = null,
-          awaySpread = null, awaySpreadOdds = null, homeSpread = null, homeSpreadOdds = null;
-      const h2h = bk.markets.find(m => m.key === "h2h");
-      if (h2h) {
-        const awayOut = h2h.outcomes.find(o => o.name === awayTeam);
-        const homeOut = h2h.outcomes.find(o => o.name !== awayTeam);
-        if (awayOut) awayML = awayOut.price > 0 ? `+${awayOut.price}` : `${awayOut.price}`;
-        if (homeOut) homeML = homeOut.price > 0 ? `+${homeOut.price}` : `${homeOut.price}`;
-      }
-      const totals = bk.markets.find(m => m.key === "totals");
-      if (totals) {
-        const over  = totals.outcomes.find(o => o.name === "Over");
-        const under = totals.outcomes.find(o => o.name === "Under");
-        if (over)  { total = String(over.point); overOdds  = over.price  > 0 ? `+${over.price}`  : `${over.price}`;  }
-        if (under) {                              underOdds = under.price > 0 ? `+${under.price}` : `${under.price}`; }
-      }
-      // F5 (first 5 innings) total — market key "totals_h1"
-      const totalsH1 = bk.markets.find(m => m.key === "totals_h1");
-      if (totalsH1) {
-        const f5Over = totalsH1.outcomes.find(o => o.name === "Over");
-        if (f5Over) f5Total = String(f5Over.point);
-      }
-      // Runline (spreads) — MLB always ±1.5
-      const spreadsMarket = bk.markets.find(m => m.key === "spreads");
-      if (spreadsMarket) {
-        const awayOut = spreadsMarket.outcomes.find(o => o.name === awayTeam);
-        const homeOut = spreadsMarket.outcomes.find(o => o.name !== awayTeam);
-        if (awayOut) {
-          awaySpread     = awayOut.point >= 0 ? `+${awayOut.point}` : `${awayOut.point}`;
-          awaySpreadOdds = awayOut.price  > 0 ? `+${awayOut.price}` : `${awayOut.price}`;
-        }
-        if (homeOut) {
-          homeSpread     = homeOut.point >= 0 ? `+${homeOut.point}` : `${homeOut.point}`;
-          homeSpreadOdds = homeOut.price  > 0 ? `+${homeOut.price}` : `${homeOut.price}`;
-        }
-      }
-      return { awayML, homeML, total, overOdds, underOdds, f5Total, awaySpread, awaySpreadOdds, homeSpread, homeSpreadOdds };
-    };
-
-    const map        = {};
-    const eventIdMap = {};
-    games.forEach(g => {
-      const key = `${g.away_team}|${g.home_team}`;
-      eventIdMap[key] = g.id; // store Odds API event ID for player-props lookup
-
-      // Build per-book data for each target book
-      const books = {};
-      TARGET_BOOKS.forEach(({ key: bKey, label }) => {
-        const bk = g.bookmakers.find(b => b.key === bKey);
-        if (bk) books[label] = extractBook(bk, g.away_team);
-      });
-
-      // Primary line: first available target book, else first bookmaker
-      const primaryBk = TARGET_BOOKS.map(t => g.bookmakers.find(b => b.key === t.key)).find(Boolean)
-                        ?? g.bookmakers[0];
-      if (!primaryBk) return;
-
-      const primary = extractBook(primaryBk, g.away_team);
-      const primaryLabel = TARGET_BOOKS.find(t => t.key === primaryBk.key)?.label ?? primaryBk.title;
-
-      map[key] = { ...primary, book: primaryLabel, books };
-    });
-
-    oddsCache.data       = map;
-    oddsCache.eventIdMap = eventIdMap;
+    oddsCache.data       = data.map;
+    oddsCache.eventIdMap = data.eventIdMap;
     oddsCache.ts         = Date.now();
-    oddsCache.remaining  = remaining;
-    oddsCache.used      = used;
-    oddsCache.fetchedAt = new Date().toLocaleTimeString();
+    oddsCache.remaining  = data.remaining;
+    oddsCache.used       = data.used;
+    oddsCache.fetchedAt  = data.fetchedAt;
     return oddsCache;
   } catch (err) {
     console.error("Odds API error:", err);
@@ -651,6 +542,112 @@ const fetchOdds = async (forceRefresh = false) => {
 // ─────────────────────────────────────────────
 // MOCK SLATE DATA
 // ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────
+// BOARD "WHY?" MODAL — factor breakdown generator
+// ─────────────────────────────────────────────
+const generateWhyFactors = (c, type) => {
+  const homeTeam = (c.gameLabel ?? "").split(" @ ")[1] ?? "";
+  const pf = PARK_FACTORS[homeTeam] ?? NEUTRAL_PARK;
+  const factors = [];
+
+  if (type === "k") {
+    const k9 = parseFloat(c.k9) || 0;
+    const k9pts = k9 >= 10 ? 30 : k9 >= 9 ? 22 : k9 >= 8 ? 14 : k9 >= 7 ? 7 : 0;
+    factors.push({ label: "K/9", value: k9 > 0 ? `${c.k9}` : "—",
+      detail: k9 >= 10 ? "Elite swing-and-miss (≥10)" : k9 >= 9 ? "Very good (≥9)" : k9 >= 8 ? "Above avg (≥8)" : k9 >= 7 ? "Solid (≥7)" : "Below avg", pts: k9pts, max: 30 });
+
+    const avgK = parseFloat(c.avgK3) || 0;
+    const avgKpts = avgK >= 7 ? 22 : avgK >= 6 ? 16 : avgK >= 5 ? 10 : avgK >= 4 ? 5 : 0;
+    factors.push({ label: "L3 avg K", value: c.avgK3 !== null ? `${c.avgK3}K/start` : "—",
+      detail: avgK >= 7 ? "Strong recent K production" : avgK >= 6 ? "Good recent production" : avgK >= 5 ? "Average production" : avgK >= 4 ? "Modest production" : "Low recent production", pts: avgKpts, max: 22 });
+
+    const pfKPts = Math.round((pf.k - 1.0) * 90);
+    factors.push({ label: "Park (K factor)", value: homeTeam || "—",
+      detail: pf.k >= 1.05 ? `K-friendly park (+${((pf.k - 1) * 100).toFixed(0)}%)` : pf.k <= 0.95 ? `K-suppressing (${((pf.k - 1) * 100).toFixed(0)}%)` : "Neutral park", pts: pfKPts, max: 18 });
+
+    const umpPts = c.umpireRating === "pitcher" ? 15 : (!c.umpire || c.umpireRating === "neutral") ? 8 : 3;
+    factors.push({ label: "Umpire", value: c.umpire ?? "TBD",
+      detail: c.umpireRating === "pitcher" ? "Tight zone — historically boosts K rates" : c.umpireRating === "neutral" ? "Average zone" : !c.umpire ? "Not yet assigned" : "Wide zone — suppresses Ks", pts: umpPts, max: 15 });
+
+    const whip = parseFloat(c.whip) || 0;
+    const whipPts = whip > 0 ? (whip <= 1.05 ? 10 : whip <= 1.20 ? 6 : whip <= 1.35 ? 2 : 0) : 0;
+    factors.push({ label: "WHIP", value: whip > 0 ? `${c.whip}` : "—",
+      detail: whip <= 1.05 ? "Elite control — stays in games" : whip <= 1.20 ? "Good control" : whip <= 1.35 ? "Average control" : "Elevated baserunners — risk of early hook", pts: whipPts, max: 10 });
+
+  } else if (type === "outs") {
+    const avgIPStr = c.avgIP;
+    const avgIPNum = (() => {
+      if (!avgIPStr || avgIPStr === "—") return null;
+      const [w, f = "0"] = String(avgIPStr).split(".");
+      return parseInt(w) + parseInt(f) / 3;
+    })();
+    const ipPts = avgIPNum !== null ? (avgIPNum >= 6.5 ? 35 : avgIPNum >= 6.0 ? 26 : avgIPNum >= 5.5 ? 17 : avgIPNum >= 5.0 ? 8 : 0) : 0;
+    factors.push({ label: "Avg IP (recent)", value: avgIPStr !== "—" ? `${avgIPStr} IP/start` : "—",
+      detail: avgIPNum >= 6.5 ? "Goes deep — 6.5+ IP avg" : avgIPNum >= 6.0 ? "Quality starts — 6+ IP avg" : avgIPNum >= 5.5 ? "Solid depth — 5.5+ IP avg" : avgIPNum >= 5.0 ? "Average depth — ~5 IP" : "Short outings — risky for outs props", pts: ipPts, max: 35 });
+
+    const whip = parseFloat(c.whip) || 0;
+    const whipPts = whip > 0 ? (whip <= 1.00 ? 28 : whip <= 1.10 ? 20 : whip <= 1.20 ? 12 : whip <= 1.35 ? 5 : 0) : 0;
+    factors.push({ label: "WHIP (control)", value: whip > 0 ? `${c.whip}` : "—",
+      detail: whip <= 1.00 ? "Elite control — extends outings" : whip <= 1.10 ? "Very good control" : whip <= 1.20 ? "Good control" : whip <= 1.35 ? "Average control" : "Elevated baserunners — pitch count climbs fast", pts: whipPts, max: 28 });
+
+    const era = parseFloat(c.era) || 0;
+    const eraPts = era > 0 && era <= 3.0 ? 10 : era <= 3.5 ? 7 : era <= 4.5 ? 3 : 0;
+    factors.push({ label: "ERA (season)", value: era > 0 ? `${c.era}` : "—",
+      detail: era <= 3.0 ? "Elite — limiting runs, keeps manager trust" : era <= 3.5 ? "Very good" : era <= 4.5 ? "Average — occasional rough starts" : "Struggling — early exits more likely", pts: eraPts, max: 12 });
+
+    const pfOutsPts = Math.round((1.0 - pf.hit) * 50);
+    factors.push({ label: "Park (hit suppression)", value: homeTeam || "—",
+      detail: pf.hit <= 0.95 ? `Pitcher-friendly — suppresses hits` : pf.hit >= 1.08 ? `Hitter-friendly — pitch count rises, risk of early exit` : "Neutral park", pts: pfOutsPts, max: 10 });
+
+  } else if (type === "hr") {
+    const slg = parseFloat(c.slg) || 0;
+    const ops = parseFloat(c.ops) || 0;
+    const slgPts = Math.round(slg > 0 ? (slg - 0.410) * 55 : (ops - 0.720) * 20);
+    factors.push({ label: "Power (SLG)", value: slg > 0 ? `${c.slg} SLG` : `${c.ops} OPS`,
+      detail: slg >= 0.500 ? "Power hitter (.500+ SLG)" : slg >= 0.440 ? "Above-avg power (.440+)" : slg >= 0.380 ? "Average power" : "Below-avg power — few extra-base hits", pts: Math.min(20, Math.max(-12, slgPts)), max: 20 });
+
+    const hr = parseInt(c.hr) || 0;
+    const hrPts = Math.round(hr * 0.7);
+    factors.push({ label: "HR pace", value: `${hr} HR this season`,
+      detail: hr >= 20 ? "High HR pace — proven power" : hr >= 10 ? "Moderate HR pace" : hr >= 5 ? "Low HR pace" : "Very few HRs this season", pts: hrPts, max: 15 });
+
+    const pfHRPts = Math.round((pf.hr - 1.0) * 35);
+    factors.push({ label: "Park (HR factor)", value: homeTeam || "—",
+      detail: pf.hr >= 1.10 ? `HR-friendly (+${((pf.hr - 1) * 100).toFixed(0)}%)` : pf.hr <= 0.90 ? `HR-suppressing (${((pf.hr - 1) * 100).toFixed(0)}%)` : "Neutral park for HRs", pts: pfHRPts, max: 10 });
+
+    if (c.windFav) {
+      factors.push({ label: "Wind", value: "Blowing out", detail: "Wind out to CF/RF — historically adds 5–8% to HR rates", pts: 8, max: 8 });
+    }
+
+    const orderPts = c.order <= 3 ? 6 : c.order <= 5 ? 3 : c.order >= 8 ? -4 : 0;
+    factors.push({ label: "Batting order", value: `#${c.order}`,
+      detail: c.order <= 3 ? "Premium spot — most PA, best lineup protection" : c.order <= 5 ? "Middle of order" : c.order >= 8 ? "Bottom of order — fewer PA" : "Lower-middle order", pts: orderPts, max: 6 });
+
+  } else { // hits
+    const avg = parseFloat(c.avg) || 0;
+    const ops = parseFloat(c.ops) || 0;
+    const avgPts = Math.round(avg > 0 ? (avg - 0.250) * 140 : (ops - 0.720) * 15);
+    factors.push({ label: "Season AVG", value: avg > 0 ? `${c.avg} AVG` : `${c.ops} OPS`,
+      detail: avg >= 0.300 ? "Excellent contact hitter (.300+)" : avg >= 0.270 ? "Good hitter (.270+)" : avg >= 0.240 ? "Average (.240+)" : "Struggling — below .240", pts: Math.min(20, Math.max(-12, avgPts)), max: 20 });
+
+    const l5 = (c.hitRate ?? []).slice(0, 5).reduce((a, v) => a + v, 0);
+    const l5pts = Math.round((l5 / 5 - 0.40) * 28);
+    factors.push({ label: "Recent form (L5)", value: `${l5}/5 games with a hit`,
+      detail: l5 >= 4 ? "Hot — on a tear recently" : l5 >= 3 ? "Consistent — hitting in most games" : l5 >= 2 ? "Mixed — some cold games" : "Cold — struggling to get on base", pts: l5pts, max: 8 });
+
+    const pfHitPts = Math.round((pf.hit - 1.0) * 28);
+    factors.push({ label: "Park (hit factor)", value: homeTeam || "—",
+      detail: pf.hit >= 1.08 ? `Hitter-friendly (+${((pf.hit - 1) * 100).toFixed(0)}%)` : pf.hit <= 0.93 ? `Pitcher-friendly (${((pf.hit - 1) * 100).toFixed(0)}%)` : "Neutral park for hits", pts: pfHitPts, max: 8 });
+
+    const orderPts = c.order <= 3 ? 6 : c.order <= 5 ? 3 : c.order >= 8 ? -4 : 0;
+    factors.push({ label: "Batting order", value: `#${c.order}`,
+      detail: c.order <= 3 ? "Premium spot — most PA" : c.order <= 5 ? "Middle of order" : c.order >= 8 ? "Bottom of order — fewer PA" : "Lower-middle order", pts: orderPts, max: 6 });
+  }
+
+  return factors;
+};
+
 const SLATE = [
   {
     id: 1,
@@ -1317,8 +1314,8 @@ const LeanBadge = ({ label, positive, small }) => {
   );
 };
 
-const Card = ({ children, style }) => (
-  <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 14, padding: "14px", marginBottom: 12, ...style }}>{children}</div>
+const Card = ({ children, style, onClick }) => (
+  <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 14, padding: "14px", marginBottom: 12, ...style }} onClick={onClick}>{children}</div>
 );
 
 const Divider = () => <div style={{ height: 1, background: "#1f2437", margin: "10px 0" }} />;
@@ -1831,9 +1828,26 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
       const propLine = props.find(pr => pr.market === market && pr.player.toLowerCase().includes(lastName)) ?? null;
 
       const recentStarts = (gamelog?.games ?? []).slice(0, 3);
-      const avgK3 = recentStarts.length > 0
-        ? (recentStarts.reduce((s, g) => s + (g.k ?? 0), 0) / recentStarts.length).toFixed(1)
+      const avgK3Raw = recentStarts.length > 0
+        ? recentStarts.reduce((s, g) => s + (g.k ?? 0), 0) / recentStarts.length
         : null;
+      const avgK3 = avgK3Raw !== null ? avgK3Raw.toFixed(1) : null;
+
+      // Synthetic suggested line — same math as Best Bets Today (fallback when Odds API has no line)
+      const avgIPNum = (() => {
+        const s = gamelog?.avgIP;
+        if (!s || s === "—") return null;
+        const [w, f = "0"] = String(s).split(".");
+        return parseInt(w) + parseInt(f) / 3;
+      })();
+      const k9Num   = parseFloat(merged.kPer9 ?? merged.k9) || 0;
+      const suggestedLine = type === "k"
+        ? (avgK3Raw !== null
+            ? Math.max(0.5, Math.round(avgK3Raw) - 0.5)
+            : (k9Num > 0 && avgIPNum ? Math.max(0.5, Math.round(k9Num * avgIPNum / 9) - 0.5) : null))
+        : (avgIPNum !== null
+            ? Math.max(0.5, Math.round(avgIPNum * 3) - 0.5)
+            : null);
 
       candidates.push({
         id:           p.id,
@@ -1852,6 +1866,7 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
         umpire:       umpire?.name ?? null,
         umpireRating: umpire?.rating ?? null,
         propLine,
+        suggestedLine,
       });
     });
   });
@@ -2498,6 +2513,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(1);
   const [view, setView] = useState("slate"); // "slate" | "game" | "picks"
   const [showHelp, setShowHelp] = useState(false);
+  const [whyModal, setWhyModal] = useState(null); // { c, type: boardTab, rank }
   const [picksFilter, setPicksFilter] = useState("all"); // "all" | "pending" | "hit" | "miss"
   const [showTrends, setShowTrends] = useState(true);   // collapse/expand Trends card in Picks view
   const [liveDigest, setLiveDigest] = useState(null);   // { period, total, hits, misses, pct, bestHit, worstMiss, byType }
@@ -2665,7 +2681,7 @@ export default function App() {
     if (!game) return;
     playerPropsFetched.current.add(key);
     setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
-    fetchPlayerPropsDirect(game.away.name, game.home.name)
+    fetchPlayerPropsDirect(game.away.name, game.home.name, game.gamePk)
       .then(props => setLivePlayerProps(prev => ({ ...prev, [key]: { props } })))
       .catch(() => {
         playerPropsFetched.current.delete(key);
@@ -2757,7 +2773,7 @@ export default function App() {
         if (livePlayerProps[key] || boardPropsFetched.current.has(key)) return;
         boardPropsFetched.current.add(key);
         setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
-        fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "")
+        fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "", game.gamePk)
           .then(props => setLivePlayerProps(prev => ({ ...prev, [key]: { props } })))
           .catch(() => {
             boardPropsFetched.current.delete(key);
@@ -6276,8 +6292,7 @@ export default function App() {
                 if (isPitcherBoard) {
                   // ── Pitcher card (K Props / Outs) ──────────────────────────
                   return (
-                    <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }}
-                      onClick={() => { openGame(c.gamePk); setTab("pitcher"); }}>
+                    <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                         {/* Rank */}
                         <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", flexShrink: 0, marginTop: 1 }}>{i + 1}</div>
@@ -6310,23 +6325,42 @@ export default function App() {
                               <span style={{ fontSize: 10, color: parseFloat(c.avgIP) >= 6.0 ? "#22c55e" : parseFloat(c.avgIP) >= 5.0 ? "#f59e0b" : "#9ca3af", fontFamily: "monospace" }}>{c.avgIP} IP/gs</span>
                             )}
                           </div>
-                          {/* Recent K avg + prop line */}
-                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5 }}>
+                          {/* Prop line + lean row */}
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
                             {c.avgK3 !== null && boardTab === "k" && (
                               <span style={{ fontSize: 9, color: "#d1d5db", fontFamily: "monospace" }}>
                                 L3 avg <span style={{ color: "#f9fafb", fontWeight: 700 }}>{c.avgK3}K</span>
                               </span>
                             )}
-                            {c.propLine && (
-                              <span style={{ fontSize: 9, color: "#38bdf8", fontFamily: "monospace" }}>
-                                {boardTab === "k" ? "K" : "Outs"} O{c.propLine.line} {c.propLine.overOdds} · {c.propLine.book}
-                              </span>
-                            )}
+                            {(() => {
+                              const line = c.propLine ? c.propLine.line : c.suggestedLine;
+                              if (line === null) return null;
+                              const lean = c.score >= 55 ? "OVER" : "UNDER";
+                              const positive = lean === "OVER";
+                              const conf = Math.min(85, Math.round(50 + (c.score - 40) * 35 / 55));
+                              const color  = positive ? "#22c55e" : "#ef4444";
+                              const bg     = positive ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)";
+                              const border = positive ? "rgba(34,197,94,0.4)" : "rgba(239,68,68,0.4)";
+                              const propLabel = boardTab === "k" ? "K" : "Outs";
+                              const lineLabel = c.propLine ? `O${line}` : `O/U ~${line}`;
+                              const bookLabel = c.propLine ? ` ${c.propLine.overOdds} · ${c.propLine.book}` : "";
+                              return (
+                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>{propLabel} {lineLabel}{bookLabel}</span>
+                                  <div style={{ display: "inline-flex", alignItems: "center", gap: 4, background: bg, border: `1px solid ${border}`, borderRadius: 6, padding: "2px 7px", fontSize: 8, fontWeight: 700, color, fontFamily: "monospace", whiteSpace: "nowrap" }}>
+                                    <div style={{ width: 5, height: 5, borderRadius: "50%", background: color, flexShrink: 0 }} />
+                                    {lean}
+                                  </div>
+                                  <span style={{ fontSize: 9, fontWeight: 800, color: conf >= 65 ? "#22c55e" : "#fbbf24", fontFamily: "monospace" }}>{conf}%</span>
+                                </div>
+                              );
+                            })()}
                           </div>
                         </div>
                         {/* Score badge */}
-                        <div style={{ flexShrink: 0, width: 38, height: 38, borderRadius: 10, background: `${sc}22`, border: `1px solid ${sc}55`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                          <span style={{ fontSize: 13, fontWeight: 800, color: sc, fontFamily: "monospace" }}>{c.score}</span>
+                        <div style={{ flexShrink: 0, width: 44, borderRadius: 10, background: `${sc}22`, border: `1px solid ${sc}55`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "5px 0 4px", gap: 2 }}>
+                          <span style={{ fontSize: 13, fontWeight: 800, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</span>
+                          <span style={{ fontSize: 7, fontWeight: 700, color: sc, fontFamily: "monospace", opacity: 0.7, letterSpacing: "0.05em" }}>WHY?</span>
                         </div>
                       </div>
                     </Card>
@@ -6336,8 +6370,7 @@ export default function App() {
                 // ── Batter card (HR / Hits) ────────────────────────────────
                 const l5dots = Array.from({ length: 5 }, (_, j) => c.hitRate[j] ?? null);
                 return (
-                  <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }}
-                    onClick={() => { openGame(c.gamePk); setTab("lineup"); }}>
+                  <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                       {/* Rank */}
                       <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", flexShrink: 0, marginTop: 1 }}>{i + 1}</div>
@@ -6393,8 +6426,9 @@ export default function App() {
                       </div>
 
                       {/* Score badge */}
-                      <div style={{ flexShrink: 0, width: 38, height: 38, borderRadius: 10, background: `${sc}22`, border: `1px solid ${sc}55`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                        <span style={{ fontSize: 13, fontWeight: 800, color: sc, fontFamily: "monospace" }}>{c.score}</span>
+                      <div style={{ flexShrink: 0, width: 44, borderRadius: 10, background: `${sc}22`, border: `1px solid ${sc}55`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "5px 0 4px", gap: 2 }}>
+                        <span style={{ fontSize: 13, fontWeight: 800, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</span>
+                        <span style={{ fontSize: 7, fontWeight: 700, color: sc, fontFamily: "monospace", opacity: 0.7, letterSpacing: "0.05em" }}>WHY?</span>
                       </div>
                     </div>
                   </Card>
@@ -6446,6 +6480,89 @@ export default function App() {
           </div>
         </div>
       </div>
+      {/* ── Why? Modal ── */}
+      {whyModal && (() => {
+        const { c, type, rank } = whyModal;
+        const factors = generateWhyFactors(c, type);
+        const sc = c.score >= 70 ? "#22c55e" : c.score >= 55 ? "#f59e0b" : c.score >= 40 ? "#ef4444" : "#6b7280";
+        const conf = Math.min(85, Math.round(50 + (c.score - 40) * 35 / 55));
+        const lean = c.score >= 55 ? "OVER" : "UNDER";
+        const leanColor = lean === "OVER" ? "#22c55e" : "#ef4444";
+        const typeLabel = type === "k" ? "⚡ K PROPS" : type === "outs" ? "📋 OUTS" : type === "hr" ? "⚾ HR" : "🎯 HITS";
+        return (
+          <div
+            onClick={() => setWhyModal(null)}
+            style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" }}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{ width: "100%", maxWidth: 440, background: "#161827", borderRadius: 16, border: "1px solid #1f2437", maxHeight: "85vh", display: "flex", flexDirection: "column", overflow: "hidden" }}
+            >
+              {/* Header */}
+              <div style={{ padding: "14px 16px 12px", borderBottom: "1px solid #1f2437", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <div>
+                  <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>
+                    #{rank} · {typeLabel}
+                  </div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{c.name}</div>
+                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{c.gameLabel}</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontSize: 22, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</div>
+                    <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 2 }}>SCORE</div>
+                  </div>
+                  <button
+                    onClick={() => setWhyModal(null)}
+                    style={{ background: "rgba(255,255,255,0.07)", border: "1px solid #2d3148", borderRadius: 8, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, color: "#9ca3af", cursor: "pointer" }}
+                  >✕</button>
+                </div>
+              </div>
+
+              {/* Factor list */}
+              <div style={{ overflowY: "auto", flex: 1, padding: "12px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
+                {factors.length === 0 && (
+                  <div style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace", textAlign: "center", padding: "20px 0" }}>No factor data available.</div>
+                )}
+                {factors.map((f, idx) => {
+                  const pct = f.max > 0 ? Math.max(0, Math.min(1, f.pts / f.max)) : 0;
+                  const barColor = f.pts >= f.max * 0.7 ? "#22c55e" : f.pts >= f.max * 0.4 ? "#f59e0b" : f.pts > 0 ? "#ef4444" : "#374151";
+                  return (
+                    <div key={idx} style={{ background: "#1a1c2e", border: "1px solid #1f2437", borderRadius: 10, padding: "9px 12px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: "#d1d5db", fontFamily: "monospace" }}>{f.label}</span>
+                        <span style={{ fontSize: 10, fontWeight: 800, color: barColor, fontFamily: "monospace" }}>{f.pts > 0 ? "+" : ""}{f.pts} / {f.max}</span>
+                      </div>
+                      <div style={{ height: 4, borderRadius: 2, background: "#0b0c17", marginBottom: 5, overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${pct * 100}%`, background: barColor, borderRadius: 2 }} />
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{f.value}</span>
+                        <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace", fontStyle: "italic" }}>{f.detail}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Footer */}
+              <div style={{ padding: "12px 16px 20px", borderTop: "1px solid #1f2437", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#161827" }}>
+                <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace" }}>
+                  {c.score >= 70 ? "Strong play — multiple positive signals" : c.score >= 55 ? "Moderate edge — worth a look" : c.score >= 40 ? "Weak — proceed with caution" : "Skip — insufficient edge"}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                  <div style={{ background: lean === "OVER" ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)", border: `1px solid ${leanColor}55`, borderRadius: 8, padding: "5px 10px", display: "flex", alignItems: "center", gap: 5 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: leanColor }} />
+                    <span style={{ fontSize: 11, fontWeight: 800, color: leanColor, fontFamily: "monospace" }}>{lean}</span>
+                  </div>
+                  <span style={{ fontSize: 14, fontWeight: 900, color: conf >= 65 ? "#22c55e" : "#fbbf24", fontFamily: "monospace" }}>{conf}%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Help Overlay ── */}
       {showHelp && (
         <div style={{ position: "fixed", inset: 0, zIndex: 999, background: "#0b0c17", overflowY: "auto", padding: "0 0 40px 0" }}>
@@ -6611,27 +6728,74 @@ export default function App() {
 
                 <Section title="🏆 Board View — HR / Hits / K Props / Outs">
                   <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
-                    The <span style={{ color: "#fbbf24", fontWeight: 700 }}>Board</span> tab ranks every player across the full day's slate by prop attractiveness. Four tabs cover batters (HR, Hits) and starting pitchers (K Props, Outs). Use it to quickly spot the best individual player props without opening each game manually.
+                    The <span style={{ color: "#fbbf24", fontWeight: 700 }}>Board</span> tab ranks every player across the full day's slate by prop attractiveness. Four tabs cover batters (⚾ HR, 🎯 Hits) and starting pitchers (⚡ K Props, 📋 Outs). Use it to quickly spot the best individual player props without opening each game manually. <span style={{ color: "#fbbf24", fontWeight: 600 }}>Tap any card to see a full factor breakdown explaining why the score is what it is.</span>
                   </div>
+
+                  {/* Board scoring tabs */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {[
-                      ["⚾ HR tab", "Scores batters using SLG (30 pts), HR pace (25 pts), park HR factor (20 pts), wind (10 pts), batting order (10 pts), and platoon hand split (5 pts). Coors Field and hitter-friendly parks push scores up significantly."],
-                      ["🎯 Hits tab", "Scores batters using season AVG (35 pts), last-7 form (25 pts), park hit factor (15 pts), batting order (15 pts), and platoon hand split (10 pts). Leadoff and 2-hole hitters get a boost."],
-                      ["⚡ K Props tab", "Scores starting pitchers for strikeout props: K/9 (35 pts), umpire K tendency (20 pts), pitch mix whiff rate (20 pts), park K factor (15 pts), recent 3-start K average (10 pts). Shows ERA, K/9, WHIP, IP/gs, and L3 avg K count. Tap any card to open that game's Pitcher tab."],
-                      ["📋 Outs tab", "Scores starting pitchers for outs recorded props: avg IP (35 pts), WHIP/control (25 pts), recent IP trend (20 pts), park factor (15 pts), opponent K% (5 pts). Taps into how deep a starter typically pitches. Tap any card to open that game's Pitcher tab."],
-                      ["⚖ UMP+K badge", "On the K Props tab, flags games where the home plate umpire historically favors pitchers (tight zone, elevated K rate). A purple badge is a notable tailwind for strikeout overs."],
-                      ["Score badge", "0–95 composite score. Green (70+) = strong candidate, amber (55–69) = worth a look, red (40–54) = weaker play, gray (<40) = skip."],
-                      ["↑ WIND badge", "On the HR tab, flags games where wind is blowing out to center/right — historically adds ~5–8% to HR rates."],
-                      ["L5 dots", "Batter tabs only. Last 5 games: green dot = got a hit that game, dark dot = hitless. Quick read on recent plate production."],
-                      ["L3 avg K", "K Props tab only. Average strikeouts across the pitcher's last 3 starts. Compare to the sportsbook line to see if the over is well-supported."],
-                      ["Prop line", "If sportsbook lines are loaded, shows the over line and odds inline. Tap the card to open that game for the full breakdown."],
-                      ["X/Y loaded", "How many players have stats loaded vs total expected. Fills in as lineups post and stats fetch in the background."],
+                      ["⚾ HR tab", "Scores every batter in today's lineups for HR prop attractiveness. Key factors: SLG/power profile, season HR pace, park HR factor, wind direction, batting order spot, and platoon hand split. Coors Field, Great American Ball Park, and wind-out parks push scores up significantly. A score of 70+ means multiple factors are aligned — power hitter, friendly park, favorable order spot."],
+                      ["🎯 Hits tab", "Scores batters for getting at least 1 hit. Key factors: season AVG, last-7 game form (recent hot/cold streaks carry heavy weight), park hit factor, batting order, and platoon split. Leadoff and 2-hole hitters score higher due to extra plate appearances. A score of 70+ usually means a hitter batting .280+ who's been hitting in 5 of his last 7 games in a hitter-friendly park."],
+                      ["⚡ K Props tab", "Scores starting pitchers for strikeout over props. Key factors: K/9 rate (career strikeout ability), last-3-start average Ks (recent form), park K factor (some parks suppress contact), umpire zone tendencies (tight zone = more Ks), and WHIP (control — pitchers with low WHIP stay in games longer to rack up Ks). A score of 80+ means an elite strikeout pitcher in a favorable environment with an ump who rings people up."],
+                      ["📋 Outs tab", "Scores starting pitchers for outs recorded (innings pitched) props. Key factors: average IP over recent starts (the biggest signal — deep starters score highest), WHIP and control (high walk rates drive up pitch counts and shorten outings), season ERA (struggling pitchers get pulled earlier), and park environment. A score of 80+ means a pitcher who consistently goes 6+ innings with strong control."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 70, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
                         <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
                       </div>
                     ))}
+                  </div>
+
+
+                  {/* Why modal section */}
+                  <div style={{ background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.3)", borderRadius: 10, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace" }}>WHY? Modal — Reading the Factor Breakdown</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                      Tap any card on the Board to open the <span style={{ color: "#f9fafb", fontWeight: 600 }}>Why? modal</span> — a breakdown of exactly which factors drove the score up or down.
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {[
+                        ["Score (top right)", "The 0–95 board score. This is the authoritative number used to rank all players. Green = 70+, amber = 55–69, red = 40–54, gray = below 40."],
+                        ["Factor rows", "Each row is one scoring input (e.g. K/9, Park factor, Umpire). The bar fills green when that factor is strongly in your favor, amber for partial credit, red for a negative signal. The +X / Y number shows how many points that factor contributed out of its maximum possible."],
+                        ["Progress bar color", "Green bar = strong positive signal for that factor. Amber = moderate. Red = weak or negative. Dark (no fill) = neutral or no data available (e.g. umpire TBD)."],
+                        ["OVER / UNDER lean", "Derived from the score: 55+ = OVER lean (the edge is in favor of the prop hitting), below 55 = UNDER lean. Green = over, red = under."],
+                        ["Confidence %", "A scaled version of the score mapped to a 50–85% range. 50% means no edge, 85% is the ceiling for the strongest plays. It is not a win probability — it reflects how many signals are aligned, not how often it will hit."],
+                        ["What a high score doesn't mean", "A score of 95 doesn't guarantee the prop hits. It means all the factors the model can see (stats, park, umpire, weather) are pointing in the same direction. Use it as one input alongside line shopping, injury news, and your own read."],
+                      ].map(([label, desc]) => (
+                        <div key={label} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: "#818cf8", fontFamily: "monospace", minWidth: 90, flexShrink: 0, marginTop: 1 }}>{label}</div>
+                          <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Badges and indicators */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["⚖ UMP+K badge", "K Props tab only. Flags games where the home plate umpire historically favors pitchers — tight zone, elevated K rate. A notable tailwind for strikeout overs. A pitcher scoring 70+ with this badge is among the strongest K prop setups of the day."],
+                      ["↑ WIND badge", "HR tab only. Wind is blowing out to center or right field — historically adds ~5–8% to HR rates. Combined with a power hitter and a homer-friendly park, this is a strong environmental edge."],
+                      ["L5 dots", "Batter tabs only. Last 5 games: green dot = got at least 1 hit that game, dark dot = hitless. Five green dots = on a tear. Three or fewer = cold. Use this alongside the season AVG to separate a hot hitter from a paper stat."],
+                      ["L3 avg K", "K Props tab only. Average strikeouts per start over the pitcher's last 3 outings. If the sportsbook line is 5.5 Ks and his L3 avg is 8.0, that's a meaningful gap in your favor. If it's 5.0 vs a 6.5 line, the over needs more work."],
+                      ["Prop line", "If sportsbook data is loaded, shows the over line and odds directly on the card. A synthetic line (~X.X) is shown when book data is unavailable, derived from the pitcher's recent stats."],
+                      ["X/Y loaded", "How many players have full stats loaded vs total expected. Cards fill in as lineups post and stats fetch in the background — the board gets more accurate as the day progresses and lineups confirm."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 70, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{ background: "rgba(34,197,94,0.07)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#86efac", fontWeight: 700, marginBottom: 4 }}>💡 How to use the Board effectively</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.7 }}>
+                      <span style={{ color: "#f9fafb" }}>1. Start with score 70+.</span> These are the plays where multiple signals agree. Below 70, you're often leaning on one or two factors.<br />
+                      <span style={{ color: "#f9fafb" }}>2. Tap the card and read the factors.</span> A 75 score built on K/9 + umpire + WHIP is more reliable than a 75 built mostly on K/9 alone with weak bars elsewhere.<br />
+                      <span style={{ color: "#f9fafb" }}>3. Cross-check with the Game tab.</span> Open the game for the full pitcher card, lineup matchups, and Intel (umpire zone, bullpen, line movement).<br />
+                      <span style={{ color: "#f9fafb" }}>4. Watch for TBD umpires.</span> Umpire is one of the highest-weight factors for K Props. A TBD ump means partial credit — rescore mentally once the assignment is posted (usually ~3 hrs before first pitch).<br />
+                      <span style={{ color: "#f9fafb" }}>5. Outs props need deep starters.</span> If the avg IP row on the Outs card is below 5.0 IP, the score likely came from control/ERA factors. Shorter starters are risky for outs overs even with good numbers.
+                    </div>
                   </div>
                 </Section>
 

@@ -27,9 +27,12 @@ const fmtOdds = (n) => (n == null ? null : n > 0 ? `+${n}` : String(n));
 // To switch back: remove the client-side fetchPlayerProps() in prop-scout-v7.jsx
 // and call GET /api/player-props/:gamePk instead.
 //
-// ── GET /api/player-props/:gamePk ──────────────────────────────────────────
+// ── GET /api/player-props/:gamePk?eventId=xxx ────────────────────────────
+// Optional ?eventId= skips the events-list fetch when the caller already
+// has the Odds API event ID (e.g. from /api/odds eventIdMap).
 router.get("/:gamePk", async (req, res) => {
-  const { gamePk } = req.params;
+  const { gamePk }  = req.params;
+  const eventIdHint = req.query.eventId ?? null; // skip events-list call if provided
   const apiKey = process.env.ODDS_API_KEY;
   if (!apiKey) return res.status(503).json({ error: "ODDS_API_KEY not configured" });
 
@@ -46,34 +49,39 @@ router.get("/:gamePk", async (req, res) => {
     const mlbGame  = schedRes.data.dates?.[0]?.games?.[0];
     if (!mlbGame) return res.status(404).json({ error: "Game not found" });
 
-    const awayName = mlbGame.teams.away.team.name; // e.g. "Atlanta Braves"
-    const homeName = mlbGame.teams.home.team.name; // e.g. "Philadelphia Phillies"
+    const awayName = mlbGame.teams.away.team.name;
+    const homeName = mlbGame.teams.home.team.name;
     const awayLast = lastWord(awayName);
     const homeLast = lastWord(homeName);
 
-    // ── Step 2: find matching Odds API event ─────────────────────────────
-    const eventsRes = await axios.get(
-      `https://api.the-odds-api.com/v4/sports/baseball_mlb/events?apiKey=${apiKey}&dateFormat=iso`,
-      { timeout: 10000 }
-    );
+    // ── Step 2: resolve Odds API event ID ────────────────────────────────
+    // If the caller already knows the event ID (from /api/odds), skip the
+    // events-list fetch entirely — saves an API credit.
+    let eventId = eventIdHint;
+    if (!eventId) {
+      const eventsRes = await axios.get(
+        `https://api.the-odds-api.com/v4/sports/baseball_mlb/events?apiKey=${apiKey}&dateFormat=iso`,
+        { timeout: 10000 }
+      );
+      const event = eventsRes.data.find(e =>
+        (e.away_team === awayName   && e.home_team === homeName) ||
+        (lastWord(e.away_team) === awayLast && lastWord(e.home_team) === homeLast)
+      );
+      eventId = event?.id ?? null;
+    }
 
-    const event = eventsRes.data.find(e =>
-      (e.away_team === awayName   && e.home_team === homeName) ||
-      (lastWord(e.away_team) === awayLast && lastWord(e.home_team) === homeLast)
-    );
-
-    if (!event) {
+    if (!eventId) {
       console.log(`  · Player props: no Odds API event for ${awayName} @ ${homeName}`);
       const empty = { gamePk: parseInt(gamePk), props: [] };
       cache.set(cacheKey, empty, TTL);
       return res.json(empty);
     }
 
-    console.log(`  → Player props  eventId=${event.id}  ${awayName} @ ${homeName}`);
+    console.log(`  → Player props  eventId=${eventId}  ${awayName} @ ${homeName}`);
 
     // ── Step 3: fetch player prop markets for this event ──────────────────
     const propsRes = await axios.get(
-      `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${event.id}/odds` +
+      `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${eventId}/odds` +
       `?apiKey=${apiKey}` +
       `&markets=pitcher_strikeouts,batter_total_bases,batter_hits` +
       `&regions=us&oddsFormat=american` +

@@ -38,8 +38,9 @@ app.use("/api/linescore", require("./routes/linescore")); // MLB Stats: live sco
 app.use("/api/boxscore",    require("./routes/boxscore"));    // MLB Stats: full game boxscore for live + final games
 app.use("/api/stat-splits", require("./routes/statSplits")); // MLB Stats: home/away + vs L/R + day/night splits
 app.use("/api/trends",   require("./routes/trends"));    // Anthropic: AI-generated bettor trend summary per game
+app.use("/api/odds",         require("./routes/odds"));         // Odds API: h2h + totals + spreads for all MLB games (shared 20-min cache)
 app.use("/api/props",        require("./routes/props"));        // Anthropic: AI-generated prop recommendations per game
-app.use("/api/player-props", require("./routes/playerProps")); // Odds API: sportsbook player prop lines (unused — frontend fetches client-side via VITE_ODDS_API_KEY)
+app.use("/api/player-props", require("./routes/playerProps")); // Odds API: sportsbook player prop lines per game (shared 10-min cache)
 app.use("/api/auth",      authRouter);
 app.use("/api/picks",    picksRouter);
 app.use("/api/notes",    notesRouter);
