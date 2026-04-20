@@ -2330,7 +2330,7 @@ Log the closing line vs the line at time of pick. Positive CLV over time is the 
 
 ### ⚫ Infrastructure
 
-- **Pick persistence on Railway** — picks/notes currently stored as flat JSON, wiped on every redeploy. Upgrade to SQLite (zero-config, single file) or Railway's Postgres add-on for durable storage.
+- **Pick persistence on Railway** — Railway Postgres is the chosen path. The backend scaffold already lives on `feat/postgres-data-layer` with `pg`, migrations, DB helpers, snapshot jobs, scheduler wiring, and DB-first reads for key cached data. Keep this branch synced with `main` while app enhancements continue. Remaining work before merging back: provision Railway Postgres, set `DATABASE_URL` / `ADMIN_SECRET`, run the first migration, verify snapshot jobs in production, and confirm DB-hit fallback behavior.
 - **Sharp/public split data** — requires a paid data provider (e.g. Action Network, Bet Labs). Low priority.
 - **Prediction market odds** — Kalshi/Polymarket MLB game props. Niche but interesting signal source.
 
