@@ -15,6 +15,8 @@ const CODE_MAP = {
   vsR:   ["vr", "vr", "vs. right", "vs right", "right-handed pitcher", "right-handed batter"],
   day:   ["d",  "day"],
   night: ["n",  "night"],
+  grass: ["gr", "grass", "on grass"],
+  turf:  ["tu", "turf", "artificial", "on turf", "on artificial"],
 };
 
 const matchSplit = (split, candidates) => {
@@ -72,7 +74,7 @@ router.get("/:playerId", async (req, res) => {
           stats:    "statSplits",
           group,
           season:   yr,
-          sitCodes: "h,a,vl,vr,d,n", // explicitly request the splits we want
+          sitCodes: "h,a,vl,vr,d,n,gr,tu", // explicitly request the splits we want
         },
       });
 
@@ -111,6 +113,8 @@ router.get("/:playerId", async (req, res) => {
         vsR:   find(CODE_MAP.vsR),
         day:   find(CODE_MAP.day),
         night: find(CODE_MAP.night),
+        grass: find(CODE_MAP.grass),
+        turf:  find(CODE_MAP.turf),
       };
 
       // Only cache if we got at least one split

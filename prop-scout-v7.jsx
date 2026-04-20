@@ -11,7 +11,7 @@ const STADIUMS = {
   "Globe Life Field":          { lat: 32.7473,  lon: -97.0832, orientation: 0,   tz: "America/Chicago",  roof: true },
   "American Family Field":     { lat: 43.0280,  lon: -87.9712, orientation: 5,   tz: "America/Chicago"     },
   "Oracle Park":               { lat: 37.7786,  lon: -122.3893,orientation: 55,  tz: "America/Los_Angeles" },
-  "Rogers Centre":             { lat: 43.6414,  lon: -79.3894, orientation: 10,  tz: "America/Toronto",  roof: true },
+  "Rogers Centre":             { lat: 43.6414,  lon: -79.3894, orientation: 10,  tz: "America/Toronto",  roof: true, turf: true },
   "Yankee Stadium":            { lat: 40.8296,  lon: -73.9262, orientation: 30,  tz: "America/New_York"    },
   "Fenway Park":               { lat: 42.3467,  lon: -71.0972, orientation: 90,  tz: "America/New_York"    },
   "Wrigley Field":             { lat: 41.9484,  lon: -87.6553, orientation: 30,  tz: "America/Chicago"     },
@@ -21,9 +21,9 @@ const STADIUMS = {
   "Petco Park":                { lat: 32.7076,  lon: -117.1570,orientation: 35,  tz: "America/Los_Angeles" },
   "Truist Park":               { lat: 33.8907,  lon: -84.4677, orientation: 20,  tz: "America/New_York"    },
   "Great American Ball Park":  { lat: 39.0979,  lon: -84.5082, orientation: 10,  tz: "America/New_York"    },
-  "loanDepot park":            { lat: 25.7781,  lon: -80.2197, orientation: 5,   tz: "America/New_York",  roof: true },
+  "loanDepot park":            { lat: 25.7781,  lon: -80.2197, orientation: 5,   tz: "America/New_York",  roof: true, turf: true },
   "Minute Maid Park":          { lat: 29.7572,  lon: -95.3555, orientation: 30,  tz: "America/Chicago",  roof: true },
-  "Tropicana Field":           { lat: 27.7683,  lon: -82.6534, orientation: 0,   tz: "America/New_York",  roof: true },
+  "Tropicana Field":           { lat: 27.7683,  lon: -82.6534, orientation: 0,   tz: "America/New_York",  roof: true, turf: true },
   "Chase Field":               { lat: 33.4453,  lon: -112.0667,orientation: 25,  tz: "America/Phoenix",  roof: true },
   "Coors Field":               { lat: 39.7559,  lon: -104.9942,orientation: 20,  tz: "America/Denver"      },
   "PNC Park":                  { lat: 40.4469,  lon: -80.0057, orientation: 35,  tz: "America/New_York"    },
@@ -4254,6 +4254,40 @@ export default function App() {
                               <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
                                 {[["Day", day, true], ["Night", night, false]].map(([label, d, isDay]) => {
                                   const isToday = isDayGame === true ? isDay : isDayGame === false ? !isDay : false;
+                                  const avgNum = parseFloat(d?.avg) || 0;
+                                  const avgColor = avgNum >= 0.280 ? "#22c55e" : avgNum >= 0.230 ? "#f59e0b" : "#ef4444";
+                                  return (
+                                    <div key={label} style={{ flex: 1, background: isToday ? "rgba(56,189,248,0.06)" : "#1a1b2e", borderRadius: 8, padding: "6px 9px", border: isToday ? "1px solid rgba(56,189,248,0.25)" : "1px solid transparent" }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
+                                        <div style={{ fontSize: 8, color: isToday ? "#38bdf8" : "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: isToday ? 700 : 400 }}>{label}</div>
+                                        {isToday && <div style={{ fontSize: 7, color: "#38bdf8", fontWeight: 800 }}>TODAY</div>}
+                                      </div>
+                                      {d ? (<>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: avgColor, fontFamily: "monospace" }}>{d.avg}</div>
+                                        <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>OBP {d.obp} · SLG {d.slg}</div>
+                                        {d.ab > 0 && <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>{d.ab} AB</div>}
+                                      </>) : <div style={{ fontSize: 9, color: "#4b5563" }}>—</div>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
+
+                          {/* Batter home / away splits */}
+                          {(() => {
+                            const key = `${b.id}:hitting`;
+                            const sd  = liveStatSplits[key];
+                            if (!sd || sd === "loading") return null;
+                            const { home, away } = sd;
+                            if (!home && !away) return null;
+                            // lineupSide tells us which team's batters we're viewing
+                            // "away" side → batter is the visiting team → playing AWAY today
+                            const todaySide = lineupSide === "home" ? "home" : "away";
+                            return (
+                              <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+                                {[["Home", home, "home"], ["Away", away, "away"]].map(([label, d, side]) => {
+                                  const isToday = todaySide === side;
                                   const avgNum = parseFloat(d?.avg) || 0;
                                   const avgColor = avgNum >= 0.280 ? "#22c55e" : avgNum >= 0.230 ? "#f59e0b" : "#ef4444";
                                   return (

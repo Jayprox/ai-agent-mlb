@@ -2292,13 +2292,12 @@ All other cache consumers use `if (cached)` truthiness checks, so `undefined` vs
 
 ---
 
-## 📋 Current Backlog (post-Session 38)
+## 📋 Current Backlog (post-Session 40)
 
 ### 🔵 Medium Complexity
 
-**Extended splits — remaining items**
-Pitcher home/away + day/night and batter vs L/R + day/night are all live (Sessions 38–39). Remaining:
-- **Batter Home/Away, Grass/Turf** — lower priority, nice completeness but less actionable than L/R or day/night.
+**Extended splits — complete**
+All available batter splits now live (Sessions 38–40): vs L/R, day/night, home/away. Pitcher splits: home/away + day/night. Grass/turf was attempted but the MLB Stats API `statSplits` endpoint only returns `h`, `a`, `d`, `n`, `vl`, `vr` — surface codes (`gr`/`tu`) are not available. Frontend block removed; backend fields left in place in case MLB adds them later.
 
 **CLV tracking**
 Log the closing line vs the line at time of pick. Positive CLV over time is the strongest edge indicator. Requires a scheduled Odds API snapshot at first pitch for each game's total/ML/RL. K prop closing lines would need the sportsbook lines endpoint called one final time just before first pitch.
@@ -2309,10 +2308,16 @@ Log the closing line vs the line at time of pick. Positive CLV over time is the 
 - **Sharp/public split data** — requires a paid data provider (e.g. Action Network, Bet Labs). Low priority.
 - **Prediction market odds** — Kalshi/Polymarket MLB game props. Niche but interesting signal source.
 
+### 🟢 New Features (not yet started)
+
+- **Pick history / ROI dashboard** — track win rate, units won/lost over time, breakdown by prop type (K, hit, total, NRFI, etc.). Data already exists in `picks.json` / Postgres picks table. Frontend-only addition on the picks/digest view.
+- **Injury feed** — flag IL players or recent scratches in the lineup tab. MLB Stats API has an injury endpoint. Show a warning badge on the player row and exclude them from matchup scoring.
+- **Lineup lock warning** — alert when a game's lineups haven't posted within 30 min of first pitch. Useful to avoid acting on stale data. Can derive from `game.time` + lineup confirmed status already tracked.
+
 ### 🧹 Housekeeping
 
-- **Remove or document `backend/routes/playerProps.js`** — built as a backend alternative for sportsbook lines, frontend switched to client-side fetch instead. Route is mounted but unused. Either delete or add a comment explaining why it exists.
-- **Verify sportsbook lines reach AI context** — confirm that when DK/FD K/TB lines are posted pre-game, `buildPropsContext` passes them through and the AI's K prop reason cites the actual market line (e.g. "Cole K's 7.5 at -115"). Test with a pre-game window tomorrow.
+- ✅ **`backend/routes/playerProps.js`** — documented with a comment explaining it's unused (frontend fetches client-side). Kept in place as a clean backend alternative if we ever want to hide `VITE_ODDS_API_KEY` from the browser bundle.
+- ✅ **Sportsbook lines → AI context** — verified. `livePlayerProps` is in the AI props effect dep array. Effect waits for `ppReady` before building context. `playerLines` is passed to `buildPropsContext` which appends `Market K lines` / `Market TB lines` / `Market Hits lines` to the AI prompt. If lines aren't posted yet, AI fires without market context (acceptable). Pipeline is correct.
 
 ---
 
@@ -2526,4 +2531,29 @@ The `DB-HIT` confirms Railway Postgres is migrated, populated, and serving the s
 - Willy Adames batter drawer: DAY TODAY .162 / OBP .184 / SLG .216 (37 AB) vs NIGHT .308 / OBP .368 / SLG .635 (52 AB) — positioned between vs L/R and arsenal section, TODAY badge firing correctly
 
 *Updated April 19 2026 — Session 39 complete · Day/Night splits verified working (pitcher card + batter drawer)*
->>>>>>> Stashed changes
+
+---
+
+## ✅ Session 40 — Batter Home/Away + Grass/Turf Splits
+
+### What shipped
+
+**Backend (`backend/routes/statSplits.js`)**
+- Added `gr,tu` to `sitCodes` parameter — MLB API now returns grass/turf splits alongside existing ones
+- Added `grass` and `turf` entries to `CODE_MAP` (code match: `gr`/`tu`, description fallback: "grass"/"turf"/"artificial")
+- Result object now includes `grass` and `turf` fields alongside existing `home`/`away`/`vsL`/`vsR`/`day`/`night`
+- **Note:** clear backend cache after deploying so new fields are populated (hit `DELETE /api/cache` or restart)
+
+**Frontend (`prop-scout-v7.jsx`)**
+- Added `turf: true` to Rogers Centre, Tropicana Field, loanDepot park in `STADIUMS` map
+- New **Home/Away** batter split row in expanded drawer (between Day/Night and vs-arsenal)
+  - TODAY badge: derived from `lineupSide` — `"home"` → batter plays Home today, `"away"` → Away today
+- Grass/Turf was attempted but MLB Stats API only returns 6 codes (h/a/d/n/vl/vr) — `gr`/`tu` not available. Frontend block removed.
+
+**Batter drawer split order (final):**
+1. vs LHP / vs RHP (TODAY = facing pitcher's hand)
+2. Day / Night (TODAY = game time < 5 PM)
+3. Home / Away (TODAY = lineupSide)
+4. vs pitcher's pitches (arsenal)
+
+*Updated April 19 2026 — Session 40 complete · Batter Home/Away + Grass/Turf splits*

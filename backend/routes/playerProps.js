@@ -19,6 +19,14 @@ const lastWord = (str) => str.trim().split(/\s+/).pop();
 // Format American odds integer → "+150" or "-110"
 const fmtOdds = (n) => (n == null ? null : n > 0 ? `+${n}` : String(n));
 
+// NOTE: This route is currently unused by the frontend.
+// The frontend fetches player prop lines client-side via VITE_ODDS_API_KEY to avoid
+// an extra round-trip through the backend. This backend route is kept because:
+//   (a) it handles the MLB gamePk → Odds API eventId lookup correctly
+//   (b) moving to server-side fetching would hide the API key from the browser bundle
+// To switch back: remove the client-side fetchPlayerProps() in prop-scout-v7.jsx
+// and call GET /api/player-props/:gamePk instead.
+//
 // ── GET /api/player-props/:gamePk ──────────────────────────────────────────
 router.get("/:gamePk", async (req, res) => {
   const { gamePk } = req.params;
