@@ -29,10 +29,14 @@ app.use("/api/lineups",  require("./routes/lineups"));
 app.use("/api/players",  require("./routes/players"));
 app.use("/api/umpires",  require("./routes/umpires"));
 app.use("/api/arsenal",  require("./routes/arsenal"));  // Baseball Savant: pitcher pitch mix
-app.use("/api/splits",   require("./routes/splits"));   // Baseball Savant: batter vs pitch type
+app.use("/api/splits",          require("./routes/splits"));        // Baseball Savant: batter vs pitch type
+app.use("/api/pitcher-splits",  require("./routes/pitcherSplits")); // Baseball Savant: pitcher vs LHH/RHH
 app.use("/api/nrfi",     require("./routes/nrfi"));     // MLB Stats: first-inning team scoring tendencies
 app.use("/api/bullpen",   require("./routes/bullpen"));   // MLB Stats: bullpen fatigue + reliever usage
 app.use("/api/linescore", require("./routes/linescore")); // MLB Stats: live score + inning for in-progress games
+app.use("/api/trends",   require("./routes/trends"));    // Anthropic: AI-generated bettor trend summary per game
+app.use("/api/props",        require("./routes/props"));        // Anthropic: AI-generated prop recommendations per game
+app.use("/api/player-props", require("./routes/playerProps")); // Odds API: real sportsbook player prop lines
 app.use("/api/auth",      authRouter);
 app.use("/api/picks",    picksRouter);
 app.use("/api/notes",    notesRouter);

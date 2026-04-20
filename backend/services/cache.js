@@ -5,13 +5,14 @@
 const store = {};
 
 module.exports = {
-  /** Return cached value, or null if missing / expired. */
+  /** Return cached value, or undefined if missing / expired.
+   *  Returns null only when null was explicitly cached (e.g. a failed search). */
   get(key) {
     const entry = store[key];
-    if (!entry) return null;
+    if (!entry) return undefined;
     if (Date.now() > entry.expiresAt) {
       delete store[key];
-      return null;
+      return undefined;
     }
     return entry.data;
   },

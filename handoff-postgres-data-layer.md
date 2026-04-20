@@ -514,24 +514,43 @@ Module load verified cleanly with no `DATABASE_URL` set — falls back to in-mem
 
 This branch is code-complete but **not yet wired to a real database**. Before merging:
 
-1. **Add Railway environment variables:**
-   - `DATABASE_URL` — Railway Postgres connection string (provision addon in Railway dashboard)
-   - `ENABLE_JOBS=true` — activates the cron scheduler in production
-   - `ADMIN_SECRET` — any secret string for the `/api/admin/jobs/run` endpoint
+### Step 1 — ✅ Merge complete (April 19 2026)
 
-2. **Run the migration once after deploy:**
-   ```bash
-   node backend/scripts/migrate.js
-   ```
-   This creates the 6 tables. Safe to run multiple times (all `CREATE IF NOT EXISTS`).
+Main has been merged into this branch. Sessions 34–36 changes are now included:
+- AI Trends fix + AI Props tab (`backend/routes/props.js`, `backend/routes/trends.js`)
+- Pitcher platoon splits (`backend/routes/pitcherSplits.js`)
+- Sportsbook Lines + Tavily (`backend/routes/playerProps.js`, `backend/services/cache.js` bug fix)
 
-3. **Trigger an initial snapshot manually** to seed the DB before cron takes over:
-   ```bash
-   curl -H "x-admin-secret: YOUR_SECRET" https://your-railway-app.up.railway.app/api/admin/jobs/run
-   ```
+### Step 2 — Provision Railway Postgres
 
-4. **Verify DB-HIT responses** — after the snapshot runs, `GET /api/schedule` should return `X-Cache: DB-HIT`.
+In Railway dashboard → your project → **+ New** → **Database** → **PostgreSQL**. Railway automatically injects `DATABASE_URL` into your service's environment.
 
-5. **Merge to main** once verified live on Railway.
+### Step 3 — Add Railway Environment Variables
 
-This branch was intentionally kept separate from `main` until the Railway env vars are confirmed working end-to-end.
+In Railway dashboard → your service → **Variables**:
+- `DATABASE_URL` — auto-set by Railway Postgres addon
+- `ENABLE_JOBS=true` — activates the cron scheduler in production
+- `ADMIN_SECRET` — any secret string for the `/api/admin/jobs/run` endpoint
+- `TAVILY_API_KEY` — already in `backend/.env` locally, add to Railway too
+
+### Step 4 — Run Migration Once After Deploy
+
+```bash
+node backend/scripts/migrate.js
+```
+Creates the 6 tables. Safe to re-run (`CREATE TABLE IF NOT EXISTS`). Can be added as a Railway deploy command.
+
+### Step 5 — Seed Initial Snapshot
+
+Trigger manually to seed the DB before cron takes over:
+```bash
+curl -H "x-admin-secret: YOUR_SECRET" https://your-railway-app.up.railway.app/api/admin/jobs/run
+```
+
+### Step 6 — Verify
+
+After snapshot runs, `GET /api/schedule` should return `X-Cache: DB-HIT`.
+
+### Step 7 — Merge to main
+
+Once verified live on Railway, merge this branch to main.

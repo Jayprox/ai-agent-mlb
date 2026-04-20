@@ -11,11 +11,12 @@ const transformTeam = (teamData) => {
     const player = teamData.players[`ID${playerId}`];
     if (!player) return null;
     return {
-      order:  idx + 1,
-      id:     playerId,
-      name:   player.person.fullName,
-      pos:    player.position.abbreviation,
-      hand:   player.batSide?.code ?? "?",
+      order:      idx + 1,
+      id:         playerId,
+      name:       player.person.fullName,
+      pos:        player.position.abbreviation,
+      primaryPos: player.person.primaryPosition?.abbreviation ?? null,
+      hand:       player.batSide?.code ?? "?",
     };
   }).filter(Boolean);
 };
@@ -35,7 +36,7 @@ router.get("/:gamePk", async (req, res) => {
   }
 
   try {
-    const { data } = await mlb.get(`/game/${gamePk}/boxscore`);
+    const { data } = await mlb.get(`/game/${gamePk}/boxscore?hydrate=person`);
 
     const awayLineup = transformTeam(data.teams.away);
     const homeLineup = transformTeam(data.teams.home);

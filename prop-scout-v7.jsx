@@ -187,6 +187,219 @@ const UMPIRE_STATS = {
   "Gerry Davis":        { kRate: "19.5%", bbRate: "9.3%", tendency: "Veteran — loose zone, walk-friendly", rating: "hitter" },
 };
 
+// Build a plain-text context string for the AI Trends Summary route
+const buildTrendsContext = (game, odds, parkFactors) => {
+  const lines = [];
+  lines.push(`Game: ${game.away.abbr} @ ${game.home.abbr} at ${game.stadium ?? "Unknown Stadium"}`);
+
+  const sp = (p, side) => p
+    ? `${side} SP: ${p.name} (${p.hand ?? "?"}HP) — ERA ${p.era ?? "—"}, WHIP ${p.whip ?? "—"}, K/9 ${p.k9 ?? "—"}, BB/9 ${p.bb9 ?? "—"}`
+    : null;
+  if (sp(game.awayPitcher, "Away")) lines.push(sp(game.awayPitcher, "Away"));
+  if (sp(game.pitcher,     "Home")) lines.push(sp(game.pitcher,     "Home"));
+
+  if (game.weather) {
+    const w = game.weather;
+    lines.push(w.roof
+      ? "Weather: Dome — controlled environment"
+      : `Weather: ${w.temp ?? "?"}°F, ${w.wind ?? "calm"}, ${w.condition ?? ""}${w.hrFavorable ? " — HR-favorable wind" : ""}`
+    );
+  }
+
+  if (game.umpire?.name && game.umpire.name !== "TBD") {
+    const u = game.umpire;
+    const umpLine = [`Umpire: ${u.name}`];
+    if (u.tendency) umpLine.push(u.tendency);
+    if (u.kRate)    umpLine.push(`K Rate ${u.kRate}`);
+    lines.push(umpLine.join(" — "));
+  }
+
+  if (game.bullpen?.away) {
+    const b = game.bullpen.away;
+    lines.push(`Away Bullpen: Grade ${b.grade ?? "?"}, ${b.fatigueLevel ?? "?"} fatigue${b.note ? ` — ${b.note}` : ""}`);
+  }
+  if (game.bullpen?.home) {
+    const b = game.bullpen.home;
+    lines.push(`Home Bullpen: Grade ${b.grade ?? "?"}, ${b.fatigueLevel ?? "?"} fatigue${b.note ? ` — ${b.note}` : ""}`);
+  }
+
+  if (game.nrfi?.lean) {
+    lines.push(`NRFI lean: ${game.nrfi.lean} at ${game.nrfi.confidence ?? "?"}% confidence`);
+  }
+
+  if (odds?.total) {
+    const ml = odds.awayML && odds.homeML
+      ? ` | ML: ${game.away.abbr} ${odds.awayML} / ${game.home.abbr} ${odds.homeML}`
+      : "";
+    lines.push(`Total: O/U ${odds.total}${ml}`);
+  }
+
+  const pf = parkFactors?.[game.home?.abbr];
+  if (pf) lines.push(`Park: ${game.stadium} — ${pf.label} (HR ${pf.hr}x, Hit ${pf.hit}x)`);
+
+  lines.push("\nWrite a 2–3 sentence bettor-focused trend summary for this game.");
+  return lines.filter(Boolean).join("\n");
+};
+
+// Build structured context string for the AI Props engine
+// playerProps: array from /api/player-props (real sportsbook lines), or null
+const buildPropsContext = (game, odds, parkFactors, playerProps = null) => {
+  const lines = [];
+  lines.push(`Game: ${game.away.abbr} @ ${game.home.abbr} at ${game.stadium ?? "Unknown Stadium"}`);
+
+  const spLine = (p, side) => {
+    if (!p) return null;
+    let s = `${side} SP: ${p.name} (${p.hand ?? "?"}HP) — ERA ${p.era ?? "—"}, WHIP ${p.whip ?? "—"}, K/9 ${p.k9 ?? "—"}, BB/9 ${p.bb9 ?? "—"}, avgIP ${p.avgIP ?? "—"}`;
+    if (p.arsenal?.length > 0) {
+      const pitches = p.arsenal.slice(0, 3).map(a =>
+        `${a.type ?? a.abbr} ${a.pct != null ? Math.round(a.pct) + "%" : ""} whiff ${a.whiffPct ?? "?"}%`
+      ).join(", ");
+      s += ` | Arsenal: ${pitches}`;
+    }
+    return s;
+  };
+  if (spLine(game.awayPitcher, "Away")) lines.push(spLine(game.awayPitcher, "Away"));
+  if (spLine(game.pitcher,     "Home")) lines.push(spLine(game.pitcher,     "Home"));
+
+  if (game.weather) {
+    const w = game.weather;
+    lines.push(w.roof
+      ? "Weather: Dome — controlled environment"
+      : `Weather: ${w.temp ?? "?"}°F, ${w.wind ?? "calm"}, ${w.condition ?? ""}${w.hrFavorable ? " — HR-favorable wind" : ""}${w.rainChance && w.rainChance !== "N/A" ? `, ${w.rainChance} rain chance` : ""}`
+    );
+  }
+
+  if (game.umpire?.name && game.umpire.name !== "TBD") {
+    const u = game.umpire;
+    const parts = [`Umpire: ${u.name}`];
+    if (u.kRate)    parts.push(`K Rate ${u.kRate}`);
+    if (u.bbRate)   parts.push(`BB Rate ${u.bbRate}`);
+    if (u.tendency) parts.push(u.tendency);
+    lines.push(parts.join(" — "));
+  }
+
+  const bpLine = (b, side, abbr) => {
+    if (!b) return null;
+    const top = b.relievers?.slice(0, 3).map(r =>
+      `${r.name} (${r.pitches ?? r.pitchesLast3 ?? 0}pc/${r.lastApp ?? "?"})`
+    ).join(", ");
+    return `${side} Bullpen (${abbr}): Grade ${b.grade ?? "?"} — ${b.fatigueLevel ?? "?"} fatigue, ${b.pitchesLast3 ?? "?"}pc last 3d${top ? ` | Top arms: ${top}` : ""}`;
+  };
+  if (bpLine(game.bullpen?.away, "Away", game.away.abbr)) lines.push(bpLine(game.bullpen.away, "Away", game.away.abbr));
+  if (bpLine(game.bullpen?.home, "Home", game.home.abbr)) lines.push(bpLine(game.bullpen.home, "Home", game.home.abbr));
+
+  if (game.nrfi?.lean) {
+    const n = game.nrfi;
+    lines.push(`First Inning: ${n.lean} at ${n.confidence ?? "?"}% confidence — ${game.away.abbr} scores 1st inn ${n.awayFirst?.scoredPct ?? "?"}, ${game.home.abbr} scores 1st inn ${n.homeFirst?.scoredPct ?? "?"}`);
+  }
+
+  const awayLineup = game.lineups?.away ?? [];
+  const homeLineup = game.lineups?.home ?? [];
+  if (awayLineup.length >= 3) {
+    const R = awayLineup.filter(b => b.hand === "R").length;
+    const L = awayLineup.filter(b => b.hand === "L").length;
+    lines.push(`${game.away.abbr} lineup vs ${game.pitcher?.hand ?? "?"}HP: ${R} RHB / ${L} LHB`);
+  }
+  if (homeLineup.length >= 3) {
+    const R = homeLineup.filter(b => b.hand === "R").length;
+    const L = homeLineup.filter(b => b.hand === "L").length;
+    lines.push(`${game.home.abbr} lineup vs ${game.awayPitcher?.hand ?? "?"}HP: ${R} RHB / ${L} LHB`);
+  }
+
+  if (odds?.total) {
+    const ml = odds.awayML && odds.homeML ? ` | ML: ${game.away.abbr} ${odds.awayML} / ${game.home.abbr} ${odds.homeML}` : "";
+    const rl = odds.awaySpread ? ` | RL: ${game.away.abbr} ${odds.awaySpread}(${odds.awaySpreadOdds ?? "?"})` : "";
+    lines.push(`Odds: O/U ${odds.total}${ml}${rl}`);
+  }
+
+  const pf = parkFactors?.[game.home?.abbr];
+  if (pf) lines.push(`Park: ${game.stadium} — ${pf.label} (HR ${pf.hr}x, Hit ${pf.hit}x)`);
+
+  // Inject real sportsbook lines when available — AI anchors against actual market prices
+  if (playerProps?.length) {
+    const fmtLine = (p) => {
+      const o = p.overOdds  ?? "?";
+      const u = p.underOdds ?? "?";
+      return `${p.player} ${p.marketLabel} O/U ${p.line} (O:${o}/U:${u} ${p.book})`;
+    };
+    const kLines  = playerProps.filter(p => p.market === "pitcher_strikeouts").map(fmtLine).join(", ");
+    const tbLines = playerProps.filter(p => p.market === "batter_total_bases").map(fmtLine).join(", ");
+    const hLines  = playerProps.filter(p => p.market === "batter_hits").map(fmtLine).join(", ");
+    if (kLines)  lines.push(`Market K lines: ${kLines}`);
+    if (tbLines) lines.push(`Market TB lines: ${tbLines}`);
+    if (hLines)  lines.push(`Market Hits lines: ${hLines}`);
+  }
+
+  lines.push("\nGenerate 3–5 prop recommendations as a JSON array. Return ONLY the JSON array, no other text.");
+  return lines.filter(Boolean).join("\n");
+};
+
+// ─────────────────────────────────────────────────────────────
+// PLAYER PROPS — client-side fetch (browser-direct, same as game odds)
+// Reuses event IDs stored by fetchOdds so no extra API call needed.
+// ─────────────────────────────────────────────────────────────
+const playerPropsCache    = {};          // key: "Away|Home", value: { props, ts }
+const PLAYER_PROPS_TTL_MS = 10 * 60 * 1000;
+const PLAYER_PROP_MARKETS = "pitcher_strikeouts,batter_total_bases,batter_hits";
+const PLAYER_PROP_BOOKS   = "draftkings,fanduel,williamhill_us,betmgm"; // widen — grab first available
+const PLAYER_PROP_ORDER   = { pitcher_strikeouts: 0, batter_total_bases: 1, batter_hits: 2 };
+const PLAYER_PROP_LABELS  = { pitcher_strikeouts: "K", batter_total_bases: "TB", batter_hits: "H" };
+
+const fetchPlayerPropsDirect = async (awayName, homeName) => {
+  if (IS_ODDS_SANDBOX || !ODDS_API_KEY) return [];
+  const cacheKey = `${awayName}|${homeName}`;
+  const cached   = playerPropsCache[cacheKey];
+  if (cached && (Date.now() - cached.ts) < PLAYER_PROPS_TTL_MS) return cached.props;
+
+  // Ensure game odds have been fetched so eventIdMap is populated
+  if (!oddsCache.eventIdMap) await fetchOdds();
+
+  const eventId = oddsCache.eventIdMap?.[cacheKey];
+  if (!eventId) {
+    console.log(`  · Player props: no Odds API event for ${awayName} @ ${homeName}`);
+    playerPropsCache[cacheKey] = { props: [], ts: Date.now() };
+    return [];
+  }
+
+  const res = await fetch(
+    `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${eventId}/odds` +
+    `?apiKey=${ODDS_API_KEY}&markets=${PLAYER_PROP_MARKETS}&regions=us&oddsFormat=american&bookmakers=${PLAYER_PROP_BOOKS}`
+  );
+  if (!res.ok) throw new Error(`Odds API ${res.status}`);
+  const data = await res.json();
+
+  const fmtOdds = (n) => (n == null ? null : n > 0 ? `+${n}` : String(n));
+  const props   = [];
+  const seen    = new Set();
+
+  for (const book of (data.bookmakers ?? [])) {
+    for (const market of (book.markets ?? [])) {
+      const marketLabel = PLAYER_PROP_LABELS[market.key];
+      if (!marketLabel) continue;
+      const byPlayer = {};
+      for (const outcome of (market.outcomes ?? [])) {
+        const player = outcome.description || outcome.name;
+        const side   = outcome.name.toLowerCase();
+        if (!byPlayer[player]) byPlayer[player] = {};
+        byPlayer[player][side] = { price: outcome.price, point: outcome.point };
+      }
+      for (const [player, sides] of Object.entries(byPlayer)) {
+        const dupeKey = `${player}:${market.key}`;
+        if (seen.has(dupeKey)) continue;
+        seen.add(dupeKey);
+        const over  = sides["over"];
+        const under = sides["under"];
+        if (!over?.point) continue;
+        props.push({ player, market: market.key, marketLabel, line: over.point, overOdds: fmtOdds(over.price), underOdds: fmtOdds(under?.price ?? null), book: book.title });
+      }
+    }
+  }
+
+  props.sort((a, b) => (PLAYER_PROP_ORDER[a.market] ?? 9) - (PLAYER_PROP_ORDER[b.market] ?? 9) || a.player.localeCompare(b.player));
+  playerPropsCache[cacheKey] = { props, ts: Date.now() };
+  return props;
+};
+
 // Format an ISO datetime string in the user's local timezone
 const formatLocalTime = (isoStr) => {
   if (!isoStr) return null;
@@ -322,7 +535,7 @@ const apiMutate = async (path, method, body) => {
   return res.json();
 };
 
-const oddsCache = { data: null, ts: 0, remaining: null, used: null, fetchedAt: null, error: null };
+const oddsCache = { data: null, ts: 0, remaining: null, used: null, fetchedAt: null, error: null, eventIdMap: null };
 const ODDS_CACHE_TTL_MS = 15 * 60 * 1000;
 
 const fetchOdds = async (forceRefresh = false) => {
@@ -397,9 +610,11 @@ const fetchOdds = async (forceRefresh = false) => {
       return { awayML, homeML, total, overOdds, underOdds, f5Total, awaySpread, awaySpreadOdds, homeSpread, homeSpreadOdds };
     };
 
-    const map = {};
+    const map        = {};
+    const eventIdMap = {};
     games.forEach(g => {
       const key = `${g.away_team}|${g.home_team}`;
+      eventIdMap[key] = g.id; // store Odds API event ID for player-props lookup
 
       // Build per-book data for each target book
       const books = {};
@@ -419,9 +634,10 @@ const fetchOdds = async (forceRefresh = false) => {
       map[key] = { ...primary, book: primaryLabel, books };
     });
 
-    oddsCache.data      = map;
-    oddsCache.ts        = Date.now();
-    oddsCache.remaining = remaining;
+    oddsCache.data       = map;
+    oddsCache.eventIdMap = eventIdMap;
+    oddsCache.ts         = Date.now();
+    oddsCache.remaining  = remaining;
     oddsCache.used      = used;
     oddsCache.fetchedAt = new Date().toLocaleTimeString();
     return oddsCache;
@@ -2083,7 +2299,14 @@ export default function App() {
   const [liveNrfiData, setLiveNrfiData] = useState({});     // gamePk    → { awayFirst, homeFirst, lean, confidence }
   const [liveScores,   setLiveScores]   = useState({});     // gamePk    → { inning, halfInning, awayScore, homeScore, outs }
   const [liveInjuries, setLiveInjuries] = useState([]);
-  const [gameNotes, setGameNotes]       = useState({});  // gamePk → note string
+  const [gameNotes,    setGameNotes]    = useState({});     // gamePk → note string
+  const [liveTrends,   setLiveTrends]   = useState({});     // gamePk → summary string | "loading" | null
+  const trendsFetched  = useRef(new Set());                  // tracks gamePks already fetched (avoids stale-closure re-fetch)
+  const [liveAiProps,    setLiveAiProps]    = useState({});  // gamePk → [...props] | "loading" | null
+  const aiPropsFetched   = useRef(new Set());                 // guards against stale-closure re-fetch
+  const [livePlayerProps, setLivePlayerProps] = useState({}); // gamePk → { props: [] } | "loading" | null
+  const playerPropsFetched = useRef(new Set());               // guards sportsbook lines fetch
+  const [pitcherPlatoonSplits, setPitcherPlatoonSplits] = useState({}); // pitcherId → {vsL,vsR} | "loading" | null
   const [noteSaveState, setNoteSaveState] = useState(null); // null | "saving" | "saved"
   const [copiedPickId, setCopiedPickId] = useState(null);   // id of pick just copied to clipboard
   const [parlayLabels, setParlayLabels] = useState([]);      // labels of props selected for parlay (max 3)
@@ -2154,6 +2377,102 @@ export default function App() {
       .then(d => setGameNotes(prev => ({ ...prev, [key]: d.note ?? "" })))
       .catch(() => setGameNotes(prev => ({ ...prev, [key]: "" })));
   }, [view, selectedId]);
+
+  // Fetch AI Trends Summary when Intel tab opens (lazy — ref guards against stale-closure re-fetch)
+  useEffect(() => {
+    if (IS_STATS_SANDBOX) return;
+    if (view !== "game" || !selectedId || tab !== "intel") return;
+    const key = String(selectedId);
+    if (trendsFetched.current.has(key)) return; // already fetched or in-flight
+
+    const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
+    if (!game) return;
+
+    trendsFetched.current.add(key); // mark before async so concurrent triggers are blocked
+    const odds = getGameOdds(game);
+    const context = buildTrendsContext(game, odds, PARK_FACTORS);
+
+    setLiveTrends(prev => ({ ...prev, [key]: "loading" }));
+    apiMutate(`/api/trends/${key}`, "POST", { context })
+      .then(d => {
+        const summary = d?.summary ?? null;
+        setLiveTrends(prev => ({ ...prev, [key]: summary }));
+        if (!summary) trendsFetched.current.delete(key); // allow retry if API returned empty
+      })
+      .catch(() => {
+        trendsFetched.current.delete(key); // allow retry on network error
+        setLiveTrends(prev => ({ ...prev, [key]: null }));
+      });
+  }, [view, selectedId, tab]);
+
+  // Fetch sportsbook player prop lines when Props tab opens (client-side, uses VITE_ODDS_API_KEY)
+  useEffect(() => {
+    if (IS_ODDS_SANDBOX || IS_STATS_SANDBOX || view !== "game" || !selectedId || tab !== "props") return;
+    const key  = String(selectedId);
+    if (playerPropsFetched.current.has(key)) return;
+    const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
+    if (!game) return;
+    playerPropsFetched.current.add(key);
+    setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
+    fetchPlayerPropsDirect(game.away.name, game.home.name)
+      .then(props => setLivePlayerProps(prev => ({ ...prev, [key]: { props } })))
+      .catch(() => {
+        playerPropsFetched.current.delete(key);
+        setLivePlayerProps(prev => ({ ...prev, [key]: { props: [], error: true } }));
+      });
+  }, [view, selectedId, tab]);
+
+  // Fetch AI Props when Props tab opens — waits for sportsbook lines so they can be included in context
+  // livePlayerProps in dependency array: re-fires when lines load, ref blocks duplicate AI calls
+  useEffect(() => {
+    if (IS_STATS_SANDBOX) return;
+    if (view !== "game" || !selectedId || tab !== "props") return;
+    const key = String(selectedId);
+
+    // Wait for player props to resolve before building context (skip wait in sandbox)
+    const ppState = livePlayerProps[key];
+    const ppReady = IS_ODDS_SANDBOX || (ppState !== undefined && ppState !== "loading" && typeof ppState === "object");
+    if (!ppReady) return;
+
+    if (aiPropsFetched.current.has(key)) return;
+
+    const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
+    if (!game) return;
+
+    aiPropsFetched.current.add(key);
+    const odds           = getGameOdds(game);
+    const playerLines    = Array.isArray(ppState?.props) ? ppState.props : null;
+    const context        = buildPropsContext(game, odds, PARK_FACTORS, playerLines);
+
+    setLiveAiProps(prev => ({ ...prev, [key]: "loading" }));
+    apiMutate(`/api/props/${key}`, "POST", { context })
+      .then(d => {
+        const props = Array.isArray(d?.props) ? d.props : null;
+        // Store full response so searchUsed flag is preserved alongside props
+        const result = props ? { props, searchUsed: d.searchUsed ?? false } : null;
+        setLiveAiProps(prev => ({ ...prev, [key]: result }));
+        if (!props || props.length === 0) aiPropsFetched.current.delete(key); // allow retry
+      })
+      .catch(() => {
+        aiPropsFetched.current.delete(key);
+        setLiveAiProps(prev => ({ ...prev, [key]: null }));
+      });
+  }, [view, selectedId, tab, livePlayerProps]);
+
+  // Fetch pitcher platoon splits (vs LHH / vs RHH) when Overview pitcher card is visible
+  useEffect(() => {
+    if (IS_SAVANT_SANDBOX || view !== "game" || !selectedId) return;
+    const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
+    if (!game) return;
+    const p = pitcherSide === "home" ? game.pitcher : (game.awayPitcher ?? game.pitcher);
+    if (!p?.id) return;
+    const key = String(p.id);
+    if (key in pitcherPlatoonSplits) return; // already fetched or in-flight
+    setPitcherPlatoonSplits(prev => ({ ...prev, [key]: "loading" }));
+    apiFetch(`/api/pitcher-splits/${key}`)
+      .then(d => setPitcherPlatoonSplits(prev => ({ ...prev, [key]: d ?? null })))
+      .catch(() => setPitcherPlatoonSplits(prev => ({ ...prev, [key]: null })));
+  }, [view, selectedId, pitcherSide]);
 
   // Keep module-level _authToken in sync with React state
   useEffect(() => { _authToken = authToken; }, [authToken]);
@@ -3055,6 +3374,42 @@ export default function App() {
                     ))}
                   </div>
 
+                  {/* Pitcher platoon splits — vs LHH / vs RHH */}
+                  {(() => {
+                    const key = String(activePitcher.id);
+                    const splitsData = pitcherPlatoonSplits[key];
+                    // Loading state — show skeleton boxes so user knows they're coming
+                    if (splitsData === "loading") return (
+                      <div style={{ display: "flex", gap: 5, marginBottom: 6 }}>
+                        {["vs LHH", "vs RHH"].map(label => (
+                          <div key={label} style={{ flex: 1, background: "#0e0f1a", borderRadius: 8, padding: "6px 9px" }}>
+                            <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{label}</div>
+                            <div style={{ fontSize: 9, color: "#4b5563" }}>loading…</div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                    if (!splitsData) return null; // not yet fetched (shouldn't happen) or IS_SAVANT_SANDBOX
+                    const { vsL, vsR } = splitsData;
+                    // Both null = no data available for this pitcher
+                    if (!vsL && !vsR) return (
+                      <div style={{ fontSize: 8, color: "#4b5563", marginBottom: 6, fontStyle: "italic" }}>Platoon splits unavailable (small sample)</div>
+                    );
+                    return (
+                      <div style={{ display: "flex", gap: 5, marginBottom: 6 }}>
+                        {[["vs LHH", vsL], ["vs RHH", vsR]].map(([label, d]) => (
+                          <div key={label} style={{ flex: 1, background: "#0e0f1a", borderRadius: 8, padding: "6px 9px" }}>
+                            <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{label}</div>
+                            {d ? (<>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: parseFloat(d.avg) >= 0.280 ? "#ef4444" : parseFloat(d.avg) <= 0.220 ? "#22c55e" : "#e5e7eb", fontFamily: "monospace" }}>{d.avg} AVG</div>
+                              <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>{d.kPct} K · {d.bbPct} BB · {d.pa} PA</div>
+                            </>) : <div style={{ fontSize: 9, color: "#4b5563" }}>—</div>}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+
                   {/* Season record + clean start rate */}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, marginBottom: 6 }}>
                     {pitcherRecord && <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{pitcherRecord}</span>}
@@ -3087,6 +3442,35 @@ export default function App() {
                           );
                         })}
                         <div style={{ fontSize: 8, color: "#4b5563", alignSelf: "flex-start", paddingLeft: 4, whiteSpace: "nowrap" }}>ERA trend</div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Last 3 starts mini table */}
+                  {recentStarts.length >= 1 && (() => {
+                    const last3 = recentStarts.slice(0, 3);
+                    return (
+                      <div style={{ marginBottom: 6 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "32px 1fr 32px 20px 20px 20px 34px", gap: "3px 6px", alignItems: "center" }}>
+                          {/* Header */}
+                          {["OPP", "", "IP", "K", "ER", "RES", "PC"].map(h => (
+                            <div key={h} style={{ fontSize: 8, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "monospace" }}>{h}</div>
+                          ))}
+                          {/* Rows */}
+                          {last3.map((g, i) => {
+                            const resultColor = g.result === "W" ? "#22c55e" : g.result === "L" ? "#ef4444" : "#6b7280";
+                            const erColor     = g.er === 0 ? "#22c55e" : g.er <= 2 ? "#f59e0b" : "#ef4444";
+                            return [
+                              <div key={`opp-${i}`}  style={{ fontSize: 9, fontWeight: 700, color: "#9ca3af", fontFamily: "monospace" }}>{g.opponent}</div>,
+                              <div key={`dt-${i}`}   style={{ fontSize: 8, color: "#4b5563" }}>{g.date ? g.date.slice(5).replace("-", "/") : ""}</div>,
+                              <div key={`ip-${i}`}   style={{ fontSize: 9, color: "#e5e7eb", fontFamily: "monospace" }}>{g.ip}</div>,
+                              <div key={`k-${i}`}    style={{ fontSize: 9, color: "#a78bfa", fontFamily: "monospace" }}>{g.k}</div>,
+                              <div key={`er-${i}`}   style={{ fontSize: 9, color: erColor,  fontFamily: "monospace" }}>{g.er}</div>,
+                              <div key={`res-${i}`}  style={{ fontSize: 9, color: resultColor, fontFamily: "monospace" }}>{g.result}</div>,
+                              <div key={`pc-${i}`}   style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{g.pc != null ? `${g.pc}p` : "—"}</div>,
+                            ];
+                          })}
+                        </div>
                       </div>
                     );
                   })()}
@@ -3164,19 +3548,79 @@ export default function App() {
                       const sc = b.matchupScore;
                       const scColor = scoreColor(sc);
                       const hlog = liveHittingLog[b.id];
-                      const avg = hlog?.avg ?? b.avg ?? ".---";
+                      const avg  = hlog?.avg ?? b.avg ?? ".---";
+                      const hand = (hlog?.hand && hlog.hand !== "?") ? hlog.hand : (b.hand ?? "?");
                       return (
                         <div key={b.id ?? idx} style={{ display: "flex", alignItems: "center", gap: 8, background: "#0e0f1a", borderRadius: 8, padding: "6px 10px" }}>
                           <div style={{ width: 18, height: 18, borderRadius: 5, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#6b7280", flexShrink: 0 }}>{b.order ?? idx + 1}</div>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{b.name}</div>
-                            <div style={{ fontSize: 9, color: "#6b7280" }}>{b.pos} · {b.hand ?? "?"}H · {avg}</div>
+                            <div style={{ fontSize: 9, color: "#6b7280" }}>{b.pos} · {hand}H · {avg}</div>
                           </div>
                           <div style={{ background: `${scColor}18`, border: `1px solid ${scColor}44`, borderRadius: 6, padding: "2px 7px", fontSize: 11, fontWeight: 700, color: scColor, fontFamily: "monospace", flexShrink: 0 }}>{sc}</div>
                         </div>
                       );
                     })}
                   </div>
+
+                  {/* ── Item 1: Primary pitch edge callout ── */}
+                  {activePitcher.arsenalLive && activePitcher.arsenal?.length > 0 && (() => {
+                    // Best swing-and-miss pitch by whiff %
+                    const bestWhiff = [...activePitcher.arsenal].sort((a, b) => (parseFloat(b.whiffPct) || 0) - (parseFloat(a.whiffPct) || 0))[0];
+                    const whiffNum  = parseFloat(bestWhiff?.whiffPct);
+                    if (isNaN(whiffNum) || whiffNum < 25) return null;
+
+                    // Check if any loaded splits tell us how the lineup handles this pitch
+                    const abbr = bestWhiff.abbr;
+                    const splitsForPitch = facingLineup
+                      .map(b => batterSplits[b.id]?.[abbr])
+                      .filter(Boolean);
+                    const avgLineupAvg = splitsForPitch.length >= 3
+                      ? splitsForPitch.reduce((s, sp) => s + (parseFloat(sp.avg) || 0), 0) / splitsForPitch.length
+                      : null;
+
+                    const pitchLabel = bestWhiff.type ?? bestWhiff.abbr;
+                    const isElite    = whiffNum >= 38;
+                    const lineupNote = avgLineupAvg != null
+                      ? avgLineupAvg >= 0.270 ? ` · lineup AVG .${Math.round(avgLineupAvg * 1000).toString().padStart(3, "0")} vs it (handles)`
+                      : avgLineupAvg <= 0.220 ? ` · lineup AVG .${Math.round(avgLineupAvg * 1000).toString().padStart(3, "0")} vs it (weak spot)`
+                      : ""
+                      : "";
+
+                    return (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, background: "#0e0f1a", borderRadius: 8, padding: "7px 10px" }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>Primary Chase Pitch</div>
+                          <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 600 }}>{pitchLabel} — {Math.round(whiffNum)}% whiff{lineupNote}</div>
+                        </div>
+                        <span style={{ fontSize: 8, fontWeight: 700, padding: "2px 6px", borderRadius: 4, flexShrink: 0,
+                          color: isElite ? "#22c55e" : "#f59e0b",
+                          background: isElite ? "rgba(34,197,94,0.12)" : "rgba(245,158,11,0.12)",
+                          border: `1px solid ${isElite ? "rgba(34,197,94,0.3)" : "rgba(245,158,11,0.3)"}` }}>
+                          {isElite ? "ELITE" : "SOLID"}
+                        </span>
+                      </div>
+                    );
+                  })()}
+
+                  {/* ── Item 3: K% confluence note ── */}
+                  {(() => {
+                    const k9 = parseFloat(activePitcher?.kPer9);
+                    if (isNaN(k9)) return null;
+
+                    let note = null;
+                    if      (k9 >= 9.0 && avgScore <= 45) note = { text: `High K environment — K/9 ${k9.toFixed(1)}, lineup avg score ${avgScore}`, color: "#22c55e" };
+                    else if (k9 >= 8.0 && avgScore <= 38) note = { text: `K-friendly matchup — K/9 ${k9.toFixed(1)} meets a weak-contact lineup (avg score ${avgScore})`, color: "#22c55e" };
+                    else if (k9 <= 5.5 && avgScore >= 42) note = { text: `Low K environment — K/9 ${k9.toFixed(1)}, lineup avg score ${avgScore} (batter edge)`, color: "#ef4444" };
+                    else if (k9 <= 6.5 && avgScore >= 42) note = { text: `Contact matchup — K/9 ${k9.toFixed(1)} vs a lineup that makes contact (avg score ${avgScore})`, color: "#f59e0b" };
+
+                    if (!note) return null;
+                    return (
+                      <div style={{ marginTop: 8, fontSize: 10, color: note.color, background: `${note.color}0f`, border: `1px solid ${note.color}28`, borderRadius: 8, padding: "6px 10px", lineHeight: 1.4 }}>
+                        {note.text}
+                      </div>
+                    );
+                  })()}
                 </Card>
               );
             })()}
@@ -3372,6 +3816,15 @@ export default function App() {
                             {streakTone && (
                               <span style={{ background: streakTone.bg, border: `1px solid ${streakTone.border}`, borderRadius: 999, padding: "1px 5px", fontSize: 8, fontWeight: 800, color: streakTone.color, textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>{streakTone.label}</span>
                             )}
+                            {(() => {
+                              const OF = new Set(["LF","CF","RF"]);
+                              const oop = b.primaryPos && b.pos !== b.primaryPos
+                                && b.pos !== "DH" && b.primaryPos !== "DH"
+                                && !(OF.has(b.pos) && OF.has(b.primaryPos));
+                              return oop ? (
+                                <span style={{ background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.35)", borderRadius: 999, padding: "1px 5px", fontSize: 8, fontWeight: 800, color: "#fbbf24", textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>⚠ {b.pos} (norm. {b.primaryPos})</span>
+                              ) : null;
+                            })()}
                           </div>
                           <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>{b.pos} · {b.hand}H · {b.avg}</div>
                         </div>
@@ -3858,36 +4311,32 @@ export default function App() {
               )}
             </Card>
 
-            {/* Game Notes */}
-            <SLabel>Game Notes</SLabel>
-            <Card>
-              {(() => {
-                const key = String(selectedId);
-                const note = gameNotes[key] ?? "";
-                const fetched = gameNotes[key] !== undefined;
-                return (
-                  <div>
-                    <textarea
-                      value={note}
-                      onChange={e => {
-                        setNoteSaveState(null);
-                        setGameNotes(prev => ({ ...prev, [key]: e.target.value }));
-                      }}
-                      onBlur={e => { if (fetched) saveNote(key, e.target.value); }}
-                      placeholder={fetched ? 'Jot a note… "Wheeler velo looked low" or "rain delay likely"' : "Loading…"}
-                      disabled={!fetched}
-                      maxLength={500}
-                      style={{ width: "100%", background: "#1e2030", border: "1px solid #374151", borderRadius: 8, padding: "10px", color: "#e5e7eb", fontSize: 11, fontFamily: "monospace", resize: "none", minHeight: 68, lineHeight: 1.5, outline: "none", opacity: fetched ? 1 : 0.4 }}
-                    />
-                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
-                      <span style={{ fontSize: 9, color: "#374151" }}>{note.length}/500</span>
-                      {noteSaveState === "saving" && <span style={{ fontSize: 9, color: "#6b7280" }}>saving…</span>}
-                      {noteSaveState === "saved"  && <span style={{ fontSize: 9, color: "#22c55e" }}>✓ saved</span>}
-                    </div>
+            {/* AI Trends Summary */}
+            {(() => {
+              const key = String(selectedId);
+              const trendsState = liveTrends[key];
+              const isLoading = trendsState === "loading";
+              const summary = typeof trendsState === "string" && trendsState !== "loading" ? trendsState : null;
+              if (!isLoading && !summary) return null;
+              return (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <SLabel style={{ marginBottom: 0 }}>AI Trends</SLabel>
+                    <span style={{ fontSize: 8, fontWeight: 700, color: "#a78bfa", background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 4, padding: "2px 6px" }}>AI</span>
                   </div>
-                );
-              })()}
-            </Card>
+                  <Card>
+                    {isLoading ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+                        <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#a78bfa", animation: "pulse 1.2s ease-in-out infinite" }} />
+                        <span style={{ fontSize: 11, color: "#6b7280", fontStyle: "italic" }}>Generating trend summary…</span>
+                      </div>
+                    ) : (
+                      <p style={{ fontSize: 12, color: "#d1d5db", lineHeight: 1.7, margin: 0 }}>{summary}</p>
+                    )}
+                  </Card>
+                </>
+              );
+            })()}
           </>)}
 
           {/* ── PROPS ── */}
@@ -4010,6 +4459,158 @@ export default function App() {
                   </Card>
                 );
               })}
+
+              {/* ── SPORTSBOOK LINES section ─────────────────── */}
+              {!IS_ODDS_SANDBOX && !IS_STATS_SANDBOX && (() => {
+                const spKey   = String(selectedId);
+                const spState = livePlayerProps[spKey];
+                if (spState === undefined) return null; // not yet triggered (sandbox or pre-tab)
+
+                const allProps = Array.isArray(spState?.props) ? spState.props : [];
+                const bookName = allProps[0]?.book ?? null;
+                const hasError = spState?.error === true;
+
+                const grouped = {
+                  pitcher_strikeouts: allProps.filter(p => p.market === "pitcher_strikeouts"),
+                  batter_total_bases: allProps.filter(p => p.market === "batter_total_bases"),
+                  batter_hits:        allProps.filter(p => p.market === "batter_hits"),
+                };
+                const hasData = allProps.length > 0;
+
+                const fmtOdds = (s) => s ?? "—";
+
+                return (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, marginBottom: 8 }}>
+                      <SLabel style={{ marginBottom: 0 }}>Sportsbook Lines</SLabel>
+                      {bookName && <span style={{ fontSize: 8, fontWeight: 700, color: "#10b981", background: "rgba(16,185,129,0.12)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: 4, padding: "2px 6px" }}>{bookName}</span>}
+                      {hasData && <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>}
+                    </div>
+
+                    {spState === "loading" ? (
+                      <Card>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0" }}>
+                          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981", flexShrink: 0, animation: "pulse 1.5s ease-in-out infinite" }} />
+                          <span style={{ fontSize: 12, color: "#6b7280" }}>Fetching sportsbook lines…</span>
+                        </div>
+                      </Card>
+                    ) : !hasData ? (
+                      <Card>
+                        <div style={{ fontSize: 11, color: "#4b5563", textAlign: "center", padding: "8px 0" }}>
+                          {hasError ? "Could not load lines — Odds API unavailable" : "No player prop lines posted yet"}
+                        </div>
+                      </Card>
+                    ) : (
+                      <Card style={{ padding: "8px 12px" }}>
+                        {[
+                          { mKey: "pitcher_strikeouts", label: "Strikeouts", badge: "K",  color: "#a78bfa" },
+                          { mKey: "batter_total_bases", label: "Total Bases", badge: "TB", color: "#60a5fa" },
+                          { mKey: "batter_hits",        label: "Hits",        badge: "H",  color: "#34d399" },
+                        ].map(({ mKey, label, badge, color }) => {
+                          const rows = grouped[mKey];
+                          if (!rows.length) return null;
+                          return (
+                            <div key={mKey} style={{ marginBottom: 10 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                                <span style={{ fontSize: 8, fontWeight: 700, color, background: `${color}1a`, border: `1px solid ${color}40`, borderRadius: 4, padding: "1px 5px" }}>{badge}</span>
+                                <span style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</span>
+                              </div>
+                              {rows.map((p, i) => {
+                                const lastName    = p.player.split(" ").slice(-1)[0];
+                                const overLabel   = `${lastName} OVER ${p.line} ${badge}`;
+                                const underLabel  = `${lastName} UNDER ${p.line} ${badge}`;
+                                const overPick    = { label: overLabel,  lean: "OVER",  positive: true,  confidence: null, propType: badge };
+                                const underPick   = { label: underLabel, lean: "UNDER", positive: false, confidence: null, propType: badge };
+                                const overLogged  = isLogged(overPick);
+                                const underLogged = isLogged(underPick);
+                                return (
+                                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, paddingBottom: 7, marginBottom: i < rows.length - 1 ? 7 : 0, borderBottom: i < rows.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none" }}>
+                                    {/* Player + line */}
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div style={{ fontSize: 11, fontWeight: 600, color: "#e5e7eb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.player}</div>
+                                      <div style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>O/U {p.line}</div>
+                                    </div>
+                                    {/* OVER */}
+                                    <button
+                                      onClick={() => !overLogged && logPick(overPick)}
+                                      title={overLogged ? "Logged" : `Log OVER ${p.line}`}
+                                      style={{ fontSize: 9, fontWeight: 700, background: overLogged ? "rgba(34,197,94,0.15)" : "rgba(34,197,94,0.06)", border: `1px solid ${overLogged ? "rgba(34,197,94,0.5)" : "rgba(34,197,94,0.2)"}`, borderRadius: 6, padding: "4px 7px", cursor: overLogged ? "default" : "pointer", color: overLogged ? "#22c55e" : "#6b7280", lineHeight: 1, flexShrink: 0, whiteSpace: "nowrap" }}>
+                                      {overLogged ? "✓" : `O ${fmtOdds(p.overOdds)}`}
+                                    </button>
+                                    {/* UNDER */}
+                                    <button
+                                      onClick={() => !underLogged && logPick(underPick)}
+                                      title={underLogged ? "Logged" : `Log UNDER ${p.line}`}
+                                      style={{ fontSize: 9, fontWeight: 700, background: underLogged ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.06)", border: `1px solid ${underLogged ? "rgba(239,68,68,0.5)" : "rgba(239,68,68,0.2)"}`, borderRadius: 6, padding: "4px 7px", cursor: underLogged ? "default" : "pointer", color: underLogged ? "#ef4444" : "#6b7280", lineHeight: 1, flexShrink: 0, whiteSpace: "nowrap" }}>
+                                      {underLogged ? "✓" : `U ${fmtOdds(p.underOdds)}`}
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </Card>
+                    )}
+                  </>
+                );
+              })()}
+
+              {/* ── AI ANALYSIS section ───────────────────────── */}
+              {!IS_STATS_SANDBOX && (() => {
+                const aiKey    = String(selectedId);
+                const aiState  = liveAiProps[aiKey];
+                if (aiState === null) return null; // silent failure — don't show anything
+                // aiState is { props: [...], searchUsed: bool } | "loading" | null
+                const aiProps    = Array.isArray(aiState?.props) ? aiState.props : [];
+                const searchUsed = aiState?.searchUsed === true;
+                return (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, marginBottom: 8 }}>
+                      <SLabel style={{ marginBottom: 0 }}>AI Analysis</SLabel>
+                      <span style={{ fontSize: 8, fontWeight: 700, color: "#a78bfa", background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 4, padding: "2px 6px" }}>AI</span>
+                      {searchUsed && <span style={{ fontSize: 8, fontWeight: 700, color: "#38bdf8", background: "rgba(56,189,248,0.12)", border: "1px solid rgba(56,189,248,0.3)", borderRadius: 4, padding: "2px 6px" }}>WEB</span>}
+                    </div>
+
+                    {aiState === "loading" ? (
+                      <Card>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0" }}>
+                          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#a78bfa", flexShrink: 0, animation: "pulse 1.5s ease-in-out infinite" }} />
+                          <span style={{ fontSize: 12, color: "#6b7280" }}>Analyzing game data…</span>
+                        </div>
+                      </Card>
+                    ) : aiProps.map((p, i) => {
+                      const logged   = isLogged(p);
+                      const inParlay = parlayLabels.includes(p.label);
+                      const parlayFull = parlayLabels.length >= 3 && !inParlay;
+                      return (
+                        <Card key={i} style={inParlay ? { borderColor: "rgba(251,191,36,0.4)" } : {}}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", flex: 1, paddingRight: 8, lineHeight: 1.4 }}>{p.label}</div>
+                            <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                              <LeanBadge label={p.lean} positive={p.positive} small />
+                              <button
+                                onClick={() => { if (parlayFull) return; setParlayLabels(prev => inParlay ? prev.filter(l => l !== p.label) : [...prev, p.label]); }}
+                                title={parlayFull ? "Max 3 legs" : inParlay ? "Remove from parlay" : "Add to parlay"}
+                                style={{ fontSize: 10, fontWeight: 700, background: inParlay ? "rgba(251,191,36,0.15)" : "rgba(255,255,255,0.04)", border: `1px solid ${inParlay ? "rgba(251,191,36,0.5)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 6px", cursor: parlayFull ? "default" : "pointer", color: inParlay ? "#fbbf24" : "#4b5563", opacity: parlayFull ? 0.35 : 1, lineHeight: 1 }}>
+                                🔗
+                              </button>
+                              <button
+                                onClick={() => !logged && logPick(p)}
+                                title={logged ? "Already logged" : "Log this pick"}
+                                style={{ fontSize: 13, background: logged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)", border: `1px solid ${logged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 7px", cursor: logged ? "default" : "pointer", color: logged ? "#22c55e" : "#6b7280", transition: "all 0.15s", lineHeight: 1 }}>
+                                {logged ? "✓" : "＋"}
+                              </button>
+                            </div>
+                          </div>
+                          <ConfBar pct={p.confidence} positive={p.positive} />
+                          <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, lineHeight: 1.4 }}>{p.reason}</div>
+                        </Card>
+                      );
+                    })}
+                  </>
+                );
+              })()}
             </>)}
           </>)}
 
