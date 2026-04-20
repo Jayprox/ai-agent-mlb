@@ -2595,3 +2595,27 @@ The `DB-HIT` confirms Railway Postgres is migrated, populated, and serving the s
 - `boardPropsFetched` — useRef(Set) to track which gamePks have had props fetched
 
 *Updated April 20 2026 — Session 41 complete · Board view (HR + Hits) fixed and verified live*
+
+---
+
+## ✅ Session 42 — Injury Feed
+
+**What was added:**
+- `backend/routes/injuries.js` already existed (pre-built) — just needed to be mounted
+- `backend/server.js`: mounted `app.use("/api/injuries", require("./routes/injuries"))`
+- Frontend state + fetch was also pre-built: `liveInjuries` state (array), `apiFetch("/api/injuries")` on mount, `injuredIds` Set computed at render time
+
+**Three IL badge locations:**
+1. **Slate card** (`SlateCard` component) — `⚠ SP IL` red pill badge in the lean badges row when either team's probable pitcher (`game.pitcher.id` or `game.awayPitcher.id`) is in the injury set. `injuredIds` passed as a new prop (defaults to `new Set()` so old calls don't break)
+2. **Overview pitcher card** — `⚠ IL` red pill next to the pitcher's name (inside the name+badge row div, before `kLeanBadge`)
+3. **Lineup tab batter rows** — `⚠ IL` red pill next to batter name (was pre-wired, just needed route mounted)
+
+**Backend route behavior (`/api/injuries`):**
+- Fetches MLB Stats API `/transactions` for last 14 days (`sportId=1`)
+- Filters for IL placements only (not activations/reinstatements)
+- Deduplicates by `playerId` — keeps most recent transaction per player
+- Returns `{ injuries: [{ playerId, playerName, team, status, date, description }] }`
+- 30-min backend cache (`CACHE_TTL_MS`)
+- Only fires when `IS_STATS_SANDBOX = false`
+
+*Updated April 20 2026 — Session 42 complete · Injury feed live*

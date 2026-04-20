@@ -32,6 +32,7 @@ app.use("/api/arsenal",  require("./routes/arsenal"));  // Baseball Savant: pitc
 app.use("/api/splits",          require("./routes/splits"));        // Baseball Savant: batter vs pitch type
 app.use("/api/pitcher-splits",  require("./routes/pitcherSplits")); // Baseball Savant: pitcher vs LHH/RHH
 app.use("/api/nrfi",     require("./routes/nrfi"));     // MLB Stats: first-inning team scoring tendencies
+app.use("/api/injuries",  require("./routes/injuries"));  // MLB Stats: recent IL placements (last 14 days)
 app.use("/api/bullpen",   require("./routes/bullpen"));   // MLB Stats: bullpen fatigue + reliever usage
 app.use("/api/linescore", require("./routes/linescore")); // MLB Stats: live score + inning for in-progress games
 app.use("/api/boxscore",    require("./routes/boxscore"));    // MLB Stats: full game boxscore for live + final games

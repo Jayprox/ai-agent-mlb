@@ -1449,7 +1449,7 @@ const BullpenCard = ({ label, data }) => {
 // ─────────────────────────────────────────────
 // SLATE CARD (mini, for game selector)
 // ─────────────────────────────────────────────
-const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null, liveScore = null }) => {
+const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null, liveScore = null, injuredIds = new Set() }) => {
   const topProp = bestBet ?? (game.props[0]?.lean ? game.props[0] : null);
   // Merge live odds if available for this game
   const liveKey       = `${game.away.name}|${game.home.name}`;
@@ -1582,6 +1582,11 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
         {game.nrfi?.lean === "NRFI" && (game.nrfi?.confidence ?? 0) >= 62 && <LeanBadge label="NRFI" positive={true} small />}
         {lineMove === "over"  && <LeanBadge label="↑ OVER"  positive={true}  small />}
         {lineMove === "under" && <LeanBadge label="↓ UNDER" positive={false} small />}
+        {(injuredIds.has(String(game.pitcher?.id)) || injuredIds.has(String(game.awayPitcher?.id))) && (
+          <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 999, padding: "2px 7px", letterSpacing: "0.06em" }}>
+            ⚠ SP IL
+          </span>
+        )}
         {topProp && (() => {
           const lastName = bestBet
             ? bestBet.label.split(" ")[0]
@@ -3616,7 +3621,8 @@ export default function App() {
             {activeSlate.map(g => (
               <SlateCard key={g.id} game={g} selected={selectedId === g.id} onSelect={openGame} liveOddsMap={liveOddsMap}
                 bestBet={topSlatePicks.find(p => p.gamePk === (g.gamePk ?? g.id)) ?? null}
-                liveScore={liveScores[g.gamePk ?? g.id] ?? null} />
+                liveScore={liveScores[g.gamePk ?? g.id] ?? null}
+                injuredIds={injuredIds} />
             ))}
           </div>
         </>)}
@@ -3717,7 +3723,12 @@ export default function App() {
                     <div style={{ flex: 1 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                         <div>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb" }}>{activePitcher.name ?? "TBD"}</div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb" }}>{activePitcher.name ?? "TBD"}</div>
+                            {injuredIds.has(String(activePitcher?.id)) && (
+                              <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.14)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 999, padding: "1px 6px", letterSpacing: "0.06em" }}>⚠ IL</span>
+                            )}
+                          </div>
                           <div style={{ fontSize: 9, color: "#6b7280" }}>{activePitcher.team} · SP · {activePitcher.hand ?? "?"}HP · vs {facingTeam}</div>
                         </div>
                         {kLeanBadge && <LeanBadge label={kLeanBadge.label} positive={kLeanBadge.positive} small />}
