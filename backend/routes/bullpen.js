@@ -2,6 +2,7 @@ const express = require("express");
 const router  = express.Router();
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
+const { query, isConnected } = require("../services/db");
 
 const SEASON      = new Date().getFullYear();
 const BULLPEN_TTL = 30 * 60 * 1000; // 30 min — refresh before game
@@ -298,6 +299,19 @@ router.get("/:id", async (req, res) => {
         return res.json(cached);
       }
 
+      if (isConnected()) {
+        const row = await query(
+          "SELECT data, fetched_at FROM bullpen_snapshots WHERE game_pk = $1",
+          [numericId]
+        );
+        const entry = row?.rows?.[0];
+        if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < BULLPEN_TTL) {
+          cache.set(cacheKey, entry.data, BULLPEN_TTL);
+          res.setHeader("X-Cache", "DB-HIT");
+          return res.json(entry.data);
+        }
+      }
+
       const result = await buildGameBullpen(id);
       res.setHeader("X-Cache", "MISS");
       return res.json(result);
@@ -320,3 +334,4 @@ router.get("/:id", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buildGameBullpenForJob = buildGameBullpen;

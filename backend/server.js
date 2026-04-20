@@ -57,6 +57,16 @@ app.delete("/api/cache", (_req, res) => {
   res.json({ ok: true, message: "Cache cleared" });
 });
 
+app.get("/api/admin/jobs/run", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const { snapshotSlate, snapshotOdds } = require("./jobs/snapshotJobs");
+  await snapshotSlate();
+  await snapshotOdds();
+  res.json({ ok: true, ran: ["snapshotSlate", "snapshotOdds"] });
+});
+
 // ── Static frontend (production only) ────────────────────────
 if (process.env.NODE_ENV === "production") {
   const distPath = path.join(__dirname, "..", "dist");
@@ -74,6 +84,11 @@ app.use((err, _req, res, _next) => {
 });
 
 // ── Start ─────────────────────────────────────────────────────
+if (process.env.NODE_ENV === "production" || process.env.ENABLE_JOBS === "true") {
+  const { startScheduler } = require("./jobs/scheduler");
+  startScheduler();
+}
+
 app.listen(PORT, () => {
   console.log(`\n⚾  Prop Scout API  →  http://localhost:${PORT}`);
   console.log(`   /health              server status + cache`);
@@ -90,4 +105,5 @@ app.listen(PORT, () => {
   console.log(`   /api/picks          user-scoped pick log CRUD`);
   console.log(`   /api/notes/:gamePk  user-scoped game notes`);
   console.log(`   /api/digest         user-scoped 7-day pick digest\n`);
+  console.log(`   /api/admin/jobs/run GET  — admin trigger for snapshot jobs\n`);
 });

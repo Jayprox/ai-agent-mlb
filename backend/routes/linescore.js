@@ -2,6 +2,9 @@ const express = require("express");
 const router  = express.Router({ mergeParams: true });
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
+const { query, isConnected } = require("../services/db");
+
+const LINESCORE_DB_TTL = 60 * 1000;
 
 // ── GET /api/linescore/:gamePk ────────────────────────────────
 // Returns live score + inning for an in-progress game.
@@ -26,6 +29,19 @@ router.get("/:gamePk", async (req, res) => {
   if (cached) {
     res.setHeader("X-Cache", "HIT");
     return res.json(cached);
+  }
+
+  if (isConnected()) {
+    const row = await query(
+      "SELECT data, fetched_at FROM linescore_snapshots WHERE game_pk = $1",
+      [Number(gamePk)]
+    );
+    const entry = row?.rows?.[0];
+    if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < LINESCORE_DB_TTL) {
+      cache.set(cacheKey, entry.data, 45 * 1000);
+      res.setHeader("X-Cache", "DB-HIT");
+      return res.json(entry.data);
+    }
   }
 
   try {

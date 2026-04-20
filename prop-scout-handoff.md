@@ -312,11 +312,11 @@ app.use("/api/pitcher-splits", require("./routes/pitcherSplits")); // Baseball S
 Replace the existing Game Notes section with an Anthropic API-generated narrative per game. Pass the full game object (pitchers, bullpen, weather, umpire, odds, lineup) as structured context. Model returns a 1–2 paragraph bettor-focused summary covering pitcher trends, bullpen fatigue, weather impact, umpire tendency, and standout matchups. Data-only — no web search. Key implementation notes:
 - Cache per `gamePk` (2–4 hour TTL) — do not fire on every page load
 - Use Claude Haiku (fast, cheap, sufficient for short narrative)
-- Backend route: `POST /api/trends/:gamePk` or inline in existing game object
+- Backend route: `POST /api/trends/:gamePk`
 - Fallback: show nothing if API call fails (don't show an error state)
 
 **8. Injury flags + Lineup scratch alerts** *(user feedback + pro bettor feature — same feature)*
-Real-time injury and lineup scratch news is the same problem. Static manual flags are too slow to be useful. Best path: let the AI-powered Props Tab (item #9) handle this via web search — injury context flows in automatically when the AI searches for player news. Out-of-position flag (item #4) covers the in-game roster signal without needing a separate injury feed.
+Real-time injury and lineup scratch news is the same problem. Static manual flags are too slow to be useful. Best path: let the AI-powered Props Tab (item #9) handle this via web search — injury context flows in automatically. Out-of-position flag (item #4) covers the in-game roster signal without needing a separate injury feed. For scratch detection specifically: compare confirmed lineup to previous confirmed lineup and flag missing names as "SCRATCHED", then recalculate matchup scores and prop confidence for affected props.
 
 **9. ✅ AI-powered Props Tab** *(DONE Session 34 — AI Analysis section in Props tab)*
 Full Props tab overhaul using Anthropic API + web search. Pass the full game object as structured context, then let the AI search for real-time news (injuries, scratches, beat reporter notes) to supplement. Returns structured JSON:
@@ -333,14 +333,14 @@ Frontend filters: confidence ≥ 55% and odds ≥ −200. Sort by confidence des
 
 ### ⚫ Infrastructure (separate branch / longer term)
 
-**10. PostgreSQL data layer** *(feat/postgres-data-layer — fully designed)*
-Fully designed in `handoff-postgres-data-layer.md` and implemented on the separate `feat/postgres-data-layer` branch. Branch includes backend-only scaffolding for `pg` + `node-cron`, `backend/services/db.js`, SQL migrations, snapshot jobs, scheduler wiring, DB-first reads for `schedule` / `bullpen` / `linescore` / `umpires`, and an admin trigger endpoint. It was intentionally kept off `main` because it still needs real `DATABASE_URL` / `ADMIN_SECRET` environment wiring plus first-run migration execution on Railway before it should be merged. Enables all items below that require historical data.
+**10. PostgreSQL data layer** *(feat/postgres-data-layer — implemented)*
+Fully designed in `handoff-postgres-data-layer.md` and implemented on `feat/postgres-data-layer`. Branch includes: `pg` + `node-cron`, `backend/services/db.js`, SQL migrations, snapshot jobs, scheduler wiring, DB-first reads for `schedule` / `bullpen` / `linescore` / `umpires`, and admin trigger endpoint. Needs `DATABASE_URL` / `ADMIN_SECRET` env wiring + first-run migration on Railway before merging to `main`. Enables all items below that require historical data.
 
 **11. Historical prop hit rates + CLV tracking** *(pro bettor feature)*
-Track whether props hit over time and compare final line vs line at pick time (Closing Line Value). Depends on PostgreSQL being live — picks need to be stored with timestamps and graded after game completion. Also requires capturing pre-game odds at pick time for CLV calculation.
+Empirical backing for the confidence meter + proof of edge over time. Per pitcher: K prop hit rate last 10 starts. Per batter: hits/TB prop hit rate on specific lines. Closing Line Value (CLV): capture pre-game line at pick time, compare to closing line post-game — positive CLV over 50+ picks = real edge. Depends on PostgreSQL being live. Data source: OddsJam / Bet Labs, or build from scratch by logging prop outcomes nightly against MLB results.
 
 **12. Public % / Sharp money split** *(pro bettor feature)*
-Show public betting % vs sharp money direction per game. Requires a paid third-party data source — Action Network, Bet Labs, or a similar sharp data aggregator. Most external-dependent item in the backlog. No free equivalent exists for reliable sharp/public splits.
+The single highest-leverage missing feature. Currently shows *that* a line moved — not *why*. When public % and line movement diverge (reverse line movement), that's sharp action. Add a "Sharp Action" row to the Odds card showing public bet % and money % per side, flagging reverse line movement explicitly. Data source: Action Network API or Bet Labs (both paid). Most external-dependent item in the backlog.
 
 **13. Prediction market odds** *(backlog)*
 Kalshi + Polymarket odds alongside sportsbook lines. OddsPapi (oddspapi.io) aggregates both in a normalized response. Would add a prediction market row to the multi-book odds table in the Intel tab.
@@ -357,6 +357,7 @@ Kalshi + Polymarket odds alongside sportsbook lines. OddsPapi (oddspapi.io) aggr
 - Live linescore + final score results on slate cards
 - UmpScorecards live accuracy data (backend + frontend wired)
 - Responsive layout (tablet + desktop 2-column grid)
+- PostgreSQL data layer (implemented on `feat/postgres-data-layer`, pending Railway deploy)
 
 ---
 
@@ -2329,7 +2330,7 @@ Log the closing line vs the line at time of pick. Positive CLV over time is the 
 
 ### ⚫ Infrastructure
 
-- **Pick persistence on Railway** — picks/notes currently stored as flat JSON, wiped on every redeploy. Upgrade to SQLite (zero-config, single file) or Railway's Postgres add-on for durable storage.
+- **Pick persistence on Railway** — Railway Postgres is the chosen path. The backend scaffold already lives on `feat/postgres-data-layer` with `pg`, migrations, DB helpers, snapshot jobs, scheduler wiring, and DB-first reads for key cached data. Keep this branch synced with `main` while app enhancements continue. Remaining work before merging back: provision Railway Postgres, set `DATABASE_URL` / `ADMIN_SECRET`, run the first migration, verify snapshot jobs in production, and confirm DB-hit fallback behavior.
 - **Sharp/public split data** — requires a paid data provider (e.g. Action Network, Bet Labs). Low priority.
 - **Prediction market odds** — Kalshi/Polymarket MLB game props. Niche but interesting signal source.
 

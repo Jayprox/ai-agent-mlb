@@ -514,24 +514,12 @@ Module load verified cleanly with no `DATABASE_URL` set — falls back to in-mem
 
 This branch is code-complete but **not yet wired to a real database**. Before merging:
 
-### Step 1 — Rebase on main (REQUIRED FIRST)
+### Step 1 — ✅ Merge complete (April 19 2026)
 
-This branch was cut at Session 33. Main has since moved forward with Sessions 34–36:
-
-- **Session 34** — AI Trends bug fix + AI-powered Props tab (`backend/routes/props.js` new, `backend/server.js` updated)
-- **Session 35** — Backlog items 1–4 + 6: pitcher platoon splits (`backend/routes/pitcherSplits.js` new), players.js + lineups.js updated
-- **Session 36** — Sportsbook Lines + Tavily web search (`backend/routes/props.js` updated, `backend/routes/playerProps.js` new, `backend/server.js` updated) + **`backend/services/cache.js` bug fix**: `cache.get()` now returns `undefined` for misses instead of `null` — backward compatible but must be present
-
-Rebase command:
-```bash
-git checkout feat/postgres-data-layer
-git rebase main
-```
-
-Likely conflict files:
-- `backend/server.js` — main added new route mounts (props, player-props, pitcher-splits); postgres branch added scheduler + admin endpoint. Keep all additions from both.
-- `backend/routes/bullpen.js` — main has K/9+BB/9 changes; postgres branch added `buildGameBullpenForJob` export. Keep both.
-- `prop-scout-handoff.md` — take main's version (it's more up to date through Session 36).
+Main has been merged into this branch. Sessions 34–36 changes are now included:
+- AI Trends fix + AI Props tab (`backend/routes/props.js`, `backend/routes/trends.js`)
+- Pitcher platoon splits (`backend/routes/pitcherSplits.js`)
+- Sportsbook Lines + Tavily (`backend/routes/playerProps.js`, `backend/services/cache.js` bug fix)
 
 ### Step 2 — Provision Railway Postgres
 
@@ -566,7 +554,3 @@ After snapshot runs, `GET /api/schedule` should return `X-Cache: DB-HIT`.
 ### Step 7 — Merge to main
 
 Once verified live on Railway, merge this branch to main.
-
----
-
-*Updated April 19 2026 — rebase instructions added for Sessions 34–36 main changes*
