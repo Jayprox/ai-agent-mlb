@@ -2330,7 +2330,7 @@ Log the closing line vs the line at time of pick. Positive CLV over time is the 
 
 ### ⚫ Infrastructure
 
-- **Pick persistence on Railway** — Railway Postgres is the chosen path. The backend scaffold already lives on `feat/postgres-data-layer` with `pg`, migrations, DB helpers, snapshot jobs, scheduler wiring, and DB-first reads for key cached data. Keep this branch synced with `main` while app enhancements continue. Remaining work before merging back: provision Railway Postgres, set `DATABASE_URL` / `ADMIN_SECRET`, run the first migration, verify snapshot jobs in production, and confirm DB-hit fallback behavior.
+- **Pick persistence on Railway** — Railway Postgres is now merged into `main` and production verified for schedule snapshots. See Session 37 below. Remaining follow-up: monitor scheduled jobs, confirm tomorrow's automatic slate refresh, and eventually move user picks/notes/digest off flat JSON if desired.
 - **Sharp/public split data** — requires a paid data provider (e.g. Action Network, Bet Labs). Low priority.
 - **Prediction market odds** — Kalshi/Polymarket MLB game props. Niche but interesting signal source.
 
@@ -2338,3 +2338,134 @@ Log the closing line vs the line at time of pick. Positive CLV over time is the 
 
 - **Remove or document `backend/routes/playerProps.js`** — built as a backend alternative for sportsbook lines, frontend switched to client-side fetch instead. Route is mounted but unused. Either delete or add a comment explaining why it exists.
 - **Verify sportsbook lines reach AI context** — confirm that when DK/FD K/TB lines are posted pre-game, `buildPropsContext` passes them through and the AI's K prop reason cites the actual market line (e.g. "Cole K's 7.5 at -115"). Test with a pre-game window tomorrow.
+
+---
+
+## ✅ Session 37 — Railway Postgres Rollout + DB Fallback Hardening
+
+Postgres infrastructure has been merged from `feat/postgres-data-layer` into `main` and deployed to Railway.
+
+### What happened
+
+After merging the Postgres branch, production initially showed an inaccurate 6-game slate while local showed the correct 15-game slate. Direct API testing showed:
+
+- `/health` returned `200`
+- `/api/schedule` initially returned Railway `502 Application failed to respond`
+- the frontend fell back to its embedded/mock slate when schedule failed
+
+Root cause: DB-first live-data routes were treating Postgres as too mandatory. If the Railway Postgres connection/table lookup was unavailable, slow, or not migrated yet, the route could fail before falling back to live MLB Stats API data.
+
+### Backend hardening patch
+
+Patched the DB layer so Postgres remains an optimization, not a blocker:
+
+- `backend/services/db.js`
+  - Added short Postgres connection/query/statement timeouts.
+- `backend/routes/schedule.js`
+  - Wrapped DB lookup in `try/catch`; falls back to live MLB schedule on DB error.
+- `backend/routes/linescore.js`
+  - Wrapped DB lookup in `try/catch`; falls back to live MLB linescore.
+- `backend/routes/bullpen.js`
+  - Wrapped game-level DB lookup in `try/catch`; falls back to live bullpen builder.
+- `backend/routes/umpires.js`
+  - Wrapped DB lookup in `try/catch`; falls back to live MLB boxscore officials.
+- `backend/jobs/scheduler.js`
+  - Wrapped scheduler slate lookups in `try/catch` so job loops do not crash/spam on DB issues.
+
+Verification before deploy:
+
+- `npm run build` passed.
+- Backend modules loaded cleanly.
+- Local `/api/schedule` returned full 15-game slate.
+- Simulated broken `DATABASE_URL` still returned full schedule via MLB fallback.
+
+Suggested commit message used/planned:
+
+```bash
+Harden Postgres fallback for live data routes
+```
+
+### Railway setup completed
+
+Railway Postgres was provisioned in the same project as `ai-agent-mlb`.
+
+App service variables were wired:
+
+- `DATABASE_URL=${{ Postgres.DATABASE_URL }}` for production app runtime
+- `ADMIN_SECRET=...` for manual job trigger
+- `ENABLE_JOBS=true`
+
+Migration was run from local terminal using the public Railway Postgres URL because the private internal host (`postgres.railway.internal`) is only resolvable inside Railway:
+
+```bash
+DATABASE_URL="postgresql://...@roundhouse.proxy.rlwy.net:47167/railway" node backend/scripts/migrate.js
+```
+
+Result:
+
+```txt
+✓ PostgreSQL connected
+✅ Migrations applied
+```
+
+Manual snapshot trigger was run successfully:
+
+```bash
+curl -H "x-admin-secret: <ADMIN_SECRET>" \
+  https://ai-agent-mlb-production.up.railway.app/api/admin/jobs/run
+```
+
+Result:
+
+```json
+{"ok":true,"ran":["snapshotSlate","snapshotOdds"]}
+```
+
+### Production verification
+
+Cache was cleared and schedule was requested with a cache-busting query param:
+
+```bash
+curl -s -X DELETE https://ai-agent-mlb-production.up.railway.app/api/cache
+curl -i "https://ai-agent-mlb-production.up.railway.app/api/schedule?cb=$(date +%s)"
+```
+
+Confirmed:
+
+- HTTP `200`
+- full 15-game slate returned
+- header showed app-level DB read:
+
+```txt
+x-cache: DB-HIT, MISS
+```
+
+The `DB-HIT` confirms Railway Postgres is migrated, populated, and serving the schedule snapshot. `MISS` is Railway/Fastly edge cache metadata appended to the same header.
+
+### Current status
+
+- ✅ Postgres branch merged to `main`
+- ✅ Railway deployment successful
+- ✅ Migration applied
+- ✅ Manual snapshot job succeeded
+- ✅ `/api/schedule` served from Postgres with `DB-HIT`
+- ✅ MLB fallback is hardened if DB is unavailable
+- ✅ Production slate accuracy recovered
+
+### Follow-up checks
+
+- Monitor Railway logs for repeated:
+  - `DB pool error`
+  - `relation ... does not exist`
+  - `snapshotSlate failed`
+  - `snapshotOdds failed`
+  - `Scheduler slate lookup skipped`
+- Tomorrow, verify the scheduled 8 AM Honolulu `snapshotSlate` job refreshes the next slate automatically.
+- During/after live games, verify DB-backed routes as snapshots become available:
+  - `/api/linescore/:gamePk`
+  - `/api/bullpen/:gamePk`
+  - `/api/umpires/:gamePk`
+
+---
+
+*Updated April 19 2026 — Session 37 complete · Railway Postgres merged/deployed · migration + schedule DB-HIT verified · fallback hardened*
