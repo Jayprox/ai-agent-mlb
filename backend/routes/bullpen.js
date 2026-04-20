@@ -300,15 +300,19 @@ router.get("/:id", async (req, res) => {
       }
 
       if (isConnected()) {
-        const row = await query(
-          "SELECT data, fetched_at FROM bullpen_snapshots WHERE game_pk = $1",
-          [numericId]
-        );
-        const entry = row?.rows?.[0];
-        if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < BULLPEN_TTL) {
-          cache.set(cacheKey, entry.data, BULLPEN_TTL);
-          res.setHeader("X-Cache", "DB-HIT");
-          return res.json(entry.data);
+        try {
+          const row = await query(
+            "SELECT data, fetched_at FROM bullpen_snapshots WHERE game_pk = $1",
+            [numericId]
+          );
+          const entry = row?.rows?.[0];
+          if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < BULLPEN_TTL) {
+            cache.set(cacheKey, entry.data, BULLPEN_TTL);
+            res.setHeader("X-Cache", "DB-HIT");
+            return res.json(entry.data);
+          }
+        } catch (dbErr) {
+          console.warn(`Bullpen DB lookup skipped: ${dbErr.message}`);
         }
       }
 

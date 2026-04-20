@@ -136,15 +136,19 @@ router.get("/", async (req, res) => {
   }
 
   if (isConnected()) {
-    const row = await query(
-      "SELECT games, fetched_at FROM slate_snapshots WHERE slate_date = $1",
-      [date]
-    );
-    const entry = row?.rows?.[0];
-    if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < SCHEDULE_TTL) {
-      cache.set(cacheKey, entry.games, SCHEDULE_TTL);
-      res.setHeader("X-Cache", "DB-HIT");
-      return res.json(entry.games);
+    try {
+      const row = await query(
+        "SELECT games, fetched_at FROM slate_snapshots WHERE slate_date = $1",
+        [date]
+      );
+      const entry = row?.rows?.[0];
+      if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < SCHEDULE_TTL) {
+        cache.set(cacheKey, entry.games, SCHEDULE_TTL);
+        res.setHeader("X-Cache", "DB-HIT");
+        return res.json(entry.games);
+      }
+    } catch (dbErr) {
+      console.warn(`Schedule DB lookup skipped: ${dbErr.message}`);
     }
   }
 

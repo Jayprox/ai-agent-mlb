@@ -8,20 +8,30 @@ const {
 async function getTodayGamePks() {
   if (!isConnected()) return [];
   const date = todayHonolulu();
-  const result = await query("SELECT games FROM slate_snapshots WHERE slate_date = $1", [date]);
-  const games = result?.rows?.[0]?.games ?? [];
-  return games.map((g) => g.gamePk).filter(Boolean);
+  try {
+    const result = await query("SELECT games FROM slate_snapshots WHERE slate_date = $1", [date]);
+    const games = result?.rows?.[0]?.games ?? [];
+    return games.map((g) => g.gamePk).filter(Boolean);
+  } catch (err) {
+    console.warn(`Scheduler slate lookup skipped: ${err.message}`);
+    return [];
+  }
 }
 
 async function getInProgressGamePks() {
   if (!isConnected()) return [];
   const date = todayHonolulu();
-  const result = await query("SELECT games FROM slate_snapshots WHERE slate_date = $1", [date]);
-  const games = result?.rows?.[0]?.games ?? [];
-  return games.filter((g) => {
-    const state = g.status?.detailedState ?? g.status;
-    return state === "In Progress" || state === "Warmup";
-  }).map((g) => g.gamePk);
+  try {
+    const result = await query("SELECT games FROM slate_snapshots WHERE slate_date = $1", [date]);
+    const games = result?.rows?.[0]?.games ?? [];
+    return games.filter((g) => {
+      const state = g.status?.detailedState ?? g.status;
+      return state === "In Progress" || state === "Warmup";
+    }).map((g) => g.gamePk);
+  } catch (err) {
+    console.warn(`Scheduler in-progress lookup skipped: ${err.message}`);
+    return [];
+  }
 }
 
 function startScheduler() {

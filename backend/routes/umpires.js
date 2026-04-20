@@ -57,15 +57,19 @@ router.get("/:gamePk", async (req, res) => {
   }
 
   if (isConnected()) {
-    const row = await query(
-      "SELECT data, fetched_at FROM umpire_snapshots WHERE game_pk = $1",
-      [Number(gamePk)]
-    );
-    const entry = row?.rows?.[0];
-    if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < UMPIRES_TTL) {
-      cache.set(cacheKey, entry.data, UMPIRES_TTL);
-      res.setHeader("X-Cache", "DB-HIT");
-      return res.json(entry.data);
+    try {
+      const row = await query(
+        "SELECT data, fetched_at FROM umpire_snapshots WHERE game_pk = $1",
+        [Number(gamePk)]
+      );
+      const entry = row?.rows?.[0];
+      if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < UMPIRES_TTL) {
+        cache.set(cacheKey, entry.data, UMPIRES_TTL);
+        res.setHeader("X-Cache", "DB-HIT");
+        return res.json(entry.data);
+      }
+    } catch (dbErr) {
+      console.warn(`Umpire DB lookup skipped: ${dbErr.message}`);
     }
   }
 
