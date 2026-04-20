@@ -2307,10 +2307,15 @@ export default function App() {
   const [livePlayerProps, setLivePlayerProps] = useState({}); // gamePk → { props: [] } | "loading" | null
   const playerPropsFetched = useRef(new Set());               // guards sportsbook lines fetch
   const [pitcherPlatoonSplits, setPitcherPlatoonSplits] = useState({}); // pitcherId → {vsL,vsR} | "loading" | null
+  const [liveStatSplits,       setLiveStatSplits]       = useState({}); // `${id}:${group}` → splits obj | "loading" | null
   const [noteSaveState, setNoteSaveState] = useState(null); // null | "saving" | "saved"
   const [copiedPickId, setCopiedPickId] = useState(null);   // id of pick just copied to clipboard
   const [parlayLabels, setParlayLabels] = useState([]);      // labels of props selected for parlay (max 3)
   const [parlaySlipCopied, setParlaySlipCopied] = useState(false);
+  const [liveBoxscores, setLiveBoxscores] = useState({});    // gamePk → boxscore object | null
+  const [boxSide,       setBoxSide]       = useState("away");// batting + pitching toggle: "away" | "home"
+  const boxscoreFetched = useRef(new Set());                  // gamePks whose final boxscore is cached
+  const gradedGames     = useRef(new Set());                  // idempotency: gamePks already auto-graded
 
   // Fetch weather when a game card is opened
   useEffect(() => {
@@ -2474,6 +2479,21 @@ export default function App() {
       .catch(() => setPitcherPlatoonSplits(prev => ({ ...prev, [key]: null })));
   }, [view, selectedId, pitcherSide]);
 
+  // Fetch pitcher home/away stat splits when Overview pitcher card is visible
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || view !== "game" || !selectedId) return;
+    const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
+    if (!game) return;
+    const p = pitcherSide === "home" ? game.pitcher : (game.awayPitcher ?? game.pitcher);
+    if (!p?.id) return;
+    const key = `${p.id}:pitching`;
+    if (key in liveStatSplits) return;
+    setLiveStatSplits(prev => ({ ...prev, [key]: "loading" }));
+    apiFetch(`/api/stat-splits/${p.id}?group=pitching`)
+      .then(d => setLiveStatSplits(prev => ({ ...prev, [key]: d ?? null })))
+      .catch(() => setLiveStatSplits(prev => ({ ...prev, [key]: null })));
+  }, [view, selectedId, pitcherSide]);
+
   // Keep module-level _authToken in sync with React state
   useEffect(() => { _authToken = authToken; }, [authToken]);
 
@@ -2581,6 +2601,75 @@ export default function App() {
     const interval = setInterval(pollScores, 60_000);
     return () => clearInterval(interval);
   }, [liveSlate]);
+
+  // Fetch boxscore when boxscore tab opens (poll 60s for live games, once for finals)
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || view !== "game" || !liveSlate || tab !== "boxscore") return;
+    const sg = liveSlate.find(g => g.gamePk === selectedId);
+    if (!sg) return;
+    const { gamePk } = sg;
+    const isLiveGame  = sg.status === "In Progress" || sg.status === "Warmup";
+    const isFinalGame = sg.status === "Final" || sg.status === "Game Over";
+
+    // Skip if already have final data
+    if (isFinalGame && boxscoreFetched.current.has(gamePk)) return;
+
+    const fetchBS = () => {
+      apiFetch(`/api/boxscore/${gamePk}`)
+        .then(data => {
+          setLiveBoxscores(prev => ({ ...prev, [gamePk]: data }));
+          if (data?.isFinal) boxscoreFetched.current.add(gamePk);
+        })
+        .catch(() => setLiveBoxscores(prev => ({ ...prev, [gamePk]: null })));
+    };
+
+    fetchBS();
+    if (!isLiveGame) return;
+    const bsInterval = setInterval(fetchBS, 60_000);
+    return () => clearInterval(bsInterval);
+  }, [view, selectedId, tab, liveSlate]);
+
+  // Auto-grade pending picks when a game goes final
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || !liveSlate?.length) return;
+
+    liveSlate.forEach(sg => {
+      const { gamePk } = sg;
+      // Primary signal: slate status (set on page load)
+      // Fallback: linescore has been polled and currentInning is null + runs scored
+      // (covers games that finish while the app is open without a page reload)
+      const ls = liveScores[gamePk];
+      const linescoreFinished = ls && ls.inning === null && (ls.awayScore > 0 || ls.homeScore > 0);
+      const isFinalGame = sg.status === "Final" || sg.status === "Game Over" || linescoreFinished;
+      if (!isFinalGame) return;
+      if (gradedGames.current.has(gamePk)) return;
+
+      // eslint-disable-next-line eqeqeq — gamePk may be string (localStorage) or number
+      const pendingPicks = propLog.filter(p => p.gamePk == gamePk && p.result === null);
+      if (!pendingPicks.length) return;
+
+      const box = liveBoxscores[gamePk];
+      if (!box?.isFinal) {
+        // Fetch boxscore so the next effect run can grade
+        if (!boxscoreFetched.current.has(gamePk)) {
+          apiFetch(`/api/boxscore/${gamePk}`)
+            .then(data => {
+              if (!data?.isFinal) return;
+              setLiveBoxscores(prev => ({ ...prev, [gamePk]: data }));
+              boxscoreFetched.current.add(gamePk);
+            })
+            .catch(() => {});
+        }
+        return;
+      }
+
+      gradedGames.current.add(gamePk);
+      pendingPicks.forEach(pick => {
+        const grade = computeGrade(pick, box);
+        if (grade !== null) markResult(pick.id, grade);
+      });
+    });
+  }, [liveSlate, liveScores, liveBoxscores, propLog]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch lineups, umpire, + pitcher stats when a live game card opens
   useEffect(() => {
@@ -2811,7 +2900,7 @@ export default function App() {
 
   const scoreColor = (s) => s >= 55 ? "#ef4444" : s >= 35 ? "#f59e0b" : "#22c55e";
 
-  const TABS = ["overview", "lineup", "arsenal", "intel", "props", "bullpen"];
+  const TABS = ["overview", "lineup", "arsenal", "intel", "props", "bullpen", "boxscore"];
 
   // ── Savant splits helpers ─────────────────────────────────
   // Derive HANDLES / NEUTRAL / WEAK SPOT from live split numbers
@@ -2860,6 +2949,14 @@ export default function App() {
           if (data?.splits) setBatterSplits(prev => ({ ...prev, [b.id]: data.splits }));
         })
         .catch(err => console.error("Batter splits:", err));
+    }
+    // Batter vs L/R stat splits (MLB Stats API)
+    const batterSplitKey = `${b.id}:hitting`;
+    if (!IS_STATS_SANDBOX && !(batterSplitKey in liveStatSplits)) {
+      setLiveStatSplits(prev => ({ ...prev, [batterSplitKey]: "loading" }));
+      apiFetch(`/api/stat-splits/${b.id}?group=hitting`)
+        .then(d => setLiveStatSplits(prev => ({ ...prev, [batterSplitKey]: d ?? null })))
+        .catch(() => setLiveStatSplits(prev => ({ ...prev, [batterSplitKey]: null })));
     }
     if (!IS_STATS_SANDBOX && !liveHittingLog[b.id]) {
       apiFetch(`/api/players/${b.id}/gamelog?group=hitting`)
@@ -3013,6 +3110,117 @@ export default function App() {
     apiMutate("/api/digest/refresh", "POST").catch(() => {});
     setLiveDigest(null);
   };
+  // ── Auto-grade a pick from final boxscore data ───────────────────────────
+  // Returns "hit" | "miss" | null (null = can't determine from available data)
+  const computeGrade = (pick, box) => {
+    if (!box?.isFinal) return null;
+    const label = (pick.label ?? "").toUpperCase();
+    const lean  = (pick.lean  ?? "").toUpperCase();
+    const innings   = box.linescore?.innings ?? [];
+    const awayRuns  = box.linescore?.away?.runs ?? 0;
+    const homeRuns  = box.linescore?.home?.runs ?? 0;
+    const totalRuns = awayRuns + homeRuns;
+
+    // NRFI — no runs scored in 1st inning
+    // label may have game appended: "NRFI" or "NRFI · TEX @ SEA"
+    if (label.startsWith("NRFI")) {
+      const first   = innings[0];
+      const scored  = first ? ((first.away ?? 0) + (first.home ?? 0)) > 0 : false;
+      return scored ? "miss" : "hit";
+    }
+
+    // YRFI — at least one run in 1st inning
+    if (label.startsWith("YRFI")) {
+      const first   = innings[0];
+      const scored  = first ? ((first.away ?? 0) + (first.home ?? 0)) > 0 : false;
+      return scored ? "hit" : "miss";
+    }
+
+    // Game Total (OVER / UNDER)
+    if (label.includes("GAME TOTAL") || (label.includes("TOTAL") && (label.includes("OVER") || label.includes("UNDER") || label.includes("O/U")))) {
+      const m = label.match(/(\d+\.?\d*)/);
+      if (!m) return null;
+      const line = parseFloat(m[1]);
+      if (lean === "OVER")  return totalRuns > line  ? "hit" : "miss";
+      if (lean === "UNDER") return totalRuns < line  ? "hit" : "miss";
+      return null;
+    }
+
+    // F5 — first 5 innings total
+    if (label.includes("F5") || label.includes("FIRST 5")) {
+      const f5 = innings.slice(0, 5).reduce((s, i) => s + (i.away ?? 0) + (i.home ?? 0), 0);
+      const m  = label.match(/(\d+\.?\d*)/);
+      if (!m) return null;
+      const line = parseFloat(m[1]);
+      if (lean === "OVER")  return f5 > line ? "hit" : "miss";
+      if (lean === "UNDER") return f5 < line ? "hit" : "miss";
+      return null;
+    }
+
+    // Run Line (margin-based)
+    if (label.includes("RUN LINE") || label.includes("RL -") || label.includes("RL +")) {
+      const margin = awayRuns - homeRuns;
+      if (label.includes("AWAY")) {
+        // Away RL -1.5: away wins by 2+ = hit for OVER lean
+        return lean === "OVER"
+          ? (margin >= 2  ? "hit" : "miss")
+          : (margin < 2   ? "hit" : "miss");
+      }
+      if (label.includes("HOME")) {
+        // Home RL +1.5: home wins or loses by <2 = hit for OVER lean
+        return lean === "OVER"
+          ? (homeRuns - awayRuns >= 2 ? "hit" : "miss")
+          : (homeRuns - awayRuns < 2  ? "hit" : "miss");
+      }
+      return null;
+    }
+
+    // Pitcher Strikeouts — "Wheeler K's O/U 7.5" or "Pitcher Strikeouts O/U"
+    if (label.includes("K'S") || label.includes("STRIKEOUT") || (label.includes(" K ") && label.includes("O/U"))) {
+      const m = label.match(/(\d+\.?\d*)/);
+      if (!m) return null;
+      const line = parseFloat(m[1]);
+      const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
+      // Try to match by pitcherName stored on the pick
+      const storedName = (pick.pitcherName ?? "").toUpperCase();
+      let pitcher = storedName
+        ? allPitchers.find(p => p.name.toUpperCase().includes(storedName) || storedName.includes(p.name.toUpperCase().split(" ").pop()))
+        : null;
+      // Fallback: extract last name from label (first word)
+      if (!pitcher) {
+        const lastName = label.split(" ")[0];
+        pitcher = allPitchers.find(p => p.name.toUpperCase().includes(lastName));
+      }
+      if (!pitcher) return null;
+      if (lean === "OVER")  return (pitcher.k ?? 0) > line  ? "hit" : "miss";
+      if (lean === "UNDER") return (pitcher.k ?? 0) < line  ? "hit" : "miss";
+      return null;
+    }
+
+    // Pitcher Outs recorded
+    if (label.includes("OUTS") && label.includes("O/U")) {
+      const m = label.match(/(\d+\.?\d*)/);
+      if (!m) return null;
+      const line = parseFloat(m[1]);
+      const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
+      const storedName  = (pick.pitcherName ?? "").toUpperCase();
+      let pitcher = storedName
+        ? allPitchers.find(p => p.name.toUpperCase().includes(storedName))
+        : null;
+      if (!pitcher) {
+        const lastName = label.split(" ")[0];
+        pitcher = allPitchers.find(p => p.name.toUpperCase().includes(lastName));
+      }
+      if (!pitcher) return null;
+      const outs = parseIpToOuts(pitcher.ip);
+      if (lean === "OVER")  return outs > line  ? "hit" : "miss";
+      if (lean === "UNDER") return outs < line  ? "hit" : "miss";
+      return null;
+    }
+
+    return null; // prop type not gradeable from boxscore alone
+  };
+
   const markResult = (id, result) => {
     setPropLog(prev => {
       const updated = prev.map(p => p.id === id ? { ...p, result } : p);
@@ -3406,6 +3614,89 @@ export default function App() {
                             </>) : <div style={{ fontSize: 9, color: "#4b5563" }}>—</div>}
                           </div>
                         ))}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Pitcher home / away splits */}
+                  {(() => {
+                    const key = `${activePitcher.id}:pitching`;
+                    const sd  = liveStatSplits[key];
+                    // Not yet fetched — nothing shown until effect fires
+                    if (sd === undefined) return null;
+                    if (sd === "loading") return (
+                      <div style={{ display: "flex", gap: 5, marginBottom: 6 }}>
+                        {["Home", "Away"].map(l => (
+                          <div key={l} style={{ flex: 1, background: "#0e0f1a", borderRadius: 8, padding: "6px 9px" }}>
+                            <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{l}</div>
+                            <div style={{ fontSize: 9, color: "#4b5563" }}>loading…</div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                    if (!sd) return (
+                      <div style={{ fontSize: 8, color: "#4b5563", marginBottom: 6, fontStyle: "italic" }}>Home/Away splits unavailable</div>
+                    );
+                    const { home, away } = sd;
+                    if (!home && !away) return (
+                      <div style={{ fontSize: 8, color: "#4b5563", marginBottom: 6, fontStyle: "italic" }}>Home/Away splits unavailable</div>
+                    );
+                    return (
+                      <div style={{ display: "flex", gap: 5, marginBottom: 6 }}>
+                        {[["Home", home], ["Away", away]].map(([label, d]) => {
+                          const era = parseFloat(d?.era) || 0;
+                          const eraColor = era <= 3.00 ? "#22c55e" : era <= 4.50 ? "#f59e0b" : "#ef4444";
+                          return (
+                            <div key={label} style={{ flex: 1, background: "#0e0f1a", borderRadius: 8, padding: "6px 9px" }}>
+                              <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{label}</div>
+                              {d ? (<>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: eraColor, fontFamily: "monospace" }}>{d.era} ERA</div>
+                                <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>{d.whip} WHIP · {d.ip} IP</div>
+                              </>) : <div style={{ fontSize: 9, color: "#4b5563" }}>—</div>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Pitcher day / night splits */}
+                  {(() => {
+                    const key = `${activePitcher.id}:pitching`;
+                    const sd  = liveStatSplits[key];
+                    if (!sd || sd === "loading" || sd === undefined) return null;
+                    const { day, night } = sd;
+                    if (!day && !night) return null;
+                    // Determine today's game context: day = before 5 PM
+                    const isDayGame = (() => {
+                      if (!game?.time) return null;
+                      const m = game.time.match(/(\d+):(\d+)\s*(AM|PM)/i);
+                      if (!m) return null;
+                      let h = parseInt(m[1], 10);
+                      const isPM = m[3].toUpperCase() === "PM";
+                      if (isPM && h !== 12) h += 12;
+                      if (!isPM && h === 12) h = 0;
+                      return h < 17; // before 5 PM
+                    })();
+                    return (
+                      <div style={{ display: "flex", gap: 5, marginBottom: 6 }}>
+                        {[["Day", day, true], ["Night", night, false]].map(([label, d, isDay]) => {
+                          const isToday = isDayGame === true ? isDay : isDayGame === false ? !isDay : false;
+                          const era = parseFloat(d?.era) || 0;
+                          const eraColor = era <= 3.00 ? "#22c55e" : era <= 4.50 ? "#f59e0b" : "#ef4444";
+                          return (
+                            <div key={label} style={{ flex: 1, background: isToday ? "rgba(56,189,248,0.06)" : "#0e0f1a", borderRadius: 8, padding: "6px 9px", border: isToday ? "1px solid rgba(56,189,248,0.25)" : "1px solid transparent" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
+                                <div style={{ fontSize: 8, color: isToday ? "#38bdf8" : "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: isToday ? 700 : 400 }}>{label}</div>
+                                {isToday && <div style={{ fontSize: 7, color: "#38bdf8", fontWeight: 800 }}>TODAY</div>}
+                              </div>
+                              {d ? (<>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: eraColor, fontFamily: "monospace" }}>{d.era} ERA</div>
+                                <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>{d.whip} WHIP · {d.ip} IP</div>
+                              </>) : <div style={{ fontSize: 9, color: "#4b5563" }}>—</div>}
+                            </div>
+                          );
+                        })}
                       </div>
                     );
                   })()}
@@ -3895,6 +4186,90 @@ export default function App() {
                                     {h2h.obp && <span style={{ fontSize: 10, color: "#9ca3af" }}>OBP {h2h.obp}</span>}
                                   </div>
                                 </div>
+                              </div>
+                            );
+                          })()}
+
+                          {/* Batter vs L/R platoon splits */}
+                          {(() => {
+                            const key = `${b.id}:hitting`;
+                            const sd  = liveStatSplits[key];
+                            if (!sd) return null;
+                            if (sd === "loading") return (
+                              <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+                                {["vs LHP", "vs RHP"].map(l => (
+                                  <div key={l} style={{ flex: 1, background: "#1a1b2e", borderRadius: 8, padding: "6px 9px" }}>
+                                    <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{l}</div>
+                                    <div style={{ fontSize: 9, color: "#4b5563" }}>loading…</div>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                            const { vsL, vsR } = sd;
+                            if (!vsL && !vsR) return null;
+                            // Highlight the relevant side based on the facing pitcher's hand
+                            const facingHand = facingPitcher?.hand ?? null; // "L" or "R"
+                            return (
+                              <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+                                {[["vs LHP", vsL, "L"], ["vs RHP", vsR, "R"]].map(([label, d, hand]) => {
+                                  const isMatchup = facingHand === hand;
+                                  const avgNum = parseFloat(d?.avg) || 0;
+                                  const avgColor = avgNum >= 0.280 ? "#22c55e" : avgNum >= 0.230 ? "#f59e0b" : "#ef4444";
+                                  return (
+                                    <div key={label} style={{ flex: 1, background: isMatchup ? "rgba(56,189,248,0.06)" : "#1a1b2e", borderRadius: 8, padding: "6px 9px", border: isMatchup ? "1px solid rgba(56,189,248,0.25)" : "1px solid transparent" }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
+                                        <div style={{ fontSize: 8, color: isMatchup ? "#38bdf8" : "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: isMatchup ? 700 : 400 }}>{label}</div>
+                                        {isMatchup && <div style={{ fontSize: 7, color: "#38bdf8", fontWeight: 800 }}>TODAY</div>}
+                                      </div>
+                                      {d ? (<>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: avgColor, fontFamily: "monospace" }}>{d.avg}</div>
+                                        <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>OBP {d.obp} · SLG {d.slg}</div>
+                                        {d.ab > 0 && <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>{d.ab} AB</div>}
+                                      </>) : <div style={{ fontSize: 9, color: "#4b5563" }}>—</div>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
+
+                          {/* Batter day / night splits */}
+                          {(() => {
+                            const key = `${b.id}:hitting`;
+                            const sd  = liveStatSplits[key];
+                            if (!sd || sd === "loading") return null;
+                            const { day, night } = sd;
+                            if (!day && !night) return null;
+                            const isDayGame = (() => {
+                              if (!game?.time) return null;
+                              const m = game.time.match(/(\d+):(\d+)\s*(AM|PM)/i);
+                              if (!m) return null;
+                              let h = parseInt(m[1], 10);
+                              const isPM = m[3].toUpperCase() === "PM";
+                              if (isPM && h !== 12) h += 12;
+                              if (!isPM && h === 12) h = 0;
+                              return h < 17;
+                            })();
+                            return (
+                              <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
+                                {[["Day", day, true], ["Night", night, false]].map(([label, d, isDay]) => {
+                                  const isToday = isDayGame === true ? isDay : isDayGame === false ? !isDay : false;
+                                  const avgNum = parseFloat(d?.avg) || 0;
+                                  const avgColor = avgNum >= 0.280 ? "#22c55e" : avgNum >= 0.230 ? "#f59e0b" : "#ef4444";
+                                  return (
+                                    <div key={label} style={{ flex: 1, background: isToday ? "rgba(56,189,248,0.06)" : "#1a1b2e", borderRadius: 8, padding: "6px 9px", border: isToday ? "1px solid rgba(56,189,248,0.25)" : "1px solid transparent" }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
+                                        <div style={{ fontSize: 8, color: isToday ? "#38bdf8" : "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: isToday ? 700 : 400 }}>{label}</div>
+                                        {isToday && <div style={{ fontSize: 7, color: "#38bdf8", fontWeight: 800 }}>TODAY</div>}
+                                      </div>
+                                      {d ? (<>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: avgColor, fontFamily: "monospace" }}>{d.avg}</div>
+                                        <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>OBP {d.obp} · SLG {d.slg}</div>
+                                        {d.ab > 0 && <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>{d.ab} AB</div>}
+                                      </>) : <div style={{ fontSize: 9, color: "#4b5563" }}>—</div>}
+                                    </div>
+                                  );
+                                })}
                               </div>
                             );
                           })()}
@@ -4655,6 +5030,222 @@ export default function App() {
             <BullpenCard label={game.home.abbr} data={bullpen.home} />
           </>)}
           {/* ── END BULLPEN TAB ─────────────────────────────── */}
+
+          {/* ── BOXSCORE TAB ─────────────────────────────────── */}
+          {tab === "boxscore" && (() => {
+            const sg  = liveSlate?.find(g => g.gamePk === selectedId);
+            const box = liveBoxscores[selectedId];
+            const isLiveGame  = sg?.status === "In Progress" || sg?.status === "Warmup";
+            const isFinalGame = sg?.status === "Final" || sg?.status === "Game Over";
+
+            // Loading state
+            if (box === undefined) {
+              return (
+                <Card style={{ textAlign: "center", padding: "32px 16px" }}>
+                  <div style={{ fontSize: 22, marginBottom: 8 }}>📊</div>
+                  <div style={{ fontSize: 11, color: "#6b7280" }}>Loading boxscore…</div>
+                </Card>
+              );
+            }
+
+            // Error / unavailable
+            if (box === null) {
+              return (
+                <Card style={{ textAlign: "center", padding: "32px 16px" }}>
+                  <div style={{ fontSize: 22, marginBottom: 8 }}>⚠️</div>
+                  <div style={{ fontSize: 11, color: "#6b7280" }}>Boxscore unavailable</div>
+                  <div style={{ fontSize: 9, color: "#4b5563", marginTop: 4 }}>Game may not have started yet</div>
+                </Card>
+              );
+            }
+
+            // Not started yet (no innings)
+            if (!box.linescore?.innings?.length) {
+              return (
+                <Card style={{ textAlign: "center", padding: "32px 16px" }}>
+                  <div style={{ fontSize: 22, marginBottom: 8 }}>⏳</div>
+                  <div style={{ fontSize: 11, color: "#6b7280" }}>Game hasn't started yet</div>
+                </Card>
+              );
+            }
+
+            const innings = box.linescore.innings;
+            const ls      = box.linescore;
+
+            // ── Linescore grid ────────────────────────────────
+            const linescoreGrid = (
+              <Card style={{ marginBottom: 10, overflowX: "auto" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "#f9fafb" }}>Linescore</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    {isLiveGame && <div style={{ fontSize: 9, color: "#22c55e", background: "rgba(34,197,94,0.1)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 999, padding: "2px 7px", fontWeight: 700 }}>● LIVE</div>}
+                    {isFinalGame && <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700 }}>FINAL</div>}
+                  </div>
+                </div>
+
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", color: "#4b5563", fontWeight: 600, paddingRight: 8, paddingBottom: 6, whiteSpace: "nowrap", width: 40 }}></th>
+                        {innings.map(inn => (
+                          <th key={inn.num} style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 6, minWidth: 22 }}>{inn.num}</th>
+                        ))}
+                        <th style={{ textAlign: "center", color: "#9ca3af", fontWeight: 800, paddingLeft: 10, paddingBottom: 6, minWidth: 24 }}>R</th>
+                        <th style={{ textAlign: "center", color: "#6b7280", fontWeight: 600, paddingLeft: 6, paddingBottom: 6, minWidth: 24 }}>H</th>
+                        <th style={{ textAlign: "center", color: "#6b7280", fontWeight: 600, paddingLeft: 6, paddingBottom: 6, minWidth: 24 }}>E</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {["away", "home"].map(side => {
+                        const abbr = side === "away" ? game.away.abbr : game.home.abbr;
+                        const totals = ls[side] ?? {};
+                        const isWinner = isFinalGame && (
+                          side === "away" ? totals.runs > ls.home?.runs : totals.runs > ls.away?.runs
+                        );
+                        return (
+                          <tr key={side}>
+                            <td style={{ textAlign: "left", paddingRight: 8, paddingBottom: 4, color: isWinner ? "#f9fafb" : "#9ca3af", fontWeight: isWinner ? 800 : 600, whiteSpace: "nowrap" }}>{abbr}</td>
+                            {innings.map(inn => {
+                              const runs = inn[side];
+                              return (
+                                <td key={inn.num} style={{ textAlign: "center", paddingBottom: 4, color: runs > 0 ? "#e5e7eb" : "#4b5563" }}>
+                                  {runs === null ? "—" : runs}
+                                </td>
+                              );
+                            })}
+                            <td style={{ textAlign: "center", paddingLeft: 10, paddingBottom: 4, color: isWinner ? "#22c55e" : "#9ca3af", fontWeight: 800 }}>{totals.runs ?? 0}</td>
+                            <td style={{ textAlign: "center", paddingLeft: 6, paddingBottom: 4, color: "#6b7280" }}>{totals.hits ?? 0}</td>
+                            <td style={{ textAlign: "center", paddingLeft: 6, paddingBottom: 4, color: (totals.errors ?? 0) > 0 ? "#ef4444" : "#4b5563" }}>{totals.errors ?? 0}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            );
+
+            // ── Batting section ───────────────────────────────
+            const batters = box.batting?.[boxSide] ?? [];
+            const battingSection = (
+              <Card style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "#f9fafb" }}>Batting</div>
+                  {/* Away / Home toggle */}
+                  <div style={{ display: "flex", background: "#0e0f1a", borderRadius: 8, padding: 2, gap: 2 }}>
+                    {["away", "home"].map(s => (
+                      <button key={s} onClick={() => setBoxSide(s)}
+                        style={{ fontSize: 9, fontWeight: 700, padding: "4px 9px", borderRadius: 6, border: "none", cursor: "pointer", transition: "all 0.15s",
+                          background: boxSide === s ? "#1f2437" : "transparent",
+                          color:      boxSide === s ? "#f9fafb"  : "#4b5563",
+                        }}>
+                        {s === "away" ? game.away.abbr : game.home.abbr}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {batters.length === 0 ? (
+                  <div style={{ fontSize: 10, color: "#4b5563", textAlign: "center", padding: "12px 0" }}>No batting data yet</div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace" }}>
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid #1f2437" }}>
+                          <th style={{ textAlign: "left",   color: "#4b5563", fontWeight: 600, paddingBottom: 5, paddingRight: 4 }}>Batter</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>AB</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>R</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>H</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>RBI</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>HR</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>BB</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>K</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 38 }}>AVG</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {batters.map((b, i) => (
+                          <tr key={b.id} style={{ borderBottom: i < batters.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none" }}>
+                            <td style={{ paddingTop: 5, paddingBottom: 5, paddingRight: 4 }}>
+                              <div style={{ fontSize: 10, color: "#e5e7eb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{b.name}</div>
+                              <div style={{ fontSize: 8,  color: "#4b5563" }}>{b.pos}</div>
+                            </td>
+                            <td style={{ textAlign: "center", color: "#9ca3af", paddingTop: 5, paddingBottom: 5 }}>{b.ab}</td>
+                            <td style={{ textAlign: "center", color: b.r  > 0 ? "#38bdf8" : "#4b5563", paddingTop: 5, paddingBottom: 5 }}>{b.r}</td>
+                            <td style={{ textAlign: "center", color: b.h  > 0 ? "#e5e7eb" : "#4b5563", fontWeight: b.h > 0 ? 700 : 400, paddingTop: 5, paddingBottom: 5 }}>{b.h}</td>
+                            <td style={{ textAlign: "center", color: b.rbi > 0 ? "#fbbf24" : "#4b5563", paddingTop: 5, paddingBottom: 5 }}>{b.rbi}</td>
+                            <td style={{ textAlign: "center", color: b.hr > 0 ? "#f97316" : "#4b5563", fontWeight: b.hr > 0 ? 800 : 400, paddingTop: 5, paddingBottom: 5 }}>{b.hr || "—"}</td>
+                            <td style={{ textAlign: "center", color: "#4b5563", paddingTop: 5, paddingBottom: 5 }}>{b.bb}</td>
+                            <td style={{ textAlign: "center", color: b.k  > 0 ? "#ef4444" : "#4b5563", paddingTop: 5, paddingBottom: 5 }}>{b.k}</td>
+                            <td style={{ textAlign: "center", color: "#6b7280", paddingTop: 5, paddingBottom: 5 }}>{b.avg}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+            );
+
+            // ── Pitching section (shares toggle with batting) ────────────
+            const pitchers = box.pitching?.[boxSide] ?? [];
+            const pitchAbbr = boxSide === "away" ? game.away.abbr : game.home.abbr;
+            const pitchingSection = (
+              <Card style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "#f9fafb", marginBottom: 10 }}>Pitching · {pitchAbbr}</div>
+
+                {pitchers.length === 0 ? (
+                  <div style={{ fontSize: 10, color: "#4b5563", textAlign: "center", padding: "12px 0" }}>No pitching data yet</div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace" }}>
+                      <thead>
+                        <tr style={{ borderBottom: "1px solid #1f2437" }}>
+                          <th style={{ textAlign: "left",   color: "#4b5563", fontWeight: 600, paddingBottom: 5, paddingRight: 4 }}>Pitcher</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 32 }}>IP</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>H</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>R</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>ER</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>BB</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 26 }}>K</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 32 }}>PC</th>
+                          <th style={{ textAlign: "center", color: "#4b5563", fontWeight: 600, paddingBottom: 5, width: 44 }}>ERA</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pitchers.map((p, i) => (
+                          <tr key={p.id} style={{ borderBottom: i < pitchers.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none" }}>
+                            <td style={{ paddingTop: 5, paddingBottom: 5, paddingRight: 4 }}>
+                              <div style={{ fontSize: 10, color: "#e5e7eb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 110 }}>{p.name}</div>
+                              {i === 0 && <div style={{ fontSize: 8, color: "#38bdf8" }}>SP</div>}
+                            </td>
+                            <td style={{ textAlign: "center", color: "#9ca3af", paddingTop: 5, paddingBottom: 5 }}>{p.ip}</td>
+                            <td style={{ textAlign: "center", color: "#6b7280", paddingTop: 5, paddingBottom: 5 }}>{p.h}</td>
+                            <td style={{ textAlign: "center", color: p.r  > 0 ? "#ef4444" : "#4b5563", paddingTop: 5, paddingBottom: 5 }}>{p.r}</td>
+                            <td style={{ textAlign: "center", color: p.er > 0 ? "#ef4444" : "#4b5563", paddingTop: 5, paddingBottom: 5 }}>{p.er}</td>
+                            <td style={{ textAlign: "center", color: "#4b5563", paddingTop: 5, paddingBottom: 5 }}>{p.bb}</td>
+                            <td style={{ textAlign: "center", color: p.k  > 0 ? "#22c55e" : "#4b5563", fontWeight: p.k >= 7 ? 800 : 400, paddingTop: 5, paddingBottom: 5 }}>{p.k}</td>
+                            <td style={{ textAlign: "center", color: "#6b7280", paddingTop: 5, paddingBottom: 5 }}>{p.pc}</td>
+                            <td style={{ textAlign: "center", color: "#6b7280", paddingTop: 5, paddingBottom: 5 }}>{p.era}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+            );
+
+            return (
+              <>
+                {linescoreGrid}
+                {battingSection}
+                {pitchingSection}
+              </>
+            );
+          })()}
+          {/* ── END BOXSCORE TAB ─────────────────────────────── */}
 
         </>)}
 

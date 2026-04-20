@@ -2292,38 +2292,13 @@ All other cache consumers use `if (cached)` truthiness checks, so `undefined` vs
 
 ---
 
-## 📋 Current Backlog (post-Session 36)
+## 📋 Current Backlog (post-Session 38)
 
 ### 🔵 Medium Complexity
 
-**Boxscore view + auto-grading (planned together)**
-Build these as one feature — the boxscore data serves both purposes.
-
-- **New BOXSCORE tab** — sits alongside Overview, Lineup, Arsenal, Intel, Props, Bullpen. Works for live AND completed games (MLB boxscore endpoint is real-time, same endpoint, partial data while in progress).
-  - **Batting section** — hit/AB/RBI/HR per batter, both teams
-  - **Pitching section** — IP/K/ER/BB per pitcher. SP line + any relievers who've appeared
-  - **Linescore grid** — runs per inning (1–9+), R/H/E totals. Complements the live score chip already on slate cards.
-  - Live games show partial boxscore through current inning. Polling reuses the existing 60s linescore interval — just add boxscore to the same cycle.
-- **Auto-grading K and Outs props** — SP strikeout and outs totals come from the same boxscore call. Once boxscore is fetched, grading K and Outs picks is trivial.
-- **Auto-grading other prop types** — Total, NRFI/YRFI, Runline, and F5 can all be graded from the existing linescore data (inning-by-inning scores already available). No new API calls needed for these.
-- **Pick log UI** — after grading, show hit ✓ / miss ✗ chips on logged picks. The 7-day digest already filters to graded picks for win rate — it's just starved for data.
-
-Grading trigger: when linescore polling detects `status === "Final"`, queue a grading pass for all ungraded picks for that gamePk.
-
-Line parsing: the numeric line is embedded in the pick label ("Cole K's O/U **7.5**") — parse via regex or store `line` as a separate field on the pick object at log time.
-
-API: `GET /api/v1/game/{gamePk}/boxscore` — free MLB Stats API, no auth. Already used by the umpires route so the pattern exists. Add a new `backend/routes/boxscore.js` with 60s TTL for live games, 24h TTL for finals.
-
-**Extended splits view (after boxscore session)**
-Currently we have pitcher vs L/R (Baseball Savant) and batter vs pitch type (Baseball Savant). Expand to cover the full Yahoo-style splits suite using the MLB Stats API `statSplits` endpoint already used elsewhere — no new keys or data sources needed.
-
-Priority order:
-1. **Pitcher Home/Away splits** — some starters are dramatically different at home vs road. Add to pitcher card in Overview alongside the existing vs L/R row.
-2. **Batter vs L/R splits** — we have this for pitchers but not batters. Add to Lineup drawer expanded view. Most directly useful for matchup analysis.
-3. **Pitcher Day/Night splits** — secondary signal, easy to add once Home/Away is wired.
-4. **Batter Home/Away, Day/Night, Grass/Turf** — lower priority, nice completeness but less actionable than L/R.
-
-API: `/people/{playerId}/stats?stats=statSplits&group=hitting&season={yr}` (batters) and `group=pitching` (pitchers). Returns all split categories in one call. Display full slash line (AVG/OBP/SLG/OPS) per split, same style as Yahoo splits tab.
+**Extended splits — remaining items**
+Pitcher home/away + day/night and batter vs L/R + day/night are all live (Sessions 38–39). Remaining:
+- **Batter Home/Away, Grass/Turf** — lower priority, nice completeness but less actionable than L/R or day/night.
 
 **CLV tracking**
 Log the closing line vs the line at time of pick. Positive CLV over time is the strongest edge indicator. Requires a scheduled Odds API snapshot at first pitch for each game's total/ML/RL. K prop closing lines would need the sportsbook lines endpoint called one final time just before first pitch.
@@ -2469,3 +2444,86 @@ The `DB-HIT` confirms Railway Postgres is migrated, populated, and serving the s
 ---
 
 *Updated April 19 2026 — Session 37 complete · Railway Postgres merged/deployed · migration + schedule DB-HIT verified · fallback hardened*
+<<<<<<< Updated upstream
+=======
+
+---
+
+## ✅ Session 38 — Boxscore Tab + Auto-Grading + Extended Splits
+
+### What shipped
+
+**Boxscore tab (`BOXSCORE` — 7th tab)**
+- New `backend/routes/boxscore.js` mounted at `GET /api/boxscore/:gamePk`
+- Fetches `/game/{gamePk}/boxscore` + `/game/{gamePk}/linescore` in parallel (free MLB Stats API)
+- Returns `{ gamePk, isFinal, linescore: { innings[], away/home R/H/E }, batting: { away[], home[] }, pitching: { away[], home[] } }`
+- 60s TTL for live games, 24h for finals
+- Frontend: single toggle controls both batting table and pitching card (away/home)
+- Linescore grid with per-inning runs, R/H/E totals, winner highlighted green
+- Batting table: hits bolded, runs blue, RBI yellow, HRs orange, Ks red
+- Pitching card: SP labeled blue, Ks green, ER red
+
+**Auto-grading picks**
+- `computeGrade(pick, box)` handles: NRFI, YRFI, Game Total O/U, F5 total, Run Line, Pitcher K's O/U, Pitcher Outs O/U
+- NRFI/YRFI matched with `.startsWith()` — handles labels like "NRFI · TEX @ SEA"
+- `gamePk` comparison uses loose `==` — handles string/number mismatch from localStorage
+- Grading fires two ways:
+  1. On load: when `liveSlate.status === "Final"` for a game with pending picks
+  2. Mid-session: when linescore poll returns `inning === null` with runs scored — catches games that finish while app is open without reload
+- `gradedGames` ref prevents double-grading
+
+**Extended splits — Pitcher Home/Away + Batter vs L/R**
+- New `backend/routes/statSplits.js` mounted at `GET /api/stat-splits/:playerId?group=pitching|hitting`
+- Calls MLB Stats API `stats=statSplits` with `sitCodes=h,a,vl,vr,d,n`
+- Matches splits by `split.code` with description keyword fallback (API codes not always consistent)
+- Falls back to prior season if current year returns no data
+- 6h cache
+- **Pitcher card (Overview)**: Home/Away ERA + WHIP + IP row appears below existing vs LHH/vs RHH row. Loads lazily on pitcher card open.
+- **Batter drawer (Lineup)**: vs LHP / vs RHP AVG/OBP/SLG row above the vs-arsenal section. Side matching today's facing pitcher highlighted blue with "TODAY" badge. Loads lazily on drawer expand.
+
+### Updated backlog
+
+**Completed this session:**
+- ✅ Boxscore tab (live + final games)
+- ✅ Auto-grading (NRFI/YRFI/Total/F5/RL/K/Outs)
+- ✅ Pitcher Home/Away splits (Overview pitcher card)
+- ✅ Batter vs L/R splits (Lineup drawer)
+
+**Completed this session (Session 39):**
+- ✅ Pitcher Day/Night splits (Overview pitcher card — below Home/Away row)
+- ✅ Batter Day/Night splits (Lineup drawer — below vs L/R row)
+- Both highlight the applicable side with a "TODAY" badge based on `game.time` (day = before 5 PM)
+- No new backend work — `statSplits` already returned `day`/`night` fields; pure frontend display addition
+
+**Remaining Medium Complexity:**
+- Batter Home/Away, Grass/Turf splits — lower priority
+- CLV tracking — log closing line vs line at pick time; needs scheduled Odds API snapshot at first pitch
+
+**Housekeeping:**
+- Remove or document unused `backend/routes/playerProps.js`
+- Verify sportsbook lines reach AI props context pre-game (K prop reason should cite actual DK/FD line)
+
+---
+
+## ✅ Session 39 — Day/Night Splits
+
+### What shipped
+
+**Pitcher Day/Night splits (Overview pitcher card)**
+- New render block inserted below the Home/Away row in the pitcher card
+- Reads `liveStatSplits[\`${activePitcher.id}:pitching\`].day` and `.night` (already populated from Session 38's statSplits fetch)
+- Shows ERA + WHIP + IP for Day and Night
+- "TODAY" badge + blue highlight on whichever applies: parses `game.time` string, day = start time before 5 PM
+
+**Batter Day/Night splits (Lineup drawer)**
+- New render block inserted below the vs L/R row in the batter expanded drawer
+- Reads `liveStatSplits[\`${b.id}:hitting\`].day` and `.night`
+- Shows AVG / OBP / SLG + AB sample
+- "TODAY" badge + blue highlight matching same game time logic
+
+### Verified working (screenshot confirmed)
+- PJ Poulin pitcher card: DAY TODAY 3.86 ERA / 1.86 WHIP · 7.0 IP vs NIGHT 3.38 ERA / 0.94 WHIP · 5.1 IP — blue highlight + TODAY badge correct
+- Willy Adames batter drawer: DAY TODAY .162 / OBP .184 / SLG .216 (37 AB) vs NIGHT .308 / OBP .368 / SLG .635 (52 AB) — positioned between vs L/R and arsenal section, TODAY badge firing correctly
+
+*Updated April 19 2026 — Session 39 complete · Day/Night splits verified working (pitcher card + batter drawer)*
+>>>>>>> Stashed changes

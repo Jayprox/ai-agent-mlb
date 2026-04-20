@@ -34,6 +34,8 @@ app.use("/api/pitcher-splits",  require("./routes/pitcherSplits")); // Baseball 
 app.use("/api/nrfi",     require("./routes/nrfi"));     // MLB Stats: first-inning team scoring tendencies
 app.use("/api/bullpen",   require("./routes/bullpen"));   // MLB Stats: bullpen fatigue + reliever usage
 app.use("/api/linescore", require("./routes/linescore")); // MLB Stats: live score + inning for in-progress games
+app.use("/api/boxscore",    require("./routes/boxscore"));    // MLB Stats: full game boxscore for live + final games
+app.use("/api/stat-splits", require("./routes/statSplits")); // MLB Stats: home/away + vs L/R + day/night splits
 app.use("/api/trends",   require("./routes/trends"));    // Anthropic: AI-generated bettor trend summary per game
 app.use("/api/props",        require("./routes/props"));        // Anthropic: AI-generated prop recommendations per game
 app.use("/api/player-props", require("./routes/playerProps")); // Odds API: real sportsbook player prop lines
