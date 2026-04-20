@@ -214,6 +214,7 @@ router.get("/:playerId/gamelog", async (req, res) => {
             // Season-level stats used by batter stat boxes in the Lineup tab
             avg:    seasonSplit?.avg      ?? ".000",
             ops:    seasonSplit?.ops      ?? ".000",
+            slg:    seasonSplit?.sluggingPercentage ?? ".000",
             hr:     seasonSplit?.homeRuns ?? 0,
             avgTB:  gp > 0 ? (tbTot / gp).toFixed(1) : "—",
             // Batting hand from person data — lineup API sometimes misses batSide

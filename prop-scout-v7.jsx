@@ -340,10 +340,10 @@ const buildPropsContext = (game, odds, parkFactors, playerProps = null) => {
 // ─────────────────────────────────────────────────────────────
 const playerPropsCache    = {};          // key: "Away|Home", value: { props, ts }
 const PLAYER_PROPS_TTL_MS = 10 * 60 * 1000;
-const PLAYER_PROP_MARKETS = "pitcher_strikeouts,batter_total_bases,batter_hits";
+const PLAYER_PROP_MARKETS = "pitcher_strikeouts,batter_total_bases,batter_hits,batter_home_runs";
 const PLAYER_PROP_BOOKS   = "draftkings,fanduel,williamhill_us,betmgm"; // widen — grab first available
 const PLAYER_PROP_ORDER   = { pitcher_strikeouts: 0, batter_total_bases: 1, batter_hits: 2 };
-const PLAYER_PROP_LABELS  = { pitcher_strikeouts: "K", batter_total_bases: "TB", batter_hits: "H" };
+const PLAYER_PROP_LABELS  = { pitcher_strikeouts: "K", batter_total_bases: "TB", batter_hits: "H", batter_home_runs: "HR" };
 
 const fetchPlayerPropsDirect = async (awayName, homeName) => {
   if (IS_ODDS_SANDBOX || !ODDS_API_KEY) return [];
@@ -1682,6 +1682,130 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
   return picks.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
 }
 
+// ─── HR / Hit board scoring ───────────────────────────────────────────────────
+// hrBoardScore: 0–95 composite. Primary = SLG/HR pace. Secondary = park, wind, order, platoon.
+const hrBoardScore = (hlog, order, pitcherHand, pf, wxFav, sd) => {
+  if (!hlog) return null;
+  let s = 50;
+  const slg = parseFloat(hlog.slg) || 0;
+  const hr  = parseInt(hlog.hr)    || 0;
+  const ops = parseFloat(hlog.ops) || 0;
+  // Power signal — SLG vs league avg ~.410
+  if (slg > 0) s += (slg - 0.410) * 55;
+  else          s += (ops - 0.720) * 20; // ops fallback if slg unavailable
+  // HR pace (each HR this season adds to score)
+  s += hr * 0.7;
+  // Park HR factor
+  s += (pf.hr - 1.0) * 35;
+  // Wind boost
+  if (wxFav) s += 8;
+  // Batting order (higher slots = more PA)
+  if      (order <= 3) s += 6;
+  else if (order <= 5) s += 3;
+  else if (order >= 8) s -= 4;
+  // Platoon split from stat splits (bonus/penalty vs facing pitcher's hand)
+  if (sd && typeof sd === "object" && sd !== "loading") {
+    const hand = pitcherHand === "L" ? sd.vsL : sd.vsR;
+    if (hand?.slg) s += (parseFloat(hand.slg) - (slg || 0.410)) * 25;
+  }
+  return Math.round(Math.max(15, Math.min(95, s)));
+};
+
+// hitBoardScore: 0–95 composite. Primary = AVG + recent form. Secondary = park, order, platoon.
+const hitBoardScore = (hlog, order, pitcherHand, pf, sd) => {
+  if (!hlog) return null;
+  let s = 50;
+  const avg = parseFloat(hlog.avg) || 0;
+  const ops = parseFloat(hlog.ops) || 0;
+  const hitRate = hlog.hitRate ?? [];
+  const l5 = hitRate.slice(0, 5).reduce((a, v) => a + v, 0);
+  // Season AVG vs league avg ~.250
+  if (avg > 0) s += (avg - 0.250) * 140;
+  else          s += (ops - 0.720) * 15;
+  // Recent form: L5 hit rate vs 50% baseline
+  s += (l5 / 5 - 0.40) * 28;
+  // Park hit factor
+  s += (pf.hit - 1.0) * 28;
+  // Batting order
+  if      (order <= 3) s += 6;
+  else if (order <= 5) s += 3;
+  else if (order >= 8) s -= 4;
+  // Platoon split
+  if (sd && typeof sd === "object" && sd !== "loading") {
+    const hand = pitcherHand === "L" ? sd.vsL : sd.vsR;
+    if (hand?.avg) s += (parseFloat(hand.avg) - (avg || 0.250)) * 110;
+  }
+  return Math.round(Math.max(15, Math.min(95, s)));
+};
+
+// computeBatterBoard: returns top-20 batter candidates sorted by score.
+const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits) => {
+  const candidates = [];
+  (liveSlate ?? []).forEach(game => {
+    const lu = liveLineups[game.gamePk];
+    if (!lu) return;
+    const pf = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
+    const wx = liveWeather[game.gamePk];
+    const wxFav = !!(wx?.hrFavorable);
+    const ppKey = String(game.gamePk);
+    const ppEntry = livePlayerProps[ppKey];
+    const props = Array.isArray(ppEntry?.props) ? ppEntry.props : [];
+
+    ["away", "home"].forEach(side => {
+      // Away batters face the home SP; home batters face the away SP
+      const facingPitcher = side === "away"
+        ? game.pitcher
+        : (game.awayPitcher ?? game.pitcher);
+      const pitcherHand = facingPitcher?.hand ?? "R";
+      const batters = lu[side] ?? [];
+
+      batters.forEach(b => {
+        if (!b?.id) return;
+        const hlog = liveHittingLog[b.id];
+        const sdKey = `${b.id}:hitting`;
+        const sd = liveStatSplits[sdKey];
+
+        const score = type === "hr"
+          ? hrBoardScore(hlog, b.order, pitcherHand, pf, wxFav, sd)
+          : hitBoardScore(hlog, b.order, pitcherHand, pf, sd);
+
+        if (score === null) return; // no hlog yet
+
+        const market = type === "hr" ? "batter_home_runs" : "batter_hits";
+        // Match prop by last name (Odds API names are usually full names)
+        const lastName = b.name.split(" ").pop().toLowerCase();
+        const propLine = props.find(p =>
+          p.market === market && p.player.toLowerCase().includes(lastName)
+        ) ?? null;
+
+        candidates.push({
+          id:           b.id,
+          name:         b.name,
+          hand:         b.hand,
+          order:        b.order,
+          team:         side === "away" ? (game.away?.abbr ?? "?") : (game.home?.abbr ?? "?"),
+          gamePk:       game.gamePk,
+          gameLabel:    `${game.away?.abbr ?? "?"} @ ${game.home?.abbr ?? "?"}`,
+          pitcher:      facingPitcher?.name ?? "—",
+          pitcherHand,
+          park:         game.stadium ?? "—",
+          parkFactor:   type === "hr" ? pf.hr : pf.hit,
+          windFav:      wxFav,
+          score,
+          avg:          hlog?.avg ?? "—",
+          slg:          hlog?.slg ?? "—",
+          hr:           hlog?.hr  ?? 0,
+          ops:          hlog?.ops ?? "—",
+          hitRate:      hlog?.hitRate ?? [],
+          propLine,
+        });
+      });
+    });
+  });
+
+  return candidates.sort((a, b) => b.score - a.score).slice(0, 20);
+};
+
 function computeLiveProps({
   IS_SAVANT_SANDBOX,
   IS_STATS_SANDBOX,
@@ -2308,6 +2432,8 @@ export default function App() {
   const playerPropsFetched = useRef(new Set());               // guards sportsbook lines fetch
   const [pitcherPlatoonSplits, setPitcherPlatoonSplits] = useState({}); // pitcherId → {vsL,vsR} | "loading" | null
   const [liveStatSplits,       setLiveStatSplits]       = useState({}); // `${id}:${group}` → splits obj | "loading" | null
+  const [boardTab,             setBoardTab]             = useState("hr"); // "hr" | "hits"
+  const boardPropsFetched = useRef(new Set());                            // guards board-level props pre-fetch
   const [noteSaveState, setNoteSaveState] = useState(null); // null | "saving" | "saved"
   const [copiedPickId, setCopiedPickId] = useState(null);   // id of pick just copied to clipboard
   const [parlayLabels, setParlayLabels] = useState([]);      // labels of props selected for parlay (max 3)
@@ -2463,6 +2589,35 @@ export default function App() {
         setLiveAiProps(prev => ({ ...prev, [key]: null }));
       });
   }, [view, selectedId, tab, livePlayerProps]);
+
+  // Pre-fetch hitting logs + player props for all slate games when Board view opens
+  useEffect(() => {
+    if (view !== "board") return;
+    // Hitting logs for every batter in every confirmed lineup
+    Object.values(liveLineups).forEach(lu => {
+      [...(lu.away ?? []), ...(lu.home ?? [])].forEach(b => {
+        if (!b?.id || liveHittingLog[b.id]) return;
+        apiFetch(`/api/players/${b.id}/gamelog?group=hitting`)
+          .then(data => setLiveHittingLog(prev => ({ ...prev, [b.id]: data })))
+          .catch(() => {});
+      });
+    });
+    // Player props (HR + hit odds) for every game in the slate
+    if (!IS_ODDS_SANDBOX && ODDS_API_KEY) {
+      (liveSlate ?? []).forEach(game => {
+        const key = String(game.gamePk);
+        if (livePlayerProps[key] || boardPropsFetched.current.has(key)) return;
+        boardPropsFetched.current.add(key);
+        setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
+        fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "")
+          .then(props => setLivePlayerProps(prev => ({ ...prev, [key]: { props } })))
+          .catch(() => {
+            boardPropsFetched.current.delete(key);
+            setLivePlayerProps(prev => ({ ...prev, [key]: { props: [] } }));
+          });
+      });
+    }
+  }, [view, liveLineups]);
 
   // Fetch pitcher platoon splits (vs LHH / vs RHH) when Overview pitcher card is visible
   useEffect(() => {
@@ -3367,6 +3522,7 @@ export default function App() {
               Picks
               {propLog.length > 0 && <span style={{ position: "absolute", top: -5, right: -5, background: "#a78bfa", color: "#000", fontSize: 8, fontWeight: 800, borderRadius: "50%", width: 14, height: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>{propLog.length > 99 ? "99" : propLog.length}</span>}
             </button>
+            <button onClick={() => setView("board")} style={{ background: view === "board" ? "#fbbf24" : "#161827", border: `1px solid ${view === "board" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "board" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Board</button>
           </div>
         </div>
 
@@ -5835,6 +5991,124 @@ export default function App() {
               </Card>
             ))}
           </>);
+        })()}
+
+        {/* ════════════════════════════════════
+            BOARD VIEW — HR / Hits ranked list
+        ════════════════════════════════════ */}
+        {view === "board" && (() => {
+          const boardCandidates = computeBatterBoard(
+            boardTab, liveSlate, liveLineups, liveWeather,
+            livePlayerProps, liveHittingLog, liveStatSplits
+          );
+          const totalBatters = Object.values(liveLineups)
+            .flatMap(lu => [...(lu.away ?? []), ...(lu.home ?? [])]).length;
+          const loadedBatters = boardCandidates.length;
+
+          const scoreColor = (s) =>
+            s >= 70 ? "#22c55e" : s >= 55 ? "#f59e0b" : s >= 40 ? "#ef4444" : "#6b7280";
+
+          return (
+            <div>
+              {/* Toggle */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                {[["hr", "⚾ Home Runs"], ["hits", "🎯 Hits"]].map(([type, label]) => (
+                  <button key={type} onClick={() => setBoardTab(type)}
+                    style={{ flex: 1, background: boardTab === type ? "#fbbf24" : "#161827",
+                      border: `1px solid ${boardTab === type ? "#fbbf24" : "#1f2437"}`,
+                      borderRadius: 8, padding: "7px", fontSize: 11, fontFamily: "monospace",
+                      fontWeight: 700, color: boardTab === type ? "#000" : "#9ca3af", cursor: "pointer" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Sub-header */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  {boardTab === "hr" ? "Ranked by power · park · wind · matchup" : "Ranked by avg · recent form · park · matchup"}
+                </span>
+                <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace" }}>
+                  {loadedBatters}/{totalBatters || "?"} loaded
+                </span>
+              </div>
+
+              {boardCandidates.length === 0 ? (
+                <Card>
+                  <div style={{ textAlign: "center", padding: "24px 0", color: "#6b7280", fontSize: 11 }}>
+                    {totalBatters === 0 ? "Waiting for lineups to post…" : "Loading player stats…"}
+                  </div>
+                </Card>
+              ) : boardCandidates.map((c, i) => {
+                const sc = scoreColor(c.score);
+                const l5dots = Array.from({ length: 5 }, (_, j) => c.hitRate[j] ?? null);
+                return (
+                  <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }}
+                    onClick={() => { openGame(c.gamePk); setTab("lineup"); }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                      {/* Rank */}
+                      <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", flexShrink: 0, marginTop: 1 }}>{i + 1}</div>
+
+                      {/* Main info */}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
+                          <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
+                          <span style={{ fontSize: 9, color: "#6b7280" }}>#{c.order}</span>
+                          {c.windFav && boardTab === "hr" && (
+                            <span style={{ fontSize: 8, fontWeight: 700, color: "#fbbf24", background: "rgba(251,191,36,0.12)", borderRadius: 4, padding: "1px 5px" }}>↑ WIND</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
+                          vs {c.pitcher} ({c.pitcherHand}HP) · {c.gameLabel}
+                        </div>
+                        {/* Stats row */}
+                        <div style={{ display: "flex", gap: 10, marginTop: 5, flexWrap: "wrap" }}>
+                          {c.avg !== "—" && (
+                            <span style={{ fontSize: 10, color: parseFloat(c.avg) >= 0.280 ? "#22c55e" : parseFloat(c.avg) >= 0.240 ? "#f59e0b" : "#ef4444", fontFamily: "monospace", fontWeight: 700 }}>{c.avg} AVG</span>
+                          )}
+                          {boardTab === "hr" && c.hr > 0 && (
+                            <span style={{ fontSize: 10, color: "#fbbf24", fontFamily: "monospace", fontWeight: 700 }}>{c.hr} HR</span>
+                          )}
+                          {c.slg !== "—" && c.slg !== ".000" && boardTab === "hr" && (
+                            <span style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace" }}>{c.slg} SLG</span>
+                          )}
+                          {c.ops !== "—" && (
+                            <span style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace" }}>{c.ops} OPS</span>
+                          )}
+                          {c.parkFactor !== 1.0 && (
+                            <span style={{ fontSize: 9, color: c.parkFactor >= 1.10 ? "#22c55e" : c.parkFactor <= 0.93 ? "#ef4444" : "#6b7280", fontFamily: "monospace" }}>
+                              {boardTab === "hr" ? "HR" : "HIT"} {c.parkFactor >= 1.0 ? "+" : ""}{((c.parkFactor - 1) * 100).toFixed(0)}% park
+                            </span>
+                          )}
+                        </div>
+                        {/* L5 dots + prop odds */}
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5 }}>
+                          <div style={{ display: "flex", gap: 3 }}>
+                            {l5dots.map((v, j) => (
+                              <div key={j} style={{ width: 7, height: 7, borderRadius: "50%",
+                                background: v === 1 ? "#22c55e" : v === 0 ? "#374151" : "#1e2030",
+                                border: v === null ? "1px solid #374151" : "none" }} />
+                            ))}
+                          </div>
+                          {c.propLine && (
+                            <span style={{ fontSize: 9, color: "#38bdf8", fontFamily: "monospace" }}>
+                              {boardTab === "hr" ? "HR" : "H"} O{c.propLine.line} {c.propLine.overOdds} · {c.propLine.book}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Score badge */}
+                      <div style={{ flexShrink: 0, width: 38, height: 38, borderRadius: 10, background: `${sc}22`, border: `1px solid ${sc}55`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <span style={{ fontSize: 13, fontWeight: 800, color: sc, fontFamily: "monospace" }}>{c.score}</span>
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          );
         })()}
 
         {/* Footer */}

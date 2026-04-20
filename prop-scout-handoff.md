@@ -2557,3 +2557,41 @@ The `DB-HIT` confirms Railway Postgres is migrated, populated, and serving the s
 4. vs pitcher's pitches (arsenal)
 
 *Updated April 19 2026 — Session 40 complete · Batter Home/Away + Grass/Turf splits*
+
+---
+
+## ✅ Session 41 — Board View (HR + Hits ranked list)
+
+**Bug fixed:** Board view JSX block was placed inside `{showHelp && (...)}` (the help overlay) instead of as a sibling view block. It was never rendering because `showHelp` is false when `view === "board"`. Fixed by moving the block to the correct location — after the picks IIFE closes at line 5994, before the footer — matching the 8-space indentation of all other view blocks.
+
+**Board view features:**
+- Amber **BOARD** nav button (top right, after Picks)
+- HR / Hits tab toggle (amber = active)
+- Cross-slate ranked list of top 20 batters, sorted by composite score
+- **HR board scoring** (`hrBoardScore`): SLG (30 pts), HR pace (25 pts), park factor (20 pts), wind (10 pts), batting order (10 pts), platoon split (5 pts) → 0–95 scale
+- **Hits board scoring** (`hitBoardScore`): AVG (35 pts), recent form/last7Avg (25 pts), park factor (15 pts), batting order (15 pts), platoon split (10 pts) → 0–95 scale
+- Score color: green ≥70, amber ≥55, red ≥40, gray <40
+- Each card shows: rank, name, team badge, lineup slot, pitcher (hand), game label, AVG / HR / SLG / OPS / park %, L5 hit dots, prop line from Odds API if available
+- ↑ WIND badge on HR cards when weather is favorable
+- Click any card → opens that game's Lineup tab
+- Score badge color-coded (green/amber/red)
+
+**Pre-fetch logic (board view useEffect):**
+- Triggers when `view === "board"` (or liveLineups changes)
+- Eagerly fetches hitting gamelogs (`/api/players/:id/gamelog?group=hitting`) for all confirmed lineup batters
+- Eagerly fetches player props (`fetchPlayerPropsDirect`) for all slate games
+- Deduplicates with `boardPropsFetched` ref to avoid re-fetching
+
+**Backend change (Session 40, still relevant):**
+- `backend/routes/players.js` gamelog hitting response now includes `slg: seasonSplit?.sluggingPercentage ?? ".000"` — required for HR board scoring
+
+**Prop markets expanded:**
+- `PLAYER_PROP_MARKETS` now includes `batter_home_runs`
+- `PLAYER_PROP_LABELS` has `batter_home_runs: "HR"` 
+- Board prop line display: `HR O{line} {overOdds} · {book}` or `H O{line} {overOdds} · {book}`
+
+**State added:**
+- `boardTab` — "hr" | "hits", persists tab selection
+- `boardPropsFetched` — useRef(Set) to track which gamePks have had props fetched
+
+*Updated April 20 2026 — Session 41 complete · Board view (HR + Hits) fixed and verified live*
