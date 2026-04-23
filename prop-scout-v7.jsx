@@ -361,8 +361,9 @@ const fetchPlayerPropsDirect = async (awayName, homeName, gamePk) => {
     ...p,
     marketLabel: PLAYER_PROP_LABELS[p.market] ?? p.marketLabel ?? p.market,
   }));
-  playerPropsCache[cacheKey] = props;
-  return props;
+  const result = { props, reason: data.reason ?? (props.length ? "ok" : "no_props") };
+  playerPropsCache[cacheKey] = result;
+  return result;
 };
 
 
@@ -403,41 +404,41 @@ const fetchWeather = async (gameId, stadiumName, gameTimeStr, mockWeather) => {
     return data;
   }
 
-  // Live path — runs in real environment
+  // Live path — route through backend (shared 1-hour server cache, avoids Open-Meteo 429s)
   const parseHour = (timeStr, tz) => {
     try {
-      const now = new Date();
+      const now     = new Date();
       const dateStr = now.toLocaleDateString("en-CA", { timeZone: tz });
-      const clean = timeStr.replace(/ [A-Z]{2,3}$/,"");
-      const d = new Date(`${dateStr} ${clean}`);
+      const clean   = timeStr.replace(/ [A-Z]{2,3}$/, "");
+      const d       = new Date(`${dateStr} ${clean}`);
       return isNaN(d) ? now : d;
     } catch { return new Date(); }
   };
 
   const targetHour = parseHour(gameTimeStr, stadium.tz).getHours();
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${stadium.lat}&longitude=${stadium.lon}&hourly=temperature_2m,windspeed_10m,winddirection_10m,weathercode,precipitation_probability,relativehumidity_2m&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=${stadium.tz}&forecast_days=1`;
+  const qs = new URLSearchParams({
+    lat:  stadium.lat,
+    lon:  stadium.lon,
+    tz:   stadium.tz,
+    hour: targetHour,
+    key:  stadiumName,
+  });
 
   try {
-    const res  = await fetch(url);
-    const json = await res.json();
-    const h    = json.hourly;
-    const idx  = h.time.findIndex(t => new Date(t).getHours() === targetHour);
-    const i    = idx >= 0 ? idx : targetHour;
-
-    const windDeg = h.winddirection_10m[i];
-    const windSpd = h.windspeed_10m[i];
-    const temp    = Math.round(h.temperature_2m[i]);
+    const res  = await fetch(`${API_BASE}/api/weather?${qs}`);
+    if (!res.ok) throw new Error(`weather ${res.status}`);
+    const w = await res.json();
 
     const data = {
-      temp,
-      condition:   WMO_CODES[h.weathercode[i]] ?? "Unknown",
-      wind:        windDescription(windDeg, windSpd, stadium.orientation),
-      humidity:    `${Math.round(h.relativehumidity_2m[i])}%`,
-      rainChance:  `${h.precipitation_probability[i]}%`,
+      temp:        w.temp,
+      condition:   WMO_CODES[w.weathercode] ?? "Unknown",
+      wind:        windDescription(w.winddirection, w.windspeed, stadium.orientation),
+      humidity:    `${Math.round(w.relativehumidity)}%`,
+      rainChance:  `${w.precipitation_probability}%`,
       roof:        false,
-      hrFavorable: isHrFavorable(windDeg, windSpd, stadium.orientation, temp),
+      hrFavorable: isHrFavorable(w.winddirection, w.windspeed, stadium.orientation, w.temp),
       live:        true,
-      fetchedAt:   new Date().toLocaleTimeString(),
+      fetchedAt:   w.fetchedAt,
     };
     weatherCache[gameId] = { data, ts: Date.now() };
     return data;
@@ -484,6 +485,19 @@ const apiFetch = async (path) => {
 };
 
 // POST / PATCH / DELETE helper (fire-and-forget safe)
+// ── Daily Card ────────────────────────────────────────────────────────────────
+// Fetches (or returns cached) the full-slate AI analysis from the backend.
+const fetchDailyCard = async () => {
+  const res = await fetch(`${API_BASE}/api/daily-card`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    // Surface the real detail so we can diagnose failures
+    const msg = body.detail ?? body.error ?? `HTTP ${res.status}`;
+    throw Object.assign(new Error(msg), { status: res.status, cap: body.cap });
+  }
+  return res.json();
+};
+
 const apiMutate = async (path, method, body) => {
   const headers = { "Content-Type": "application/json" };
   if (_authToken) headers["Authorization"] = `Bearer ${_authToken}`;
@@ -1602,86 +1616,159 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
 // collide its local variable names with App()'s render-body variables.
 // Receives all needed data as explicit parameters.
 // ─────────────────────────────────────────────
+// ── Model pick tiers ──────────────────────────────────────────────────────────
+// HIGH  65 %+ : strong signal, multiple corroborating factors
+// MEDIUM 56–64%: positive lean, fewer signals
+// SPEC  50–55%: marginal, display-only (no action implied)
+const MODEL_TIER = (score) =>
+  score >= 65 ? "HIGH" : score >= 56 ? "MEDIUM" : "SPEC";
+
 function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather) {
   const picks = [];
+
   liveSlate.forEach(sg => {
-    const sgPid    = sg.probablePitchers?.home?.id;
-    const sgPs     = livePitcherStats[sgPid];
-    if (!sgPs) return;
-
-    const sgLastName = (sgPs.name ?? sg.probablePitchers?.home?.name ?? "SP")
-      .split(" ").slice(-1)[0];
-    const sgEra    = parseFloat(sgPs.era)    || 5.00;
-    const sgKPer9  = parseFloat(sgPs.kPer9)  || 6.0;
-    const sgWhip   = parseFloat(sgPs.whip)   || 1.35;
-    const sgBbPer9 = parseFloat(sgPs.bbPer9) || 3.5;
-    const sgAvgIP  = parseFloat(sgPs.avgIP)  || 5.0;
-    const sgAvgK   = parseFloat(sgPs.avgK)   || Math.round(sgKPer9 * sgAvgIP / 9 * 10) / 10;
-    const sgPf     = PARK_FACTORS[sg.home?.abbr] ?? NEUTRAL_PARK;
-    const sgWx     = liveWeather[sg.gamePk];
     const sgGameLabel = `${sg.away?.abbr ?? "?"} @ ${sg.home?.abbr ?? "?"}`;
+    const sgLu        = liveLineups[sg.gamePk];
+    const sgConfirmed = sgLu?.confirmed ?? false;
+    const sgWx        = liveWeather[sg.gamePk];
+    const sgPf        = PARK_FACTORS[sg.home?.abbr] ?? NEUTRAL_PARK;
 
-    // ── Lineup-strength signal ──
-    const sgEntry         = liveLineups[sg.gamePk];
-    const sgBatters       = sgEntry?.away ?? [];
-    const sgConfirmed     = sgEntry?.confirmed ?? false;
-    let   sgLineupAdj     = 0;
-    if (sgConfirmed && sgBatters.length >= 7) {
-      const sgPHand      = sg.probablePitchers?.home?.hand ?? "R";
-      const sgOppCount   = sgBatters.filter(b => b.hand && b.hand !== sgPHand && b.hand !== "?").length;
-      const sgOppPct     = sgOppCount / sgBatters.length;
-      if      (sgOppPct >= 0.67) sgLineupAdj = -5;
-      else if (sgOppPct >= 0.56) sgLineupAdj = -2;
-      else if (sgOppPct <= 0.33) sgLineupAdj = +5;
-      else if (sgOppPct <= 0.44) sgLineupAdj = +2;
-    }
+    // Score both starters: home pitcher faces away batters, away pitcher faces home batters
+    [
+      { pitcher: sg.probablePitchers?.home, opposingBatters: sgLu?.away ?? [], side: "home" },
+      { pitcher: sg.probablePitchers?.away, opposingBatters: sgLu?.home ?? [], side: "away" },
+    ].forEach(({ pitcher, opposingBatters, side }) => {
+      if (!pitcher?.id) return;
+      const ps = livePitcherStats[pitcher.id];
+      if (!ps) return;
 
-    // ── K prop ──
-    let sgKScore = 50;
-    if      (sgEra  < 3.00) sgKScore += 8;  else if (sgEra  < 3.50) sgKScore += 5;
-    else if (sgEra  > 5.00) sgKScore -= 8;  else if (sgEra  > 4.50) sgKScore -= 4;
-    if      (sgKPer9 >= 10) sgKScore += 14; else if (sgKPer9 >= 8.5) sgKScore += 8;
-    else if (sgKPer9 >= 7)  sgKScore += 3;  else if (sgKPer9 < 6)    sgKScore -= 10;
-    if (sgWhip < 1.1) sgKScore += 3; else if (sgWhip > 1.45) sgKScore -= 5;
-    sgKScore += Math.round((sgPf.k - 1.0) * 50);
-    if (sgWx && !sgWx.roof && parseInt(sgWx.temp) < 55) sgKScore += 5;
-    sgKScore += sgLineupAdj;
-    sgKScore = Math.max(38, Math.min(75, sgKScore));
-    const sgKLine = Math.max(0.5, Math.round(sgAvgK) - 0.5);
-    picks.push({
-      label: `${sgLastName} K O/U ${sgKLine}`,
-      lean: sgKScore >= 50 ? "OVER" : "UNDER",
-      positive: sgKScore >= 50,
-      confidence: sgKScore,
-      propType: "K",
-      gamePk: sg.gamePk,
-      game: sgGameLabel,
-      lineupConfirmed: sgConfirmed,
-    });
+      const lastName  = (ps.name ?? pitcher.name ?? "SP").split(" ").slice(-1)[0];
+      const fullName  = ps.name ?? pitcher.name ?? "SP";
+      const era       = parseFloat(ps.era)    || 5.00;
+      const kPer9     = parseFloat(ps.kPer9)  || 6.0;
+      const whip      = parseFloat(ps.whip)   || 1.35;
+      const bbPer9    = parseFloat(ps.bbPer9) || 3.5;
+      const avgIP     = parseFloat(ps.avgIP)  || 5.0;
+      const avgK      = parseFloat(ps.avgK)   || Math.round(kPer9 * avgIP / 9 * 10) / 10;
 
-    // ── Outs prop ──
-    let sgOScore = 50;
-    if      (sgEra  < 3.00) sgOScore += 10; else if (sgEra  < 3.50) sgOScore += 6;
-    else if (sgEra  > 5.00) sgOScore -= 10; else if (sgEra  > 4.50) sgOScore -= 5;
-    if      (sgWhip < 1.10) sgOScore += 12; else if (sgWhip < 1.25) sgOScore += 6;
-    else if (sgWhip > 1.50) sgOScore -= 12; else if (sgWhip > 1.38) sgOScore -= 6;
-    if      (sgBbPer9 < 2.5) sgOScore += 8; else if (sgBbPer9 < 3.0) sgOScore += 3;
-    else if (sgBbPer9 > 4.5) sgOScore -= 8; else if (sgBbPer9 > 3.5) sgOScore -= 4;
-    sgOScore += sgLineupAdj;
-    sgOScore = Math.max(38, Math.min(75, sgOScore));
-    const sgOLine = Math.max(0.5, Math.round(sgAvgIP * 3) - 0.5);
-    picks.push({
-      label: `${sgLastName} Outs O/U ${sgOLine}`,
-      lean: sgOScore >= 50 ? "OVER" : "UNDER",
-      positive: sgOScore >= 50,
-      confidence: sgOScore,
-      propType: "Outs",
-      gamePk: sg.gamePk,
-      game: sgGameLabel,
-      lineupConfirmed: sgConfirmed,
+      // ── Lineup platoon adjustment ──────────────────────────────────────────
+      let lineupAdj    = 0;
+      let lineupSignal = null;
+      if (sgConfirmed && opposingBatters.length >= 7) {
+        const pHand    = pitcher.hand ?? "R";
+        const oppCount = opposingBatters.filter(b => b.hand && b.hand !== pHand && b.hand !== "?").length;
+        const oppPct   = oppCount / opposingBatters.length;
+        if      (oppPct >= 0.67) { lineupAdj = -5; lineupSignal = `${Math.round(oppPct * 100)}% opposite-hand batters (tough)`; }
+        else if (oppPct >= 0.56) { lineupAdj = -2; lineupSignal = `${Math.round(oppPct * 100)}% opposite-hand batters`; }
+        else if (oppPct <= 0.33) { lineupAdj = +5; lineupSignal = `${Math.round(oppPct * 100)}% same-hand batters (favorable)`;  }
+        else if (oppPct <= 0.44) { lineupAdj = +2; lineupSignal = `${Math.round(oppPct * 100)}% same-hand batters`; }
+      }
+
+      // ════════════════════════════════
+      // K prop scoring
+      // ════════════════════════════════
+      let kScore   = 50;
+      const kSigs  = [];
+
+      if      (era  < 3.00) { kScore += 8;  kSigs.push(`ERA ${era.toFixed(2)} (elite)`); }
+      else if (era  < 3.50) { kScore += 5;  kSigs.push(`ERA ${era.toFixed(2)} (strong)`); }
+      else if (era  > 5.00) { kScore -= 8;  kSigs.push(`ERA ${era.toFixed(2)} (concerning)`); }
+      else if (era  > 4.50) { kScore -= 4;  kSigs.push(`ERA ${era.toFixed(2)} (elevated)`); }
+
+      if      (kPer9 >= 10)  { kScore += 14; kSigs.push(`K/9 ${kPer9.toFixed(1)} (elite strikeout rate)`); }
+      else if (kPer9 >= 8.5) { kScore += 8;  kSigs.push(`K/9 ${kPer9.toFixed(1)} (above average)`); }
+      else if (kPer9 >= 7)   { kScore += 3;  kSigs.push(`K/9 ${kPer9.toFixed(1)} (solid)`); }
+      else if (kPer9 < 6)    { kScore -= 10; kSigs.push(`K/9 ${kPer9.toFixed(1)} (low — caution)`); }
+
+      if (whip < 1.1) { kScore += 3; kSigs.push(`WHIP ${whip.toFixed(2)} (excellent command)`); }
+      else if (whip > 1.45) { kScore -= 5; kSigs.push(`WHIP ${whip.toFixed(2)} (poor command)`); }
+
+      const kPfAdj = Math.round((sgPf.k - 1.0) * 50);
+      if      (kPfAdj >= 3)  kSigs.push(`${sg.home?.abbr} park: K-friendly (+${kPfAdj}%)`);
+      else if (kPfAdj <= -3) kSigs.push(`${sg.home?.abbr} park: hitter-friendly (${kPfAdj}%)`);
+      kScore += kPfAdj;
+
+      if (sgWx && !sgWx.roof && parseInt(sgWx.temp) < 55) {
+        kScore += 5;
+        kSigs.push(`Cold weather ${sgWx.temp}°F (suppresses contact)`);
+      }
+      if (lineupAdj !== 0 && lineupSignal) { kScore += lineupAdj; kSigs.push(lineupSignal); }
+      if (avgIP >= 6.0) kSigs.push(`Avg IP ${avgIP.toFixed(1)} (deep outings, more K opportunities)`);
+
+      kScore = Math.max(38, Math.min(78, kScore));
+      const kLine = Math.max(0.5, Math.round(avgK) - 0.5);
+
+      picks.push({
+        label:          `${lastName} K O/U ${kLine}`,
+        fullName,
+        pitcherId:      pitcher.id,
+        lean:           kScore >= 50 ? "OVER" : "UNDER",
+        positive:       kScore >= 50,
+        confidence:     kScore,
+        tier:           MODEL_TIER(kScore),
+        propType:       "K",
+        market:         "pitcher_strikeouts",
+        modelLine:      kLine,
+        gamePk:         sg.gamePk,
+        game:           sgGameLabel,
+        lineupConfirmed: sgConfirmed,
+        signals:        kSigs,
+        avgIP,
+      });
+
+      // ════════════════════════════════
+      // Outs prop scoring
+      // ════════════════════════════════
+      let oScore  = 50;
+      const oSigs = [];
+
+      if      (era  < 3.00) { oScore += 10; oSigs.push(`ERA ${era.toFixed(2)} (elite — goes deep)`); }
+      else if (era  < 3.50) { oScore += 6;  oSigs.push(`ERA ${era.toFixed(2)} (strong)`); }
+      else if (era  > 5.00) { oScore -= 10; oSigs.push(`ERA ${era.toFixed(2)} (short outing risk)`); }
+      else if (era  > 4.50) { oScore -= 5;  oSigs.push(`ERA ${era.toFixed(2)} (elevated)`); }
+
+      if      (whip < 1.10) { oScore += 12; oSigs.push(`WHIP ${whip.toFixed(2)} (elite control)`); }
+      else if (whip < 1.25) { oScore += 6;  oSigs.push(`WHIP ${whip.toFixed(2)} (solid control)`); }
+      else if (whip > 1.50) { oScore -= 12; oSigs.push(`WHIP ${whip.toFixed(2)} (command issues)`); }
+      else if (whip > 1.38) { oScore -= 6;  oSigs.push(`WHIP ${whip.toFixed(2)} (slightly elevated)`); }
+
+      if      (bbPer9 < 2.5) { oScore += 8; oSigs.push(`BB/9 ${bbPer9.toFixed(1)} (excellent command)`); }
+      else if (bbPer9 < 3.0) { oScore += 3; oSigs.push(`BB/9 ${bbPer9.toFixed(1)} (above average)`); }
+      else if (bbPer9 > 4.5) { oScore -= 8; oSigs.push(`BB/9 ${bbPer9.toFixed(1)} (walk rate concern)`); }
+      else if (bbPer9 > 3.5) { oScore -= 4; oSigs.push(`BB/9 ${bbPer9.toFixed(1)} (elevated walks)`); }
+
+      if (lineupAdj !== 0 && lineupSignal) { oScore += lineupAdj; oSigs.push(lineupSignal); }
+      if (avgIP >= 6.0) oSigs.push(`Avg IP ${avgIP.toFixed(1)} (consistently works deep)`);
+      else if (avgIP < 5.0) oSigs.push(`Avg IP ${avgIP.toFixed(1)} (short outing risk)`);
+
+      oScore = Math.max(38, Math.min(78, oScore));
+      const oLine = Math.max(0.5, Math.round(avgIP * 3) - 0.5);
+
+      picks.push({
+        label:          `${lastName} Outs O/U ${oLine}`,
+        fullName,
+        pitcherId:      pitcher.id,
+        lean:           oScore >= 50 ? "OVER" : "UNDER",
+        positive:       oScore >= 50,
+        confidence:     oScore,
+        tier:           MODEL_TIER(oScore),
+        propType:       "Outs",
+        market:         "pitcher_outs_recorded",
+        modelLine:      oLine,
+        gamePk:         sg.gamePk,
+        game:           sgGameLabel,
+        lineupConfirmed: sgConfirmed,
+        signals:        oSigs,
+        avgIP,
+      });
     });
   });
-  return picks.sort((a, b) => b.confidence - a.confidence).slice(0, 3);
+
+  // Sort by confidence, filter to positive-lean only, cap at 10 for readability
+  return picks
+    .filter(p => p.positive)
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 10);
 }
 
 // ─── HR / Hit board scoring ───────────────────────────────────────────────────
@@ -1878,7 +1965,7 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
   const candidates = [];
   (liveSlate ?? []).forEach(game => {
     const lu = liveLineups[game.gamePk];
-    if (!lu) return;
+    if (!lu?.confirmed) return; // skip games without a confirmed lineup
     const pf = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
     const wx = liveWeather[game.gamePk];
     const wxFav = !!(wx?.hrFavorable);
@@ -2537,6 +2624,7 @@ export default function App() {
   // These MUST live here — before any early return — to satisfy Rules of Hooks
   const [lineupSide, setLineupSide] = useState("away");
   const [expandedBatter, setExpandedBatter] = useState(null);
+  const [expandedPropRow, setExpandedPropRow] = useState(null); // "market:player" key for props table expand
   const [pitcherSide, setPitcherSide] = useState("home");  // "home" | "away"
   const [arsenalSide, setArsenalSide] = useState("home");  // "home" | "away"
   // Live Stats API state
@@ -2565,6 +2653,8 @@ export default function App() {
   const [liveAiProps,    setLiveAiProps]    = useState({});  // gamePk → [...props] | "loading" | null
   const aiPropsFetched   = useRef(new Set());                 // guards against stale-closure re-fetch
   const [livePlayerProps, setLivePlayerProps] = useState({}); // gamePk → { props: [] } | "loading" | null
+  const [dailyCard,      setDailyCard]      = useState(null);  // null | "loading" | { card, date, gamesAnalyzed, cap, ... }
+  const [dailyCardOpen,  setDailyCardOpen]  = useState(false); // controls panel visibility
   const playerPropsFetched = useRef(new Set());               // guards sportsbook lines fetch
   const [pitcherPlatoonSplits, setPitcherPlatoonSplits] = useState({}); // pitcherId → {vsL,vsR} | "loading" | null
   const [liveStatSplits,       setLiveStatSplits]       = useState({}); // `${id}:${group}` → splits obj | "loading" | null
@@ -2578,6 +2668,8 @@ export default function App() {
   const [boxSide,       setBoxSide]       = useState("away");// batting + pitching toggle: "away" | "home"
   const boxscoreFetched = useRef(new Set());                  // gamePks whose final boxscore is cached
   const gradedGames     = useRef(new Set());                  // idempotency: gamePks already auto-graded
+  const [liveBoardResults, setLiveBoardResults] = useState({}); // playerId → { h, hr, ab, live }
+  const boardBoxFetched = useRef(new Set());                  // gamePks already fetched for Board results
 
   // Fetch weather when a game card is opened
   useEffect(() => {
@@ -2682,7 +2774,11 @@ export default function App() {
     playerPropsFetched.current.add(key);
     setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
     fetchPlayerPropsDirect(game.away.name, game.home.name, game.gamePk)
-      .then(props => setLivePlayerProps(prev => ({ ...prev, [key]: { props } })))
+      .then(result => {
+        // result is { props, reason } — store full object
+        const normalized = result?.props ? result : { props: result ?? [], reason: "ok" };
+        setLivePlayerProps(prev => ({ ...prev, [key]: normalized }));
+      })
       .catch(() => {
         playerPropsFetched.current.delete(key);
         setLivePlayerProps(prev => ({ ...prev, [key]: { props: [], error: true } }));
@@ -2989,6 +3085,31 @@ export default function App() {
       });
     });
   }, [liveSlate, liveScores, liveBoxscores, propLog]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch boxscores for live/final games on the Board batter tabs to show today's results
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || view !== "board" || (boardTab !== "hr" && boardTab !== "hits") || !liveSlate) return;
+    liveSlate.forEach(g => {
+      const status = g.status ?? "";
+      const isLive  = status === "In Progress" || status === "Warmup";
+      const isFinal = status === "Final" || status === "Game Over";
+      if (!isLive && !isFinal) return;
+      if (isFinal && boardBoxFetched.current.has(g.gamePk)) return; // don't re-fetch finals
+      apiFetch(`/api/boxscore/${g.gamePk}`)
+        .then(box => {
+          if (!box?.batting) return;
+          boardBoxFetched.current.add(g.gamePk);
+          const results = {};
+          ["away", "home"].forEach(side => {
+            (box.batting?.[side] ?? []).forEach(b => {
+              if (b?.id) results[b.id] = { h: b.h ?? 0, hr: b.hr ?? 0, ab: b.ab ?? 0, live: isLive };
+            });
+          });
+          setLiveBoardResults(prev => ({ ...prev, ...results }));
+        })
+        .catch(() => {});
+    });
+  }, [view, boardTab, liveSlate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch lineups, umpire, + pitcher stats when a live game card opens
   useEffect(() => {
@@ -3394,6 +3515,11 @@ export default function App() {
     ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather)
     : [];
 
+  // Group model picks by tier for display
+  const highPicks   = topSlatePicks.filter(p => p.tier === "HIGH");
+  const mediumPicks = topSlatePicks.filter(p => p.tier === "MEDIUM");
+  const specPicks   = topSlatePicks.filter(p => p.tier === "SPEC");
+
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); };
 
   // ── Pick tracker helpers ──────────────────────────────────────────────────
@@ -3710,33 +3836,321 @@ export default function App() {
         })()}
 
         {view === "slate" && (<>
-          {/* ── Best Bets card ── */}
-          {topSlatePicks.length > 0 && (
-            <Card style={{ borderColor: "rgba(251,191,36,0.35)", background: "rgba(251,191,36,0.04)", marginBottom: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
-                <SLabel style={{ marginBottom: 0 }}>🎯 Best Bets Today</SLabel>
-                <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>AUTO · TOP {topSlatePicks.length}</span>
-              </div>
-              <div style={{ fontSize: 9, color: "#4b5563", marginBottom: 10 }}>Highest-confidence props across today's slate</div>
-              {topSlatePicks.map((p, i) => (
-                <div key={i} onClick={() => { openGame(p.gamePk); setTab("props"); }}
-                  style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 8,
-                    padding: "8px 0",
-                    borderBottom: i < topSlatePicks.length - 1 ? "1px solid rgba(251,191,36,0.1)" : "none" }}>
-                  <div style={{ fontSize: 11, fontWeight: 800, color: "#fbbf24", width: 16, flexShrink: 0, textAlign: "center" }}>{i + 1}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.label}</div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 1 }}>
-                      <span style={{ fontSize: 9, color: "#6b7280" }}>{p.game}</span>
-                      {p.lineupConfirmed && <span style={{ fontSize: 8, color: "#22c55e", fontFamily: "monospace", fontWeight: 700 }}>✓ LINEUP</span>}
-                    </div>
+          {/* ── Model Picks card ── */}
+          {topSlatePicks.length > 0 && (() => {
+            // Helper: find the sportsbook line for a pick from livePlayerProps
+            const getBookLine = (pick) => {
+              const ppState = livePlayerProps[String(pick.gamePk)];
+              const props   = Array.isArray(ppState?.props) ? ppState.props : [];
+              const match   = props.find(pr =>
+                pr.market === pick.market &&
+                pr.player?.toLowerCase().includes(pick.fullName?.split(" ").pop()?.toLowerCase() ?? "")
+              );
+              if (!match) return null;
+              const books = match.books ?? {};
+              const lines = Object.entries(books).filter(([, b]) => b?.line);
+              if (!lines.length) return null;
+              const bestBook = lines.sort((a, b) => a[1].line - b[1].line)[0];
+              return { book: bestBook[0], line: bestBook[1].line, overOdds: bestBook[1].overOdds };
+            };
+
+            const TierSection = ({ picks: tierPicks, tierLabel, tierColor, borderColor }) => {
+              if (!tierPicks.length) return null;
+              return (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                    <span style={{ fontSize: 8, fontWeight: 800, color: tierColor, background: `${tierColor}18`, border: `1px solid ${tierColor}44`, borderRadius: 4, padding: "2px 6px", letterSpacing: "0.07em" }}>{tierLabel}</span>
+                    <span style={{ fontSize: 8, color: "#374151" }}>{tierPicks.length} pick{tierPicks.length > 1 ? "s" : ""}</span>
                   </div>
-                  <LeanBadge label={p.lean} positive={p.positive} small />
-                  <div style={{ fontSize: 12, fontWeight: 800, color: p.confidence >= 65 ? "#22c55e" : "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 32, textAlign: "right" }}>{p.confidence}%</div>
+                  {tierPicks.map((p, i) => {
+                    const bookLine = getBookLine(p);
+                    const lineMismatch = bookLine && Math.abs(bookLine.line - p.modelLine) >= 0.5;
+                    const overPick = { label: `${p.fullName} ${p.propType === "K" ? "Strikeouts" : "Outs"} OVER ${bookLine?.line ?? p.modelLine}`, lean: "OVER", positive: true, confidence: p.confidence, propType: p.propType, gamePk: p.gamePk };
+                    // Use gamePk from the pick itself (not selectedId — we're on the slate view)
+                    const logged = propLog.some(pl => pl.gamePk === p.gamePk && pl.label === overPick.label);
+                    return (
+                      <div key={i} style={{ background: "#0f1020", border: `1px solid ${borderColor}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6 }}>
+                        {/* Row 1: name + badges + confidence */}
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                          <div
+                            style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                            onClick={() => { openGame(p.gamePk); setTab("props"); }}
+                          >
+                            <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>{p.label}</div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
+                              <span style={{ fontSize: 9, color: "#6b7280" }}>{p.game}</span>
+                              {p.lineupConfirmed && <span style={{ fontSize: 8, color: "#22c55e", fontWeight: 700 }}>✓ LINEUP</span>}
+                              {p.avgIP < 5.0 && <span style={{ fontSize: 8, color: "#ef4444", fontWeight: 700 }}>⚠ LOW IP</span>}
+                            </div>
+                          </div>
+                          <LeanBadge label={p.lean} positive={p.positive} small />
+                          <div style={{ fontSize: 13, fontWeight: 800, color: tierColor, fontFamily: "monospace", minWidth: 34, textAlign: "right" }}>{p.confidence}%</div>
+                        </div>
+
+                        {/* Row 2: sportsbook line vs model line */}
+                        {bookLine && (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, padding: "5px 8px", background: lineMismatch ? "rgba(251,191,36,0.06)" : "rgba(255,255,255,0.03)", borderRadius: 6, border: `1px solid ${lineMismatch ? "rgba(251,191,36,0.2)" : "rgba(255,255,255,0.05)"}` }}>
+                            <span style={{ fontSize: 8, fontWeight: 700, color: "#4b5563" }}>BOOK LINE</span>
+                            <span style={{ fontSize: 11, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{bookLine.line}</span>
+                            <span style={{ fontSize: 9, color: "#22c55e", fontFamily: "monospace" }}>{bookLine.overOdds ?? ""}</span>
+                            <span style={{ fontSize: 8, color: "#4b5563" }}>via {bookLine.book}</span>
+                            {lineMismatch && <span style={{ fontSize: 8, fontWeight: 700, color: "#fbbf24", marginLeft: "auto" }}>model: {p.modelLine}</span>}
+                          </div>
+                        )}
+
+                        {/* Row 3: signals */}
+                        {p.signals?.length > 0 && (
+                          <div style={{ marginBottom: 6 }}>
+                            {p.signals.map((s, si) => (
+                              <div key={si} style={{ fontSize: 9, color: "#6b7280", lineHeight: 1.5 }}>· {s}</div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Row 4: log button */}
+                        <button
+                          onClick={() => !logged && logPick(overPick)}
+                          style={{ width: "100%", fontSize: 10, fontWeight: 700, background: logged ? "rgba(34,197,94,0.12)" : "rgba(255,255,255,0.04)", border: `1px solid ${logged ? "rgba(34,197,94,0.3)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "6px", cursor: logged ? "default" : "pointer", color: logged ? "#22c55e" : "#6b7280" }}
+                        >
+                          {logged ? "✓ Logged" : `+ Log OVER ${bookLine?.line ?? p.modelLine}`}
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
-            </Card>
-          )}
+              );
+            };
+
+            return (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <SLabel style={{ marginBottom: 0 }}>🎯 Model Picks</SLabel>
+                  <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>ALGO · {topSlatePicks.length} picks · ERA/K9/WHIP/BB9</span>
+                </div>
+                <TierSection picks={highPicks}   tierLabel="HIGH CONFIDENCE"   tierColor="#22c55e" borderColor="#1a2e1a" />
+                <TierSection picks={mediumPicks} tierLabel="MEDIUM CONFIDENCE" tierColor="#fbbf24" borderColor="#2a2510" />
+                <TierSection picks={specPicks}   tierLabel="SPECULATIVE"       tierColor="#94a3b8" borderColor="#1a1f2e" />
+              </div>
+            );
+          })()}
+
+          {/* ── Daily Card ─────────────────────────────────────────────── */}
+          {!IS_STATS_SANDBOX && (() => {
+            const isLoading = dailyCard === "loading";
+            const hasCard   = dailyCard && dailyCard !== "loading" && dailyCard.card;
+            const isError   = dailyCard && dailyCard !== "loading" && dailyCard.error;
+            const isCapped  = dailyCard && dailyCard.status === 429;
+
+            return (
+              <div style={{ marginBottom: 10 }}>
+                {/* Header / trigger button */}
+                <div
+                  style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.25)", borderRadius: dailyCardOpen ? "10px 10px 0 0" : 10, padding: "9px 12px", cursor: "pointer" }}
+                  onClick={() => {
+                    if (!dailyCardOpen && !dailyCard && !isLoading) {
+                      // First open — trigger fetch
+                      setDailyCard("loading");
+                      fetchDailyCard()
+                        .then(d => setDailyCard(d))
+                        .catch(err => setDailyCard({ error: err.message, status: err.status, cap: err.cap }));
+                    }
+                    setDailyCardOpen(o => !o);
+                  }}
+                >
+                  <span style={{ fontSize: 10, fontWeight: 800, color: "#818cf8", letterSpacing: "0.07em", fontFamily: "monospace" }}>⚡ DAILY CARD</span>
+                  {hasCard && (
+                    <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 3, padding: "1px 5px" }}>
+                      {dailyCard.gamesAnalyzed} games analyzed
+                    </span>
+                  )}
+                  {isLoading && <span style={{ fontSize: 9, color: "#6b7280" }}>Analyzing slate…</span>}
+                  <span style={{ marginLeft: "auto", fontSize: 10, color: "#4b5563" }}>{dailyCardOpen ? "▲" : "▼"}</span>
+                </div>
+
+                {/* Expandable panel */}
+                {dailyCardOpen && (
+                  <div style={{ background: "#0a0b12", border: "1px solid rgba(99,102,241,0.2)", borderTop: "none", borderRadius: "0 0 10px 10px", padding: "12px" }}>
+
+                    {isLoading && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 0" }}>
+                        <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#818cf8", flexShrink: 0, animation: "pulse 1.5s ease-in-out infinite" }} />
+                        <span style={{ fontSize: 11, color: "#6b7280" }}>Running full-slate analysis across {activeSlate.length} games…</span>
+                      </div>
+                    )}
+
+                    {isError && (
+                      <div style={{ padding: "8px 0" }}>
+                        <div style={{ fontSize: 11, color: "#ef4444", marginBottom: 6 }}>
+                          {isCapped
+                            ? `Daily analysis cap reached. Resets at midnight. (${dailyCard.cap?.calls ?? "—"}/${(dailyCard.cap?.calls ?? 0) + (dailyCard.cap?.remaining ?? 0)} calls used)`
+                            : `Generation failed: ${dailyCard.error}`}
+                        </div>
+                        <button
+                          onClick={e => {
+                            e.stopPropagation();
+                            setDailyCard("loading");
+                            fetchDailyCard()
+                              .then(d => setDailyCard(d))
+                              .catch(err => setDailyCard({ error: err.message, status: err.status, cap: err.cap }));
+                          }}
+                          style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}
+                        >
+                          ↻ Try again
+                        </button>
+                      </div>
+                    )}
+
+                    {hasCard && (() => {
+                      const raw = dailyCard.card ?? "";
+
+                      // Parse named sections from the card text
+                      const getSection = (label) => {
+                        const re = new RegExp(`(?:^|\\n)\\d+\\.\\s*${label}[^\\n]*\\n([\\s\\S]*?)(?=\\n\\d+\\.|$)`, "i");
+                        return (raw.match(re)?.[1] ?? "").trim();
+                      };
+                      const officialRaw  = getSection("OFFICIAL CARD");
+                      const bestBetsRaw  = getSection("BEST BETS SUMMARY");
+                      const passesRaw    = getSection("PASSES");
+                      const breakdownRaw = getSection("PICK BREAKDOWN");
+
+                      // Parse Official Card lines into individual pick rows
+                      const officialPicks = officialRaw
+                        .split("\n")
+                        .map(l => l.replace(/^[-•*]\s*/, "").trim())
+                        .filter(l => l.length > 3 && !/^PASS$/i.test(l));
+                      const isAllPass = officialRaw.toUpperCase().includes("PASS") && officialPicks.length === 0;
+
+                      // Parse individual PROP blocks from breakdown
+                      const propBlocks = breakdownRaw
+                        .split(/\n(?=PROP:)/)
+                        .map(b => b.trim())
+                        .filter(b => b.startsWith("PROP:"));
+
+                      // Parse bullet lists (Best Bets / Passes) — strip blanks and lone dashes
+                      const parseBullets = (text) =>
+                        text.split("\n").map(l => l.replace(/^[-•*\d.]\s*/, "").trim()).filter(l => l.length > 2 && !/^[-–—]+$/.test(l));
+
+                      const doRefresh = (e) => {
+                        e.stopPropagation();
+                        setDailyCard("loading");
+                        fetchDailyCard()
+                          .then(d => setDailyCard(d))
+                          .catch(err => setDailyCard({ error: err.message, status: err.status, cap: err.cap }));
+                      };
+
+                      return (
+                        <div>
+                          {/* ── Meta bar ── */}
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace" }}>
+                              Generated {new Date(dailyCard.generatedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                            </span>
+                            {dailyCard.cap && (
+                              <span style={{ fontSize: 9, color: "#374151", fontFamily: "monospace" }}>
+                                · Cap: {dailyCard.cap.calls}/{(dailyCard.cap.calls ?? 0) + (dailyCard.cap.remaining ?? 0)} calls today
+                              </span>
+                            )}
+                            <button onClick={doRefresh} style={{ marginLeft: "auto", fontSize: 9, fontWeight: 700, color: "#6b7280", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 5, padding: "3px 9px", cursor: "pointer" }}>↻ Refresh</button>
+                          </div>
+
+                          {/* ── OFFICIAL CARD (hero section) ── */}
+                          <div style={{ background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 10, padding: "12px 14px", marginBottom: 12 }}>
+                            <div style={{ fontSize: 9, fontWeight: 800, color: "#22c55e", letterSpacing: "0.08em", marginBottom: 10 }}>✓ OFFICIAL CARD</div>
+                            {isAllPass ? (
+                              <div style={{ fontSize: 12, color: "#6b7280", fontStyle: "italic" }}>PASS — no plays meet the standard today.</div>
+                            ) : officialPicks.length > 0 ? (
+                              officialPicks.map((pick, i) => (
+                                <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 0", borderBottom: i < officialPicks.length - 1 ? "1px solid rgba(34,197,94,0.1)" : "none" }}>
+                                  <span style={{ fontSize: 11, fontWeight: 800, color: "#22c55e", minWidth: 16, flexShrink: 0 }}>{i + 1}</span>
+                                  <span style={{ fontSize: 11, color: "#f9fafb", lineHeight: 1.4 }}>{pick}</span>
+                                </div>
+                              ))
+                            ) : (
+                              <div style={{ fontSize: 11, color: "#f9fafb", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{officialRaw || "—"}</div>
+                            )}
+                          </div>
+
+                          {/* ── BEST BETS SUMMARY ── */}
+                          {bestBetsRaw.length > 0 && (
+                            <div style={{ background: "rgba(251,191,36,0.05)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 10, padding: "12px 14px", marginBottom: 12 }}>
+                              <div style={{ fontSize: 9, fontWeight: 800, color: "#fbbf24", letterSpacing: "0.08em", marginBottom: 8 }}>★ BEST BETS SUMMARY</div>
+                              {parseBullets(bestBetsRaw).map((line, i) => (
+                                <div key={i} style={{ display: "flex", gap: 8, padding: "4px 0", borderBottom: i < parseBullets(bestBetsRaw).length - 1 ? "1px solid rgba(251,191,36,0.08)" : "none" }}>
+                                  <span style={{ fontSize: 10, fontWeight: 700, color: "#fbbf24", minWidth: 16, flexShrink: 0 }}>{i + 1}.</span>
+                                  <span style={{ fontSize: 11, color: "#d1d5db", lineHeight: 1.4 }}>{line}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* ── PICK BREAKDOWN ── */}
+                          {propBlocks.length > 0 && (
+                            <div style={{ marginBottom: 12 }}>
+                              <div style={{ fontSize: 9, fontWeight: 800, color: "#818cf8", letterSpacing: "0.08em", marginBottom: 8 }}>◈ PICK BREAKDOWN</div>
+                              {propBlocks.map((block, bi) => {
+                                const propLine   = block.match(/^PROP:\s*(.+)/m)?.[1]?.trim() ?? "";
+                                const confLine   = block.match(/^CONFIDENCE:\s*(.+)/m)?.[1]?.trim() ?? "";
+                                const edgeLine   = block.match(/^EDGE:\s*(.+)/m)?.[1]?.trim() ?? "";
+                                const signalsTxt = block.match(/^SIGNALS:\n([\s\S]*?)(?=\nRISK:|\nPLAYABILITY:|$)/m)?.[1] ?? "";
+                                const riskTxt    = block.match(/^RISK:\n([\s\S]*?)(?=\nPLAYABILITY:|$)/m)?.[1] ?? "";
+                                const playTxt    = block.match(/^PLAYABILITY:\n([\s\S]*?)$/m)?.[1] ?? "";
+                                const bullets    = (txt) => txt.split("\n").map(l => l.replace(/^\s*[•·\-]\s*/, "").trim()).filter(Boolean);
+                                const confNum    = parseFloat(confLine);
+                                const confColor  = confNum >= 7.5 ? "#22c55e" : confNum >= 6 ? "#fbbf24" : "#94a3b8";
+
+                                return (
+                                  <div key={bi} style={{ background: "#0f1020", border: "1px solid #1f2437", borderRadius: 10, padding: "12px 14px", marginBottom: 8 }}>
+                                    {/* Header row */}
+                                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                                      <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", lineHeight: 1.3 }}>{propLine}</div>
+                                      {confLine && (
+                                        <div style={{ flexShrink: 0, fontSize: 11, fontWeight: 800, color: confColor, fontFamily: "monospace", background: `${confColor}18`, border: `1px solid ${confColor}44`, borderRadius: 5, padding: "2px 7px" }}>{confLine}</div>
+                                      )}
+                                    </div>
+                                    {edgeLine && <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.4, marginBottom: 8 }}>{edgeLine}</div>}
+                                    {bullets(signalsTxt).length > 0 && (
+                                      <div style={{ marginBottom: 6 }}>
+                                        <div style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", letterSpacing: "0.06em", marginBottom: 3 }}>SIGNALS</div>
+                                        {bullets(signalsTxt).map((s, i) => <div key={i} style={{ fontSize: 10, color: "#d1d5db", padding: "1px 0", lineHeight: 1.4 }}>• {s}</div>)}
+                                      </div>
+                                    )}
+                                    {bullets(riskTxt).length > 0 && (
+                                      <div style={{ marginBottom: 6 }}>
+                                        <div style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", letterSpacing: "0.06em", marginBottom: 3 }}>RISK</div>
+                                        {bullets(riskTxt).map((s, i) => <div key={i} style={{ fontSize: 10, color: "#9ca3af", padding: "1px 0", lineHeight: 1.4 }}>• {s}</div>)}
+                                      </div>
+                                    )}
+                                    {bullets(playTxt).length > 0 && (
+                                      <div>
+                                        <div style={{ fontSize: 8, fontWeight: 700, color: "#60a5fa", letterSpacing: "0.06em", marginBottom: 3 }}>PLAYABILITY</div>
+                                        {bullets(playTxt).map((s, i) => <div key={i} style={{ fontSize: 10, color: "#9ca3af", padding: "1px 0", lineHeight: 1.4 }}>• {s}</div>)}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {/* ── PASSES ── */}
+                          {passesRaw.length > 0 && (
+                            <div style={{ background: "rgba(239,68,68,0.04)", border: "1px solid rgba(239,68,68,0.15)", borderRadius: 10, padding: "12px 14px" }}>
+                              <div style={{ fontSize: 9, fontWeight: 800, color: "#ef4444", letterSpacing: "0.08em", marginBottom: 8 }}>✕ PASSES</div>
+                              {parseBullets(passesRaw).map((line, i) => (
+                                <div key={i} style={{ fontSize: 10, color: "#6b7280", padding: "3px 0", lineHeight: 1.4, borderBottom: i < parseBullets(passesRaw).length - 1 ? "1px solid rgba(239,68,68,0.06)" : "none" }}>
+                                  {line}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* ── Research Mode: date navigation bar (7-click logo unlock) ── */}
           {researchMode && (
@@ -5199,27 +5613,33 @@ export default function App() {
               {!IS_ODDS_SANDBOX && !IS_STATS_SANDBOX && (() => {
                 const spKey   = String(selectedId);
                 const spState = livePlayerProps[spKey];
-                if (spState === undefined) return null; // not yet triggered (sandbox or pre-tab)
+                if (spState === undefined) return null;
 
-                const allProps = Array.isArray(spState?.props) ? spState.props : [];
-                const bookName = allProps[0]?.book ?? null;
-                const hasError = spState?.error === true;
+                const allProps  = Array.isArray(spState?.props) ? spState.props : [];
+                const hasError  = spState?.error === true;
+                const hasData   = allProps.length > 0;
+                const propReason = spState?.reason ?? null; // "ok" | "no_props" | "no_event" | null
+
+                const BOOKS      = ["DK", "FD", "CZR", "MGM"];
+                const BOOK_COLORS = { DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa" };
 
                 const grouped = {
                   pitcher_strikeouts: allProps.filter(p => p.market === "pitcher_strikeouts"),
+                  batter_home_runs:   allProps.filter(p => p.market === "batter_home_runs"),
                   batter_total_bases: allProps.filter(p => p.market === "batter_total_bases"),
                   batter_hits:        allProps.filter(p => p.market === "batter_hits"),
                 };
-                const hasData = allProps.length > 0;
 
-                const fmtOdds = (s) => s ?? "—";
+                const fmtO = (s) => s ?? "—";
 
                 return (
                   <>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, marginBottom: 8 }}>
                       <SLabel style={{ marginBottom: 0 }}>Sportsbook Lines</SLabel>
-                      {bookName && <span style={{ fontSize: 8, fontWeight: 700, color: "#10b981", background: "rgba(16,185,129,0.12)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: 4, padding: "2px 6px" }}>{bookName}</span>}
                       {hasData && <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>}
+                      {hasData && (
+                        <span style={{ fontSize: 8, color: "#4b5563", fontStyle: "italic" }}>tap row to expand</span>
+                      )}
                     </div>
 
                     {spState === "loading" ? (
@@ -5231,61 +5651,236 @@ export default function App() {
                       </Card>
                     ) : !hasData ? (
                       <Card>
-                        <div style={{ fontSize: 11, color: "#4b5563", textAlign: "center", padding: "8px 0" }}>
-                          {hasError ? "Could not load lines — Odds API unavailable" : "No player prop lines posted yet"}
+                        <div style={{ textAlign: "center", padding: "8px 0" }}>
+                          <div style={{ fontSize: 11, color: "#4b5563", marginBottom: 8 }}>
+                            {hasError
+                              ? "Could not load lines — Odds API unavailable"
+                              : propReason === "no_event"
+                                ? "This game wasn't found in the Odds API — may be too early or not yet listed"
+                                : "No player prop lines posted yet — books typically post 1–2 hrs before game time"}
+                          </div>
+                          <button
+                            onClick={() => {
+                              const k = String(selectedId);
+                              const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
+                              if (!game) return;
+                              // Bust both client-side cache and in-flight guard, then re-fetch
+                              const ck = String(game.gamePk ?? `${game.away.name}|${game.home.name}`);
+                              delete playerPropsCache[ck];
+                              playerPropsFetched.current.delete(k);
+                              setLivePlayerProps(prev => ({ ...prev, [k]: "loading" }));
+                              fetchPlayerPropsDirect(game.away.name, game.home.name, game.gamePk)
+                                .then(result => {
+                                  const normalized = result?.props ? result : { props: result ?? [], reason: "ok" };
+                                  setLivePlayerProps(prev => ({ ...prev, [k]: normalized }));
+                                })
+                                .catch(() => {
+                                  setLivePlayerProps(prev => ({ ...prev, [k]: { props: [], error: true } }));
+                                });
+                            }}
+                            style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}
+                          >
+                            ↻ Refresh
+                          </button>
                         </div>
                       </Card>
                     ) : (
-                      <Card style={{ padding: "8px 12px" }}>
+                      <>
                         {[
-                          { mKey: "pitcher_strikeouts", label: "Strikeouts", badge: "K",  color: "#a78bfa" },
+                          { mKey: "pitcher_strikeouts", label: "Strikeouts",  badge: "K",  color: "#a78bfa" },
+                          { mKey: "batter_home_runs",   label: "Home Runs",   badge: "HR", color: "#fbbf24" },
                           { mKey: "batter_total_bases", label: "Total Bases", badge: "TB", color: "#60a5fa" },
                           { mKey: "batter_hits",        label: "Hits",        badge: "H",  color: "#34d399" },
                         ].map(({ mKey, label, badge, color }) => {
                           const rows = grouped[mKey];
-                          if (!rows.length) return null;
+                          if (!rows?.length) return null;
+
+                          // Which books have at least one line in this market group?
+                          const activeBooks = BOOKS.filter(bk => rows.some(p => p.books?.[bk]));
+
                           return (
-                            <div key={mKey} style={{ marginBottom: 10 }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                            <Card key={mKey} style={{ padding: "0", marginBottom: 10, overflow: "hidden" }}>
+                              {/* Market header */}
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px 6px", borderBottom: "1px solid #1f2437" }}>
                                 <span style={{ fontSize: 8, fontWeight: 700, color, background: `${color}1a`, border: `1px solid ${color}40`, borderRadius: 4, padding: "1px 5px" }}>{badge}</span>
-                                <span style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</span>
+                                <span style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", flex: 1 }}>{label}</span>
+                                {/* Active book legend for this market */}
+                                <div style={{ display: "flex", gap: 3 }}>
+                                  {activeBooks.map(bk => (
+                                    <span key={bk} style={{ fontSize: 7, fontWeight: 700, color: BOOK_COLORS[bk], background: `${BOOK_COLORS[bk]}18`, border: `1px solid ${BOOK_COLORS[bk]}40`, borderRadius: 3, padding: "1px 4px" }}>{bk}</span>
+                                  ))}
+                                </div>
                               </div>
+
+                              {/* Column header row */}
+                              <div style={{ display: "grid", gridTemplateColumns: `1fr ${activeBooks.map(() => "52px").join(" ")}`, gap: 0, padding: "4px 10px", background: "#0e0f1a" }}>
+                                <div style={{ fontSize: 7, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.05em" }}>Player</div>
+                                {activeBooks.map(bk => (
+                                  <div key={bk} style={{ fontSize: 7, fontWeight: 700, color: BOOK_COLORS[bk], textAlign: "center" }}>{bk}</div>
+                                ))}
+                              </div>
+
+                              {/* Player rows */}
                               {rows.map((p, i) => {
-                                const lastName    = p.player.split(" ").slice(-1)[0];
-                                const overLabel   = `${lastName} OVER ${p.line} ${badge}`;
-                                const underLabel  = `${lastName} UNDER ${p.line} ${badge}`;
-                                const overPick    = { label: overLabel,  lean: "OVER",  positive: true,  confidence: null, propType: badge };
-                                const underPick   = { label: underLabel, lean: "UNDER", positive: false, confidence: null, propType: badge };
-                                const overLogged  = isLogged(overPick);
-                                const underLogged = isLogged(underPick);
+                                const books          = p.books ?? {};
+                                const rowKey         = `${mKey}:${p.player}`;
+                                const isExpanded     = expandedPropRow === rowKey;
+                                const lastName       = p.player.split(" ").slice(-1)[0];
+                                const overLabel      = `${lastName} OVER ${p.line} ${badge}`;
+                                const underLabel     = `${lastName} UNDER ${p.line} ${badge}`;
+                                const overPick       = { label: overLabel,  lean: "OVER",  positive: true,  confidence: null, propType: badge };
+                                const underPick      = { label: underLabel, lean: "UNDER", positive: false, confidence: null, propType: badge };
+                                const overLogged     = isLogged(overPick);
+                                const underLogged    = isLogged(underPick);
+
+                                // Line discrepancy detection
+                                const availLines     = activeBooks.map(bk => books[bk]?.line).filter(Boolean);
+                                const uniqueLines    = [...new Set(availLines)];
+                                const hasDiscrepancy = uniqueLines.length > 1;
+                                const lowestLine     = hasDiscrepancy ? Math.min(...uniqueLines) : null;
+
+                                // Sharp vs square book confidence signal
+                                // Sharp books (DK/FD) set tighter lines; when they're lower than square
+                                // books (CZR/MGM), it signals the market leans toward the OVER on that line
+                                const SHARP_BOOKS  = ["DK", "FD"];
+                                const SQUARE_BOOKS = ["CZR", "MGM"];
+                                const sharpLines   = SHARP_BOOKS.map(bk => books[bk]?.line).filter(Boolean);
+                                const squareLines  = SQUARE_BOOKS.map(bk => books[bk]?.line).filter(Boolean);
+                                const sharpAvg     = sharpLines.length  ? sharpLines.reduce((s, v) => s + v, 0)  / sharpLines.length  : null;
+                                const squareAvg    = squareLines.length ? squareLines.reduce((s, v) => s + v, 0) / squareLines.length : null;
+                                const lineGap      = (sharpAvg !== null && squareAvg !== null) ? (squareAvg - sharpAvg) : null;
+                                // lineGap > 0 means sharp books are lower → over-edge signal
+                                const hasEdge      = lineGap !== null && lineGap >= 0.5;
+                                const confidencePct = hasEdge
+                                  ? Math.min(80, Math.round(55 + (lineGap / 0.5) * 10))
+                                  : null;
+                                const confidenceLabel = confidencePct !== null
+                                  ? (confidencePct >= 75 ? "HIGH" : confidencePct >= 65 ? "MOD" : "MILD")
+                                  : null;
+                                const confidenceColor = confidenceLabel === "HIGH" ? "#22c55e"
+                                  : confidenceLabel === "MOD"  ? "#fbbf24"
+                                  : confidenceLabel === "MILD" ? "#94a3b8"
+                                  : "#fbbf24";
+
+                                // Best over odds among all books
+                                const bestOverOdds = activeBooks
+                                  .map(bk => books[bk]?.overOdds)
+                                  .filter(Boolean)
+                                  .sort((a, b) => parseInt(b) - parseInt(a))[0] ?? null;
+
                                 return (
-                                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, paddingBottom: 7, marginBottom: i < rows.length - 1 ? 7 : 0, borderBottom: i < rows.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none" }}>
-                                    {/* Player + line */}
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                      <div style={{ fontSize: 11, fontWeight: 600, color: "#e5e7eb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.player}</div>
-                                      <div style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>O/U {p.line}</div>
+                                  <div key={i}>
+                                    {/* ── Compact row (Option A) ── */}
+                                    <div
+                                      onClick={() => setExpandedPropRow(isExpanded ? null : rowKey)}
+                                      style={{ display: "grid", gridTemplateColumns: `1fr ${activeBooks.map(() => "52px").join(" ")}`, gap: 0, padding: "7px 10px", cursor: "pointer", background: isExpanded ? "rgba(255,255,255,0.03)" : "transparent", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none", alignItems: "center" }}
+                                    >
+                                      {/* Player name */}
+                                      <div style={{ minWidth: 0 }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                          <span style={{ fontSize: 11, fontWeight: 600, color: "#e5e7eb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.player}</span>
+                                          {hasDiscrepancy && (
+                                            <span style={{ fontSize: 7, fontWeight: 800, color: confidenceColor, background: `${confidenceColor}18`, border: `1px solid ${confidenceColor}44`, borderRadius: 3, padding: "1px 4px", flexShrink: 0 }}>
+                                              {hasEdge ? `SPLIT ${confidencePct}%` : "SPLIT"}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>
+                                          best O {bestOverOdds ?? "—"}  ·  {isExpanded ? "▲" : "▼"}
+                                        </div>
+                                      </div>
+
+                                      {/* Per-book line cells */}
+                                      {activeBooks.map(bk => {
+                                        const b      = books[bk];
+                                        const isLow  = hasDiscrepancy && b?.line === lowestLine;
+                                        const bkColor = BOOK_COLORS[bk];
+                                        return (
+                                          <div key={bk} style={{ textAlign: "center" }}>
+                                            {b ? (
+                                              <>
+                                                <div style={{ fontSize: 12, fontWeight: 800, color: isLow ? bkColor : "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{b.line}</div>
+                                                <div style={{ fontSize: 8, color: "#22c55e", fontFamily: "monospace" }}>{b.overOdds ?? "—"}</div>
+                                              </>
+                                            ) : (
+                                              <div style={{ fontSize: 9, color: "#2d3748" }}>—</div>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
                                     </div>
-                                    {/* OVER */}
-                                    <button
-                                      onClick={() => !overLogged && logPick(overPick)}
-                                      title={overLogged ? "Logged" : `Log OVER ${p.line}`}
-                                      style={{ fontSize: 9, fontWeight: 700, background: overLogged ? "rgba(34,197,94,0.15)" : "rgba(34,197,94,0.06)", border: `1px solid ${overLogged ? "rgba(34,197,94,0.5)" : "rgba(34,197,94,0.2)"}`, borderRadius: 6, padding: "4px 7px", cursor: overLogged ? "default" : "pointer", color: overLogged ? "#22c55e" : "#6b7280", lineHeight: 1, flexShrink: 0, whiteSpace: "nowrap" }}>
-                                      {overLogged ? "✓" : `O ${fmtOdds(p.overOdds)}`}
-                                    </button>
-                                    {/* UNDER */}
-                                    <button
-                                      onClick={() => !underLogged && logPick(underPick)}
-                                      title={underLogged ? "Logged" : `Log UNDER ${p.line}`}
-                                      style={{ fontSize: 9, fontWeight: 700, background: underLogged ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.06)", border: `1px solid ${underLogged ? "rgba(239,68,68,0.5)" : "rgba(239,68,68,0.2)"}`, borderRadius: 6, padding: "4px 7px", cursor: underLogged ? "default" : "pointer", color: underLogged ? "#ef4444" : "#6b7280", lineHeight: 1, flexShrink: 0, whiteSpace: "nowrap" }}>
-                                      {underLogged ? "✓" : `U ${fmtOdds(p.underOdds)}`}
-                                    </button>
+
+                                    {/* ── Expanded detail (Option B) ── */}
+                                    {isExpanded && (
+                                      <div style={{ background: "#0a0b12", borderTop: "1px solid #1a1f2e", padding: "10px" }}>
+                                        {/* Full book comparison grid — only books with lines */}
+                                        <div style={{ display: "grid", gridTemplateColumns: `repeat(${activeBooks.length}, 1fr)`, gap: 6, marginBottom: 10 }}>
+                                          {activeBooks.map(bk => {
+                                            const b      = books[bk];
+                                            const isLow  = hasDiscrepancy && b?.line === lowestLine;
+                                            const bkColor = BOOK_COLORS[bk];
+                                            return (
+                                              <div key={bk} style={{ background: isLow ? `${bkColor}15` : "#161827", border: `1px solid ${isLow ? `${bkColor}55` : "#1f2437"}`, borderRadius: 8, padding: "8px 6px", textAlign: "center" }}>
+                                                <div style={{ fontSize: 8, fontWeight: 700, color: bkColor, marginBottom: 4 }}>{bk}</div>
+                                                <div style={{ fontSize: 14, fontWeight: 800, color: isLow ? bkColor : "#f9fafb", fontFamily: "monospace", lineHeight: 1, marginBottom: 4 }}>{b.line}</div>
+                                                <div style={{ fontSize: 9, fontFamily: "monospace" }}>
+                                                  <span style={{ color: "#22c55e" }}>{fmtO(b.overOdds)}</span>
+                                                  <span style={{ color: "#374151" }}> / </span>
+                                                  <span style={{ color: "#ef4444" }}>{fmtO(b.underOdds)}</span>
+                                                </div>
+                                                {isLow && <div style={{ fontSize: 7, color: bkColor, marginTop: 3, fontWeight: 700 }}>BEST LINE</div>}
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+
+                                        {/* ── Line Intelligence panel (shown when sharp ≠ square) ── */}
+                                        {hasEdge && (
+                                          <div style={{ background: `${confidenceColor}0d`, border: `1px solid ${confidenceColor}33`, borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
+                                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+                                              <span style={{ fontSize: 9, fontWeight: 800, color: confidenceColor, letterSpacing: "0.06em" }}>LINE INTELLIGENCE</span>
+                                              <span style={{ fontSize: 9, fontWeight: 700, color: confidenceColor, background: `${confidenceColor}22`, border: `1px solid ${confidenceColor}55`, borderRadius: 3, padding: "1px 5px" }}>{confidenceLabel} {confidencePct}%</span>
+                                            </div>
+                                            <div style={{ fontSize: 9, color: "#9ca3af", lineHeight: 1.5 }}>
+                                              <span style={{ color: "#38bdf8", fontWeight: 700 }}>Sharp books</span>
+                                              <span> (DK/FD) have this at </span>
+                                              <span style={{ color: "#f9fafb", fontWeight: 700 }}>{sharpAvg % 1 === 0 ? sharpAvg.toFixed(1) : sharpAvg.toFixed(1)}</span>
+                                              <span>, while </span>
+                                              <span style={{ color: "#a78bfa", fontWeight: 700 }}>square books</span>
+                                              <span> (CZR/MGM) are at </span>
+                                              <span style={{ color: "#f9fafb", fontWeight: 700 }}>{squareAvg.toFixed(1)}</span>
+                                              <span>.</span>
+                                              {lineGap >= 0.5 && (
+                                                <span style={{ display: "block", marginTop: 3, color: confidenceColor }}>
+                                                  A {lineGap.toFixed(1)}-point gap suggests market confidence on the OVER {sharpAvg.toFixed(1)}.
+                                                </span>
+                                              )}
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {/* Log buttons */}
+                                        <div style={{ display: "flex", gap: 6 }}>
+                                          <button
+                                            onClick={() => !overLogged && logPick(overPick)}
+                                            style={{ flex: 1, fontSize: 10, fontWeight: 700, background: overLogged ? "rgba(34,197,94,0.15)" : "rgba(34,197,94,0.08)", border: `1px solid ${overLogged ? "rgba(34,197,94,0.5)" : "rgba(34,197,94,0.2)"}`, borderRadius: 8, padding: "7px", cursor: overLogged ? "default" : "pointer", color: overLogged ? "#22c55e" : "#6b7280", lineHeight: 1 }}>
+                                            {overLogged ? "✓ OVER logged" : `OVER ${p.line} ${badge}  ${fmtO(p.overOdds)}`}
+                                          </button>
+                                          <button
+                                            onClick={() => !underLogged && logPick(underPick)}
+                                            style={{ flex: 1, fontSize: 10, fontWeight: 700, background: underLogged ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.08)", border: `1px solid ${underLogged ? "rgba(239,68,68,0.5)" : "rgba(239,68,68,0.2)"}`, borderRadius: 8, padding: "7px", cursor: underLogged ? "default" : "pointer", color: underLogged ? "#ef4444" : "#6b7280", lineHeight: 1 }}>
+                                            {underLogged ? "✓ UNDER logged" : `UNDER ${p.line} ${badge}  ${fmtO(p.underOdds)}`}
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
                                 );
                               })}
-                            </div>
+                            </Card>
                           );
                         })}
-                      </Card>
+                      </>
                     )}
                   </>
                 );
@@ -6283,7 +6878,13 @@ export default function App() {
                       ? (!activeSlate?.length ? "Loading today's slate…"
                          : totalPitcherSlots === 0 ? "No probable pitchers announced yet — check back closer to first pitch"
                          : "Loading pitcher stats…")
-                      : (totalBatters === 0 ? "Waiting for lineups to post…" : "Loading player stats…")}
+                      : (() => {
+                          const confirmedCount = Object.values(liveLineups).filter(lu => lu?.confirmed).length;
+                          const totalGames = (activeSlate ?? []).length;
+                          if (totalGames === 0) return "Loading today's slate…";
+                          if (confirmedCount === 0) return "Waiting for confirmed lineups — check back closer to first pitch";
+                          return `${confirmedCount} lineup${confirmedCount > 1 ? "s" : ""} confirmed — loading player stats…`;
+                        })()}
                   </div>
                 </Card>
               ) : boardCandidates.map((c, i) => {
@@ -6369,8 +6970,17 @@ export default function App() {
 
                 // ── Batter card (HR / Hits) ────────────────────────────────
                 const l5dots = Array.from({ length: 5 }, (_, j) => c.hitRate[j] ?? null);
+                const todayResult = liveBoardResults[c.id] ?? null;
+                const hasResult   = todayResult && todayResult.ab > 0;
+                const gotHR       = hasResult && todayResult.hr > 0;
+                const gotHit      = hasResult && todayResult.h > 0 && !gotHR;
+                const ohFer       = hasResult && todayResult.h === 0;
+                const resultBorderColor = gotHR ? "#fbbf24" : (gotHit ? "#22c55e" : (ohFer ? "#ef4444" : null));
+                const resultCardStyle   = resultBorderColor
+                  ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
+                  : {};
                 return (
-                  <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
+                  <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                       {/* Rank */}
                       <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", flexShrink: 0, marginTop: 1 }}>{i + 1}</div>
@@ -6381,6 +6991,11 @@ export default function App() {
                           <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
                           <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
                           <span style={{ fontSize: 9, color: "#6b7280" }}>#{c.order}</span>
+                          {/* Today's result badge */}
+                          {gotHR  && <span style={{ fontSize: 8, fontWeight: 800, color: "#fbbf24", background: "rgba(251,191,36,0.15)", border: "1px solid rgba(251,191,36,0.4)", borderRadius: 4, padding: "1px 6px" }}>⚾ HR{todayResult.hr > 1 ? ` ×${todayResult.hr}` : ""}</span>}
+                          {gotHit && <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)",  border: "1px solid rgba(34,197,94,0.35)",  borderRadius: 4, padding: "1px 6px" }}>✓ HIT{todayResult.h > 1 ? ` ×${todayResult.h}` : ""}</span>}
+                          {ohFer  && <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", background: "rgba(107,114,128,0.1)", border: "1px solid rgba(107,114,128,0.25)", borderRadius: 4, padding: "1px 6px" }}>0-fer</span>}
+                          {todayResult?.live && hasResult && <span style={{ fontSize: 7, color: "#22c55e", fontWeight: 700 }}>● LIVE</span>}
                           {c.windFav && boardTab === "hr" && (
                             <span style={{ fontSize: 8, fontWeight: 700, color: "#fbbf24", background: "rgba(251,191,36,0.12)", borderRadius: 4, padding: "1px 5px" }}>↑ WIND</span>
                           )}
@@ -6394,7 +7009,7 @@ export default function App() {
                             <span style={{ fontSize: 10, color: parseFloat(c.avg) >= 0.280 ? "#22c55e" : parseFloat(c.avg) >= 0.240 ? "#f59e0b" : "#ef4444", fontFamily: "monospace", fontWeight: 700 }}>{c.avg} AVG</span>
                           )}
                           {boardTab === "hr" && c.hr > 0 && (
-                            <span style={{ fontSize: 10, color: "#fbbf24", fontFamily: "monospace", fontWeight: 700 }}>{c.hr} HR</span>
+                            <span style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace", fontWeight: 600 }}>{c.hr} HR</span>
                           )}
                           {c.slg !== "—" && c.slg !== ".000" && boardTab === "hr" && (
                             <span style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace" }}>{c.slg} SLG</span>

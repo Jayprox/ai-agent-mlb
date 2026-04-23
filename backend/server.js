@@ -34,6 +34,7 @@ app.use("/api/pitcher-splits",  require("./routes/pitcherSplits")); // Baseball 
 app.use("/api/nrfi",     require("./routes/nrfi"));     // MLB Stats: first-inning team scoring tendencies
 app.use("/api/injuries",  require("./routes/injuries"));  // MLB Stats: recent IL placements (last 14 days)
 app.use("/api/bullpen",   require("./routes/bullpen"));   // MLB Stats: bullpen fatigue + reliever usage
+app.use("/api/weather",   require("./routes/weather"));   // Open-Meteo proxy: per-stadium weather with 1-hour server cache
 app.use("/api/linescore", require("./routes/linescore")); // MLB Stats: live score + inning for in-progress games
 app.use("/api/boxscore",    require("./routes/boxscore"));    // MLB Stats: full game boxscore for live + final games
 app.use("/api/stat-splits", require("./routes/statSplits")); // MLB Stats: home/away + vs L/R + day/night splits
@@ -41,10 +42,11 @@ app.use("/api/trends",   require("./routes/trends"));    // Anthropic: AI-genera
 app.use("/api/odds",         require("./routes/odds"));         // Odds API: h2h + totals + spreads for all MLB games (shared 20-min cache)
 app.use("/api/props",        require("./routes/props"));        // Anthropic: AI-generated prop recommendations per game
 app.use("/api/player-props", require("./routes/playerProps")); // Odds API: sportsbook player prop lines per game (shared 10-min cache)
-app.use("/api/auth",      authRouter);
-app.use("/api/picks",    picksRouter);
-app.use("/api/notes",    notesRouter);
-app.use("/api/digest",   digestRouter);
+app.use("/api/auth",       authRouter);
+app.use("/api/picks",     picksRouter);
+app.use("/api/notes",     notesRouter);
+app.use("/api/digest",    digestRouter);
+app.use("/api/daily-card", require("./routes/dailyCard")); // Full-slate AI card
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {
@@ -71,6 +73,16 @@ app.get("/api/admin/jobs/run", async (req, res) => {
   res.json({ ok: true, ran: ["snapshotSlate", "snapshotOdds"] });
 });
 
+// Manually trigger a cache pre-warm (admin only)
+app.get("/api/admin/warm-cache", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  const { warmCache } = require("./jobs/warmCache");
+  warmCache().catch(() => {}); // fire and forget
+  res.json({ ok: true, message: "Cache warm started in background" });
+});
+
 // ── Static frontend (production only) ────────────────────────
 if (process.env.NODE_ENV === "production") {
   const distPath = path.join(__dirname, "..", "dist");
@@ -95,6 +107,11 @@ if (process.env.NODE_ENV === "production" || process.env.ENABLE_JOBS === "true")
 
 app.listen(PORT, () => {
   console.log(`\n⚾  Prop Scout API  →  http://localhost:${PORT}`);
+
+  // Pre-warm cache on startup — delay 8s so the server is fully bound first
+  setTimeout(() => {
+    require("./jobs/warmCache").warmCache().catch(() => {});
+  }, 8000);
   console.log(`   /health              server status + cache`);
   console.log(`   /api/schedule        today's games + probable pitchers`);
   console.log(`   /api/lineups/:pk     confirmed batting order`);

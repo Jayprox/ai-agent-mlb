@@ -4,6 +4,7 @@ const {
   snapshotSlate, snapshotOdds, snapshotBullpen,
   snapshotLinescore, snapshotUmpires, todayHonolulu,
 } = require("./snapshotJobs");
+const { warmCache } = require("./warmCache");
 
 async function getTodayGamePks() {
   if (!isConnected()) return [];
@@ -51,6 +52,10 @@ function startScheduler() {
     const gamePks = await getTodayGamePks();
     for (const pk of gamePks) await snapshotUmpires(pk);
   }, { timezone: "Pacific/Honolulu" });
+
+  // Pre-warm in-memory cache every 2 hours from 9 AM – 11 PM ET
+  // Keeps data hot so the first user to open each game hits cache, not cold fetches
+  cron.schedule("0 9,11,13,15,17,19,21,23 * * *", () => warmCache(), { timezone: "America/New_York" });
 }
 
 module.exports = { startScheduler };
