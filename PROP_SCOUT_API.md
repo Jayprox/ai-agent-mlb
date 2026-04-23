@@ -283,10 +283,13 @@ Active IL placements from the last 14 days across all MLB teams.
 
 **Response:**
 ```json
-[
-  { "playerId": 592450, "playerName": "Aaron Judge", "team": "NYY", "date": "2026-04-10", "note": "10-Day IL — oblique strain" }
-]
+{
+  "injuries": [
+    { "playerId": 592450, "playerName": "Aaron Judge", "team": "NYY", "status": "10-Day IL", "date": "2026-04-10", "description": "oblique strain" }
+  ]
+}
 ```
+> Note: response is `{ injuries: [] }`, not a plain array.
 
 ---
 
@@ -323,15 +326,61 @@ Shared server cache — **20 minutes**. Does not burn quota on repeat calls.
 
 ### `GET /api/player-props/:gamePk?eventId=<oddsEventId>`
 Sportsbook player prop lines (K, TB, H, HR) for a specific game.  
-Shared server cache — **10 minutes**. Pass `eventId` from `/api/odds` to skip an extra lookup.
+Shared server cache — **10 minutes** (2 min if no props posted). Pass `eventId` from `/api/odds` to skip an extra lookup.
 
 **Response:**
 ```json
 {
   "gamePk": 716463,
+  "reason": "ok",
   "props": [
-    { "player": "Gerrit Cole", "market": "pitcher_strikeouts", "marketLabel": "K", "line": 7.5, "overOdds": "-115", "underOdds": "-105", "book": "DraftKings" },
-    { "player": "Aaron Judge",  "market": "batter_home_runs",   "marketLabel": "HR", "line": 0.5, "overOdds": "+150", "underOdds": "-185", "book": "DraftKings" }
+    {
+      "player": "Gerrit Cole",
+      "market": "pitcher_strikeouts",
+      "marketLabel": "K",
+      "line": 7.5,
+      "overOdds": "-115", "underOdds": "-105",
+      "book": "DK",
+      "books": {
+        "DK":  { "line": 7.5, "overOdds": "-115", "underOdds": "-105" },
+        "FD":  { "line": 7.5, "overOdds": "-118", "underOdds": "-102" },
+        "CZR": { "line": 8.0, "overOdds": "+100", "underOdds": "-120" },
+        "MGM": { "line": 8.0, "overOdds": "+105", "underOdds": "-125" }
+      }
+    }
+  ]
+}
+```
+
+**`reason` values:**  
+- `"ok"` — props found  
+- `"no_props"` — event found on Odds API but no prop markets posted yet  
+- `"no_event"` — game not found on Odds API (props not yet listed)
+
+**LINE INTELLIGENCE (sharp vs square signal):**  
+The `books` object enables cross-book line comparison. Sharp books (DK, FD) set more accurate lines than square books (CZR, MGM). A gap ≥ 0.5 between the sharp average and square average is a meaningful edge signal.  
+- Gap ≥ 0.5 → base 55% confidence + 10% per 0.5 gap, capped at 80%  
+- Example: sharp avg 7.5, square avg 8.0 → gap 0.5 → 65% edge confidence
+
+---
+
+### `GET /api/weather`
+Current weather for today's MLB stadium locations via Open-Meteo. Cached **1 hour** server-side.
+
+**Response:**
+```json
+{
+  "stadiums": [
+    {
+      "gamePk": 716463,
+      "stadium": "Citizens Bank Park",
+      "city": "Philadelphia",
+      "temp": 72,
+      "windSpeed": 9,
+      "windDir": "OUT to RF",
+      "condition": "Partly Cloudy",
+      "humidity": 58
+    }
   ]
 }
 ```
@@ -428,6 +477,36 @@ Full boxscore for in-progress or final games. Includes batter and pitcher lines.
 
 ---
 
+### `GET /api/daily-card`
+Full-slate AI analysis card for today's MLB games. Uses Claude Sonnet to surface the 2–3 strongest plays across all games after analyzing every available signal.
+
+**Rate limits:**
+- Max **10 uncached calls per calendar day** (resets midnight Honolulu) — ~$1.50/day safeguard
+- Cached **45 minutes** — all users share one result per window
+- Returns `429` with `{ error, cap }` when daily cap is reached
+
+**Response:**
+```json
+{
+  "date": "2026-04-21",
+  "card": "1. BEST BETS SUMMARY\n- ...\n\n2. PICK BREAKDOWN\n...",
+  "gamesAnalyzed": 15,
+  "generatedAt": "2026-04-21T14:32:10Z",
+  "tokens": { "input": 4800, "output": 980, "estCost": "0.0291" },
+  "cap": { "date": "2026-04-21", "calls": 3, "remaining": 7 }
+}
+```
+
+**Card sections (always in this order):**
+1. `BEST BETS SUMMARY` — ranked list of top plays
+2. `PICK BREAKDOWN` — one block per pick: `PROP`, `CONFIDENCE`, `EDGE`, `SIGNALS`, `RISK`, `PLAYABILITY`
+3. `PASSES` — plays considered but rejected, with reason
+4. `OFFICIAL CARD` — final plays, one per line: `Player — Market — Line — Direction — Confidence`
+
+> Analysis rules applied silently: min 2 independent signals, unconfirmed lineup lowers batter prop confidence, missing umpire lowers K prop confidence, avgIP < 5.0 blocks K overs, bad lines noted in PLAYABILITY only.
+
+---
+
 ## Recommended Research Flow
 
 For a full pre-game picture, call endpoints in this order:
@@ -447,6 +526,8 @@ For a full pre-game picture, call endpoints in this order:
 12. GET /api/bullpen/:gamePk                  → bullpen health
 13. GET /api/injuries                         → check for scratches
 14. GET /api/odds                             → current lines + totals
-15. GET /api/player-props/:gamePk?eventId=... → prop lines
-16. POST /api/props/:gamePk  { context }      → AI picks with reasoning
+15. GET /api/player-props/:gamePk?eventId=... → prop lines (incl. per-book for LINE INTELLIGENCE)
+16. GET /api/weather                          → stadium weather conditions
+17. POST /api/props/:gamePk  { context }      → per-game AI picks with reasoning
+18. GET /api/daily-card                       → full-slate AI card (best 2–3 plays, all games)
 ```

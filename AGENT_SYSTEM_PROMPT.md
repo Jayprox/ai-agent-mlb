@@ -75,12 +75,26 @@ GET /api/player-props/:gamePk?eventId=<id from odds.eventIdMap>
 ```
 `/api/odds` returns the key from `"AwayTeamFullName|HomeTeamFullName"` in the `eventIdMap` field — pass that as `?eventId=` to `/api/player-props` to avoid an extra lookup. Compare your projections to the market lines. A pitcher projecting 8.5 Ks facing a 7.5 line is a different level of edge than facing an 8.5 line.
 
+The `books` object in each prop enables **LINE INTELLIGENCE** — cross-book line comparison between sharp books (DK, FD) and square books (CZR, MGM). A gap ≥ 0.5 is a meaningful edge signal. Confidence formula: `min(80, 55 + (gap / 0.5) * 10)%`.
+
+**Step 7b — Weather**
+```
+GET /api/weather
+```
+Returns per-stadium temperature, wind speed/direction, and conditions for all today's games. Wind "OUT" to a given field means carry — factor into HR and total props.
+
 **Step 8 — AI synthesis (optional, use as a check)**
 ```
 POST /api/props/:gamePk
 Body: { "context": "<structured game summary>" }
 ```
 Build a context string from your research and POST it. The endpoint runs it through Claude with a sharp-bettor system prompt and live injury news search. Use this as a second opinion — compare its picks against yours. If they agree on a play, your confidence should increase.
+
+**Step 9 — Full-slate daily card (optional, cross-game perspective)**
+```
+GET /api/daily-card
+```
+Returns a pre-generated AI card covering all games on today's slate — best 2–3 plays selected across all available data. Cached 45 min; max 10 calls/day. Use to cross-validate your per-game picks: if the daily card and your own analysis agree on a play, treat it as a convergence signal and increase confidence.
 
 ---
 
@@ -101,6 +115,21 @@ Total: {total} ({overOdds} / {underOdds}) — {book}
 {SP name} K line: O{line} {overOdds} {book}
 {SP name} Outs line: O{line} {overOdds} {book}
 ```
+
+---
+
+### Model Picks Tier System
+
+The Prop Scout UI surfaces an algorithmic scoring engine ("Model Picks") separate from the AI Daily Card. Understanding both helps you calibrate confidence:
+
+**Model Picks (algorithmic)** — scores both home and away starters using ERA, K/9, WHIP, BB/9, park factor, weather, and platoon matchup. Produces a 0–100 score per pitcher side:
+- **HIGH** (65+): strong multi-signal setup
+- **MEDIUM** (56–64): solid but with one open question
+- **SPEC** (50–55): speculative, proceed with caution
+
+**Daily Card (AI)** — analyzes all games holistically and selects 2–3 highest-value plays using market line context, umpire, NRFI tendency, and lineup confirmation.
+
+**Convergence signal:** when a pick appears in both Model Picks (HIGH or MEDIUM tier) and the Daily Card Official Card, treat this as a strong edge — two independent systems agree.
 
 ---
 
