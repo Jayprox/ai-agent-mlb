@@ -2749,3 +2749,101 @@ The full tiered Model Picks card was moved out of the Slate view and into the Bo
 - Handoff doc had stray committed conflict marker lines near the Session 37/38 boundary; those were removed while updating this note.
 
 *Updated April 23 2026 — Session 45 complete · compact Slate model summary · Board Model tab · per-tab hit counters*
+
+---
+
+## ✅ Session 46 — Daily Card Scheduler + Top-Level MODEL View
+
+**Backend — Daily Card scheduled pre-generation**
+
+Files changed:
+- `backend/routes/dailyCard.js`
+- `backend/jobs/scheduler.js`
+- `backend/server.js`
+
+**What changed:**
+- `dailyCard.js` now exports `{ router, regenerateDailyCard }` instead of only the router.
+- Added `regenerateDailyCard()` helper:
+  - clears the current Honolulu cache key (`daily-card:${todayHonolulu()}`)
+  - calls the existing route internally via localhost
+  - logs success/failure with games analyzed and token cost
+- `server.js` now mounts the router via:
+  - `const { router: dailyCardRouter, regenerateDailyCard } = require("./routes/dailyCard");`
+  - `app.use("/api/daily-card", dailyCardRouter);`
+- Added admin trigger endpoint:
+  - `GET /api/admin/daily-card/regenerate`
+  - requires `x-admin-secret === process.env.ADMIN_SECRET`
+  - fire-and-forget trigger for regeneration
+- `scheduler.js` now schedules two Daily Card jobs in `Pacific/Honolulu`:
+  - **Morning run** at `9:00 AM`
+  - **Pregame run** every 5 minutes from `8 AM–4 PM`, fires once when current time is within 95 minutes of the earliest slate game
+- Pregame scheduling uses module-level guard:
+  - `let _pregameRan = { date: null }`
+- Added `getTodayGames()` helper in scheduler so the pregame job can read `gameTime` from `slate_snapshots.games`
+
+**Important notes:**
+- Existing Daily Card cache TTL and daily cap logic were not changed.
+- Scheduled calls still count against the existing daily cap.
+- Scheduler/admin regeneration works by hitting the same `/api/daily-card` path users already consume, so output format remains unchanged.
+
+**Frontend — Model Picks moved to top-level nav**
+
+File changed:
+- `prop-scout-v7.jsx`
+
+**What changed:**
+- Added a new top-level nav tab:
+  - `🎯 Model`
+  - inserted between `Picks` and `Board`
+- Slate compact Model summary still exists, but:
+  - `VIEW ALL →` now goes to `setView("model")`
+  - clicking a compact summary row also goes to `setView("model")`
+- Full Model Picks card was removed from Board view.
+- Board now starts directly with the ranking tabs:
+  - `⚾ HR`
+  - `🎯 Hits`
+  - `⚡ K`
+  - `📋 Outs`
+- `boardTab` default was reset from `"model"` to `"hr"`
+
+**MODEL view layout:**
+- Header:
+  - `🎯 Model Picks`
+  - right-side badge: `ALGO · {count} picks`
+- Full tier card always expanded in this view
+- Reuses the same `TierSection` rendering for:
+  - HIGH
+  - MEDIUM
+  - SPEC
+- Empty-state message:
+  - `"Model scoring requires probable pitchers — check back closer to game time."`
+
+**Model performance header:**
+- Added thin stats bar at top of MODEL view
+- Reads from `propLog`
+- Implemented backward-compatible parsing for both:
+  - new shape (`loggedAt`, `outcome`)
+  - legacy localStorage shape (`timestamp`, `result`)
+- Current display behavior:
+  - if no model picks logged today → `No picks logged today`
+  - otherwise shows:
+    - `Today: W-L-P`
+    - `L7: XX%` when settled logs exist in last 7 days
+    - `Pending: N`
+- Model log filter uses `propType === "K" || propType === "Outs"` per task spec
+
+**Shared rendering cleanup:**
+- Moved `getBookLine()` and `TierSection` out of the old Board-only block into shared App scope so both the MODEL view and the Board rankings can stay cleanly separated
+- Board prefetch effect now runs for both `view === "board"` and `view === "model"` so sportsbook line lookup still resolves on the Model tab
+
+**Verification**
+- `npm run build` passed
+- `node --check backend/server.js` passed
+- `node --check backend/routes/dailyCard.js` passed
+- `node --check backend/jobs/scheduler.js` passed
+- A direct `require('./backend/server')` test was intentionally not used for final verification because it immediately attempts to bind port 3001 in the sandbox
+
+**Git/worktree note**
+- `AGENT_SYSTEM_PROMPT.md` was already modified in the working tree before this session and was not edited by Codex during Session 46.
+
+*Updated April 23 2026 — Session 46 complete · scheduled Daily Card regen · top-level MODEL tab · model stats header*

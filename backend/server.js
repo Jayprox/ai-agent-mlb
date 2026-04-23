@@ -7,6 +7,7 @@ const authRouter = require("./routes/auth");
 const picksRouter = require("./routes/picks");
 const notesRouter = require("./routes/notes");
 const digestRouter = require("./routes/digest");
+const { router: dailyCardRouter, regenerateDailyCard } = require("./routes/dailyCard");
 
 // Required env vars: ODDS_API_KEY, JWT_SECRET
 // Optional: DATABASE_URL (falls back to flat JSON)
@@ -46,7 +47,7 @@ app.use("/api/auth",       authRouter);
 app.use("/api/picks",     picksRouter);
 app.use("/api/notes",     notesRouter);
 app.use("/api/digest",    digestRouter);
-app.use("/api/daily-card", require("./routes/dailyCard")); // Full-slate AI card
+app.use("/api/daily-card", dailyCardRouter); // Full-slate AI card
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {
@@ -81,6 +82,14 @@ app.get("/api/admin/warm-cache", async (req, res) => {
   const { warmCache } = require("./jobs/warmCache");
   warmCache().catch(() => {}); // fire and forget
   res.json({ ok: true, message: "Cache warm started in background" });
+});
+
+app.get("/api/admin/daily-card/regenerate", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  regenerateDailyCard().catch(() => {});
+  res.json({ ok: true, message: "Daily Card regeneration started" });
 });
 
 // ── Static frontend (production only) ────────────────────────

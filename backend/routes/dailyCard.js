@@ -59,6 +59,24 @@ async function internal(path) {
   }
 }
 
+async function regenerateDailyCard() {
+  const cacheKey = `daily-card:${todayHonolulu()}`;
+  cache.clear(cacheKey);
+  console.log(`  → Daily Card regenerate requested  key=${cacheKey}`);
+
+  const data = await internal("/api/daily-card");
+  if (!data?.card) {
+    const message = data?.error ?? "Daily Card regeneration failed";
+    console.error(`  ✗ Daily Card regenerate failed: ${message}`);
+    throw new Error(message);
+  }
+
+  console.log(
+    `  ✓ Daily Card regenerated  games=${data.gamesAnalyzed ?? "?"}  cost=$${data.tokens?.estCost ?? "?"}  cap=${data.cap?.calls ?? "?"}/${DAILY_CAP}`
+  );
+  return data;
+}
+
 // ── Context builder ──────────────────────────────────────────────────────────
 // Produces a tight, information-dense string for the Claude context.
 // Deliberately avoids raw stat dumps — surfaces signals, not noise.
@@ -317,4 +335,4 @@ router.get("/", async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = { router, regenerateDailyCard };
