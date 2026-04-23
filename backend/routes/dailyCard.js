@@ -14,6 +14,7 @@ const router    = express.Router();
 const axios     = require("axios");
 const Anthropic = require("@anthropic-ai/sdk");
 const cache     = require("../services/cache");
+const { query, isConnected } = require("../services/db");
 const { todayHonolulu } = require("../jobs/snapshotJobs");
 
 const CARD_TTL     = 45 * 60 * 1000; // 45-minute result cache
@@ -59,22 +60,173 @@ async function internal(path) {
   }
 }
 
+async function readDailyCardSnapshot(date = todayHonolulu()) {
+  if (!isConnected()) return null;
+  const result = await query(
+    `SELECT slate_date, generated_at, card, games_analyzed, tokens, source, status
+       FROM daily_card_snapshots
+      WHERE slate_date = $1`,
+    [date]
+  );
+  const row = result?.rows?.[0];
+  if (!row) return null;
+  return {
+    date: row.slate_date,
+    card: row.card,
+    gamesAnalyzed: row.games_analyzed,
+    generatedAt: row.generated_at,
+    tokens: row.tokens ?? null,
+    source: row.source ?? "anthropic",
+    status: row.status ?? "ready",
+  };
+}
+
+async function writeDailyCardSnapshot(result) {
+  if (!isConnected()) return;
+  await query(
+    `INSERT INTO daily_card_snapshots (slate_date, generated_at, card, games_analyzed, tokens, source, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (slate_date)
+     DO UPDATE SET
+       generated_at = EXCLUDED.generated_at,
+       card = EXCLUDED.card,
+       games_analyzed = EXCLUDED.games_analyzed,
+       tokens = EXCLUDED.tokens,
+       source = EXCLUDED.source,
+       status = EXCLUDED.status`,
+    [
+      result.date,
+      result.generatedAt,
+      result.card,
+      result.gamesAnalyzed,
+      JSON.stringify(result.tokens ?? null),
+      result.source ?? "anthropic",
+      result.status ?? "ready",
+    ]
+  );
+}
+
+async function generateDailyCard() {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured");
+
+  const cacheKey = `daily-card:${todayHonolulu()}`;
+
+  if (!capCheck()) {
+    throw new Error("Daily analysis cap reached ($1.50/day safeguard). Resets at midnight.");
+  }
+
+  console.log(`  → Daily Card: building full-slate context…`);
+  const t0 = Date.now();
+
+  try {
+    const [schedule, injuriesRes, oddsData] = await Promise.all([
+      internal("/api/schedule"),
+      internal("/api/injuries"),
+      internal("/api/odds"),
+    ]);
+
+    const injuries = injuriesRes?.injuries ?? injuriesRes ?? [];
+    const games = Array.isArray(schedule) ? schedule : [];
+    if (!games.length) {
+      throw new Error("No games on today's slate");
+    }
+
+    const oddsMap = oddsData?.map ?? {};
+
+    const injuredNames = new Set(
+      (injuries ?? []).map(p => (p.name ?? p.fullName ?? "").toLowerCase()).filter(Boolean)
+    );
+    void injuredNames;
+
+    const CHUNK = 5;
+    const gameData = new Array(games.length).fill(null).map(() => ({}));
+
+    for (let i = 0; i < games.length; i += CHUNK) {
+      const chunk = games.slice(i, i + CHUNK);
+      await Promise.allSettled(
+        chunk.map(async (g, ci) => {
+          const idx = i + ci;
+          const pk  = g.gamePk ?? g.id;
+          const [lineups, umpire, nrfi, props] = await Promise.all([
+            internal(`/api/lineups/${pk}`),
+            internal(`/api/umpires/${pk}`),
+            internal(`/api/nrfi/${pk}`),
+            internal(`/api/player-props/${pk}`),
+          ]);
+          gameData[idx] = { lineups, umpire, nrfi, props: props?.props ?? [] };
+        })
+      );
+    }
+
+    const gameBlocks = games.map((g, i) => {
+      const { lineups, umpire, nrfi, props } = gameData[i];
+      return buildGameBlock(g, lineups, umpire, nrfi, props, oddsMap);
+    });
+
+    const injurySection = injuries?.length
+      ? `INJURIES (recent IL):\n${injuries.slice(0, 20).map(p => `  ${p.playerName ?? "Unknown"} (${p.team ?? "?"}) — ${p.status ?? "IL"}`).join("\n")}`
+      : "INJURIES: none reported";
+
+    const context = [
+      `TODAY'S MLB SLATE — ${todayHonolulu()} — ${games.length} games\n`,
+      injurySection,
+      "\n--- GAMES ---\n",
+      gameBlocks.join("\n\n"),
+    ].join("\n");
+
+    console.log(`  · Daily Card context built  games=${games.length}  chars=${context.length}`);
+
+    const client = getClient();
+    const message = await client.messages.create({
+      model:      CARD_MODEL,
+      max_tokens: 2048,
+      system:     SYSTEM_PROMPT,
+      messages:   [{ role: "user", content: context }],
+    });
+
+    const text = message.content?.[0]?.text ?? "";
+    const inputTokens  = message.usage?.input_tokens  ?? 0;
+    const outputTokens = message.usage?.output_tokens ?? 0;
+    const estCost      = ((inputTokens * 3 + outputTokens * 15) / 1_000_000).toFixed(4);
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    console.log(`  ✓ Daily Card complete  games=${games.length}  in=${inputTokens}  out=${outputTokens}  cost=$${estCost}  elapsed=${elapsed}s  cap=${_cap.calls}/${DAILY_CAP}`);
+
+    const result = {
+      date:      todayHonolulu(),
+      card:      text,
+      gamesAnalyzed: games.length,
+      generatedAt:   new Date().toISOString(),
+      tokens: { input: inputTokens, output: outputTokens, estCost },
+      source: "anthropic",
+      status: "ready",
+    };
+
+    cache.set(cacheKey, result, CARD_TTL);
+    await writeDailyCardSnapshot(result);
+    return result;
+  } catch (err) {
+    if (_cap.calls > 0) _cap.calls--;
+    throw err;
+  }
+}
+
 async function regenerateDailyCard() {
   const cacheKey = `daily-card:${todayHonolulu()}`;
   cache.clear(cacheKey);
   console.log(`  → Daily Card regenerate requested  key=${cacheKey}`);
 
-  const data = await internal("/api/daily-card");
-  if (!data?.card) {
-    const message = data?.error ?? "Daily Card regeneration failed";
-    console.error(`  ✗ Daily Card regenerate failed: ${message}`);
-    throw new Error(message);
+  try {
+    const data = await generateDailyCard();
+    console.log(
+      `  ✓ Daily Card regenerated  games=${data.gamesAnalyzed ?? "?"}  cost=$${data.tokens?.estCost ?? "?"}  cap=${_cap.calls}/${DAILY_CAP}`
+    );
+    return data;
+  } catch (err) {
+    console.error(`  ✗ Daily Card regenerate failed: ${err.message}`);
+    throw err;
   }
-
-  console.log(
-    `  ✓ Daily Card regenerated  games=${data.gamesAnalyzed ?? "?"}  cost=$${data.tokens?.estCost ?? "?"}  cap=${data.cap?.calls ?? "?"}/${DAILY_CAP}`
-  );
-  return data;
 }
 
 // ── Context builder ──────────────────────────────────────────────────────────
@@ -211,9 +363,6 @@ PLAYABILITY:
 
 // ── GET /api/daily-card ───────────────────────────────────────────────────────
 router.get("/", async (req, res) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(503).json({ error: "ANTHROPIC_API_KEY not configured" });
-
   const cacheKey = `daily-card:${todayHonolulu()}`;
   const cached   = cache.get(cacheKey);
   if (cached) {
@@ -221,118 +370,22 @@ router.get("/", async (req, res) => {
     return res.json({ ...cached, cap: capStatus() });
   }
 
-  // Rate cap check
-  if (!capCheck()) {
-    console.warn("  ⚠ Daily Card: daily cap reached");
-    return res.status(429).json({
-      error: "Daily analysis cap reached ($1.50/day safeguard). Resets at midnight.",
-      cap: capStatus(),
-    });
-  }
-
-  console.log(`  → Daily Card: building full-slate context…`);
-  const t0 = Date.now();
-
   try {
-    // ── Step 1: Gather shared data ───────────────────────────────────────────
-    const [schedule, injuriesRes, oddsData] = await Promise.all([
-      internal("/api/schedule"),
-      internal("/api/injuries"),
-      internal("/api/odds"),
-    ]);
-
-    // /api/injuries returns { injuries: [...] }, not a plain array
-    const injuries = injuriesRes?.injuries ?? injuriesRes ?? [];
-    const games = Array.isArray(schedule) ? schedule : [];
-    if (!games.length) {
-      return res.status(404).json({ error: "No games on today's slate" });
+    const snapshot = await readDailyCardSnapshot();
+    if (snapshot) {
+      cache.set(cacheKey, snapshot, CARD_TTL);
+      res.setHeader("X-Cache", "DB-HIT");
+      return res.json({ ...snapshot, cap: capStatus() });
     }
-
-    const oddsMap = oddsData?.map ?? {};
-
-    // Build injuredIds set for quick lookup
-    const injuredNames = new Set(
-      (injuries ?? []).map(p => (p.name ?? p.fullName ?? "").toLowerCase()).filter(Boolean)
-    );
-
-    // ── Step 2: Gather per-game data in parallel ─────────────────────────────
-    const CHUNK = 5;
-    const gameData = new Array(games.length).fill(null).map(() => ({}));
-
-    for (let i = 0; i < games.length; i += CHUNK) {
-      const chunk = games.slice(i, i + CHUNK);
-      await Promise.allSettled(
-        chunk.map(async (g, ci) => {
-          const idx = i + ci;
-          const pk  = g.gamePk ?? g.id;
-          const [lineups, umpire, nrfi, props] = await Promise.all([
-            internal(`/api/lineups/${pk}`),
-            internal(`/api/umpires/${pk}`),
-            internal(`/api/nrfi/${pk}`),
-            internal(`/api/player-props/${pk}`),
-          ]);
-          gameData[idx] = { lineups, umpire, nrfi, props: props?.props ?? [] };
-        })
-      );
-    }
-
-    // ── Step 3: Build context string ─────────────────────────────────────────
-    const gameBlocks = games.map((g, i) => {
-      const { lineups, umpire, nrfi, props } = gameData[i];
-      return buildGameBlock(g, lineups, umpire, nrfi, props, oddsMap);
-    });
-
-    // Injury summary (IL players active today)
-    // injuries objects have shape: { playerName, team, status, date, description }
-    const injurySection = injuries?.length
-      ? `INJURIES (recent IL):\n${injuries.slice(0, 20).map(p => `  ${p.playerName ?? "Unknown"} (${p.team ?? "?"}) — ${p.status ?? "IL"}`).join("\n")}`
-      : "INJURIES: none reported";
-
-    const context = [
-      `TODAY'S MLB SLATE — ${todayHonolulu()} — ${games.length} games\n`,
-      injurySection,
-      "\n--- GAMES ---\n",
-      gameBlocks.join("\n\n"),
-    ].join("\n");
-
-    console.log(`  · Daily Card context built  games=${games.length}  chars=${context.length}`);
-
-    // ── Step 4: Claude call ──────────────────────────────────────────────────
-    const client = getClient();
-    const message = await client.messages.create({
-      model:      CARD_MODEL,
-      max_tokens: 2048,
-      system:     SYSTEM_PROMPT,
-      messages:   [{ role: "user", content: context }],
-    });
-
-    const text = message.content?.[0]?.text ?? "";
-    const inputTokens  = message.usage?.input_tokens  ?? 0;
-    const outputTokens = message.usage?.output_tokens ?? 0;
-    const estCost      = ((inputTokens * 3 + outputTokens * 15) / 1_000_000).toFixed(4);
-
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`  ✓ Daily Card complete  games=${games.length}  in=${inputTokens}  out=${outputTokens}  cost=$${estCost}  elapsed=${elapsed}s  cap=${_cap.calls}/${DAILY_CAP}`);
-
-    const result = {
-      date:      todayHonolulu(),
-      card:      text,
-      gamesAnalyzed: games.length,
-      generatedAt:   new Date().toISOString(),
-      tokens: { input: inputTokens, output: outputTokens, estCost },
-    };
-
-    cache.set(cacheKey, result, CARD_TTL);
-    res.setHeader("X-Cache", "MISS");
-    res.json({ ...result, cap: capStatus() });
-
-  } catch (err) {
-    // Roll back the cap increment on failure so the call doesn't count
-    if (_cap.calls > 0) _cap.calls--;
-    console.error(`  ✗ Daily Card failed: ${err.message}`);
-    console.error(err.stack ?? err);
-    res.status(502).json({ error: "Daily Card generation failed", detail: err.message, stack: process.env.NODE_ENV !== "production" ? err.stack : undefined });
+  } catch (dbErr) {
+    console.warn(`Daily Card DB lookup skipped: ${dbErr.message}`);
   }
+
+  res.status(202).json({
+    status: "pending",
+    error: "Daily Card not ready yet. Try again shortly.",
+    cap: capStatus(),
+  });
 });
 
-module.exports = { router, regenerateDailyCard };
+module.exports = { router, regenerateDailyCard, generateDailyCard, readDailyCardSnapshot };

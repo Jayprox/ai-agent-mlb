@@ -48,3 +48,14 @@ CREATE TABLE IF NOT EXISTS umpire_snapshots (
   fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
   data        JSONB        NOT NULL
 );
+
+-- Daily Card snapshot (one row per slate date)
+CREATE TABLE IF NOT EXISTS daily_card_snapshots (
+  slate_date      DATE         PRIMARY KEY,
+  generated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  card            TEXT         NOT NULL,
+  games_analyzed  INTEGER      NOT NULL,
+  tokens          JSONB,
+  source          TEXT         NOT NULL DEFAULT 'anthropic',
+  status          TEXT         NOT NULL DEFAULT 'ready'
+);

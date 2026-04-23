@@ -2847,3 +2847,85 @@ File changed:
 - `AGENT_SYSTEM_PROMPT.md` was already modified in the working tree before this session and was not edited by Codex during Session 46.
 
 *Updated April 23 2026 — Session 46 complete · scheduled Daily Card regen · top-level MODEL tab · model stats header*
+
+---
+
+## ✅ Session 47 — Daily Card Moved to DB-Backed Read Model
+
+**Goal of this session:**
+Reduce Claude/token burn by preventing normal users from triggering a fresh Daily Card generation on cache miss. Daily Card is now intended to be generated only by scheduler/admin flows and then served from cache/DB.
+
+**Files changed:**
+- `backend/routes/dailyCard.js`
+- `backend/migrations/001_init.sql`
+- `prop-scout-v7.jsx`
+
+**Backend behavior change (`backend/routes/dailyCard.js`):**
+
+Daily Card is no longer public "generate on demand" on cache miss.
+
+New flow for `GET /api/daily-card`:
+1. Check in-memory cache
+2. If miss, check Postgres table `daily_card_snapshots`
+3. If DB row exists:
+   - return it
+   - rehydrate in-memory cache
+   - set `X-Cache: DB-HIT`
+4. If neither cache nor DB has today's card:
+   - return `202` with:
+     - `status: "pending"`
+     - `error: "Daily Card not ready yet. Try again shortly."`
+   - **No Claude call is made**
+
+**Generation path split out:**
+- Added `generateDailyCard()` helper to hold the actual Claude generation logic
+- Added `readDailyCardSnapshot()` helper for DB reads
+- Added `writeDailyCardSnapshot()` helper for DB upserts
+- `regenerateDailyCard()` now:
+  - clears in-memory cache for today's key
+  - calls `generateDailyCard()`
+  - writes fresh result to cache + Postgres
+
+**Important outcome:**
+- Scheduler/admin writes
+- Users read
+- Cold cache no longer causes token usage
+
+**Postgres table added (`backend/migrations/001_init.sql`):**
+- New table: `daily_card_snapshots`
+- Columns:
+  - `slate_date DATE PRIMARY KEY`
+  - `generated_at TIMESTAMPTZ`
+  - `card TEXT`
+  - `games_analyzed INTEGER`
+  - `tokens JSONB`
+  - `source TEXT`
+  - `status TEXT`
+
+**Migration note:**
+- This new table requires re-running:
+  - `node backend/scripts/migrate.js`
+- On Railway, the production DB will not store Daily Card rows until that migration is applied.
+
+**Frontend handling (`prop-scout-v7.jsx`):**
+- `fetchDailyCard()` now treats `202` as a valid JSON response instead of throwing an error
+- Daily Card panel now has a dedicated pending state:
+  - message explains the card is waiting on scheduled/admin generation
+  - explicitly states the app will not trigger a Claude call while pending
+  - provides a `↻ Check again` button
+- Existing success/error rendering remains unchanged for ready cards or real failures
+
+**Why this matters:**
+- Prevents redeploys / cold starts / cache clears from causing unplanned Daily Card generation
+- Makes token usage much more predictable
+- Aligns Daily Card with the existing DB-first snapshot pattern used elsewhere in the app
+
+**Verification:**
+- `npm run build` passed
+- `node --check backend/routes/dailyCard.js` passed
+- SQL migration file was updated manually; note that `node --check` is not applicable to `.sql` files
+
+**Next recommended step:**
+- Re-run migrations locally / on Railway so `daily_card_snapshots` exists before relying on DB-backed Daily Card persistence in production
+
+*Updated April 23 2026 — Session 47 complete · Daily Card DB-backed read model · no public token-triggered generation*

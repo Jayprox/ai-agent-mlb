@@ -489,13 +489,14 @@ const apiFetch = async (path) => {
 // Fetches (or returns cached) the full-slate AI analysis from the backend.
 const fetchDailyCard = async () => {
   const res = await fetch(`${API_BASE}/api/daily-card`);
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 202) return body;
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
     // Surface the real detail so we can diagnose failures
     const msg = body.detail ?? body.error ?? `HTTP ${res.status}`;
     throw Object.assign(new Error(msg), { status: res.status, cap: body.cap });
   }
-  return res.json();
+  return body;
 };
 
 const apiMutate = async (path, method, body) => {
@@ -3082,9 +3083,9 @@ export default function App() {
     });
   }, [liveSlate, liveScores, liveBoxscores, propLog]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch boxscores for live/final games on the Board to show today's results
+  // Fetch boxscores for live/final games on the Board + Model views to show today's results
   useEffect(() => {
-    if (IS_STATS_SANDBOX || view !== "board" || !liveSlate) return;
+    if (IS_STATS_SANDBOX || (view !== "board" && view !== "model") || !liveSlate) return;
     liveSlate.forEach(g => {
       const status = g.status ?? "";
       const isLive  = status === "In Progress" || status === "Warmup";
@@ -3753,8 +3754,26 @@ export default function App() {
           const lineMismatch = bookLine && Math.abs(bookLine.line - p.modelLine) >= 0.5;
           const overPick = { label: `${p.fullName} ${p.propType === "K" ? "Strikeouts" : "Outs"} OVER ${bookLine?.line ?? p.modelLine}`, lean: "OVER", positive: true, confidence: p.confidence, propType: p.propType, gamePk: p.gamePk };
           const logged = propLog.some(pl => pl.gamePk === p.gamePk && pl.label === overPick.label);
+          const result = liveBoardResults[p.pitcherId ?? p.playerId ?? p.id] ?? null;
+          const isResolved = !!result && !result.live;
+          const modelHit = isResolved && (
+            (p.propType === "K" || p.market === "pitcher_strikeouts")
+              ? (p.lean === "UNDER" ? result.k < p.modelLine : result.k > p.modelLine)
+              : (p.lean === "UNDER" ? result.outs < p.modelLine : result.outs > p.modelLine)
+          );
+          const resultBorderColor = isResolved ? (modelHit ? "#22c55e" : "#ef4444") : null;
+          const resultCardStyle = resultBorderColor
+            ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
+            : {};
+          const gameStatus = (() => {
+            const g = (activeSlate ?? []).find(game => (game.gamePk ?? game.id) === p.gamePk);
+            const status = g?.status ?? "";
+            if (status === "In Progress" || status === "Warmup") return "LIVE";
+            if (status === "Final" || status === "Game Over") return "FINAL";
+            return null;
+          })();
           return (
-            <div key={i} style={{ background: "#0f1020", border: `1px solid ${borderColor}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6 }}>
+            <div key={i} style={{ background: "#0f1020", border: `1px solid ${borderColor}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6, ...resultCardStyle }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
                 <div
                   style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
@@ -3764,6 +3783,23 @@ export default function App() {
                   <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
                     <span style={{ fontSize: 9, color: "#6b7280" }}>{p.game}</span>
                     {p.lineupConfirmed && <span style={{ fontSize: 8, color: "#22c55e", fontWeight: 700 }}>✓ LINEUP</span>}
+                    {gameStatus === "LIVE" && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
+                        <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
+                        <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
+                      </div>
+                    )}
+                    {gameStatus === "FINAL" && (
+                      <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "1px 6px" }}>
+                        <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
+                      </div>
+                    )}
+                    {isResolved && modelHit && (
+                      <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>✓ HIT</span>
+                    )}
+                    {isResolved && !modelHit && (
+                      <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>✗ MISS</span>
+                    )}
                     {p.avgIP < 5.0 && <span style={{ fontSize: 8, color: "#ef4444", fontWeight: 700 }}>⚠ LOW IP</span>}
                   </div>
                 </div>
@@ -3829,6 +3865,24 @@ export default function App() {
   const l7WinRate = l7SettledModelLogs.length
     ? Math.round((l7SettledModelLogs.filter(p => getPickOutcome(p) === "won").length / l7SettledModelLogs.length) * 100)
     : null;
+  const modelBoardResolved = topSlatePicks
+    .map((p) => {
+      const result = liveBoardResults[p.pitcherId ?? p.playerId ?? p.id];
+      if (!result || result.live) return null;
+      const line = p.modelLine;
+      if (line === null || line === undefined) return null;
+      if (p.propType === "K" || p.market === "pitcher_strikeouts") {
+        if (result.k === undefined) return null;
+        return p.lean === "UNDER" ? result.k < line : result.k > line;
+      }
+      if (p.propType === "Outs" || p.market === "pitcher_outs_recorded") {
+        if (result.outs === undefined) return null;
+        return p.lean === "UNDER" ? result.outs < line : result.outs > line;
+      }
+      return null;
+    })
+    .filter(v => v !== null);
+  const modelBoardHits = modelBoardResolved.filter(Boolean).length;
 
   // ── Login screen — shown before the app when not authenticated ─────────
   if (!authToken) {
@@ -3980,6 +4034,7 @@ export default function App() {
             const hasCard   = dailyCard && dailyCard !== "loading" && dailyCard.card;
             const isError   = dailyCard && dailyCard !== "loading" && dailyCard.error;
             const isCapped  = dailyCard && dailyCard.status === 429;
+            const isPendingCard = dailyCard && dailyCard !== "loading" && dailyCard.status === "pending";
 
             return (
               <div style={{ marginBottom: 10 }}>
@@ -4018,7 +4073,27 @@ export default function App() {
                       </div>
                     )}
 
-                    {isError && (
+                    {isPendingCard && (
+                      <div style={{ padding: "8px 0" }}>
+                        <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 6 }}>
+                          Daily Card is waiting to be run.
+                        </div>
+                        <button
+                          onClick={e => {
+                            e.stopPropagation();
+                            setDailyCard("loading");
+                            fetchDailyCard()
+                              .then(d => setDailyCard(d))
+                              .catch(err => setDailyCard({ error: err.message, status: err.status, cap: err.cap }));
+                          }}
+                          style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}
+                        >
+                          ↻ Check again
+                        </button>
+                      </div>
+                    )}
+
+                    {isError && !isPendingCard && (
                       <div style={{ padding: "8px 0" }}>
                         <div style={{ fontSize: 11, color: "#ef4444", marginBottom: 6 }}>
                           {isCapped
@@ -4246,7 +4321,14 @@ export default function App() {
         {view === "model" && (<>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <SLabel style={{ marginBottom: 0 }}>🎯 Model Picks</SLabel>
-            <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>ALGO · {topSlatePicks.length} picks</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {topSlatePicks.length > 0 && (
+                <span style={{ background: modelBoardHits > 0 ? "#22c55e" : "#374151", color: modelBoardHits > 0 ? "#03140a" : "#d1d5db", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 900, lineHeight: 1.2, fontFamily: "monospace", whiteSpace: "nowrap" }}>
+                  {modelBoardHits}/{topSlatePicks.length} hit
+                </span>
+              )}
+              <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>ALGO · {topSlatePicks.length} picks</span>
+            </div>
           </div>
 
           <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "8px 12px", marginBottom: 12 }}>
@@ -6930,6 +7012,14 @@ export default function App() {
           const scoreColor = (s) =>
             s >= 70 ? "#22c55e" : s >= 55 ? "#f59e0b" : s >= 40 ? "#ef4444" : "#6b7280";
 
+          const getBoardGameStatus = (gamePk) => {
+            const game = (activeSlate ?? []).find(g => (g.gamePk ?? g.id) === gamePk);
+            const status = game?.status ?? "";
+            if (status === "In Progress" || status === "Warmup") return "LIVE";
+            if (status === "Final" || status === "Game Over") return "FINAL";
+            return null;
+          };
+
           const boardOutcome = (type, item) => {
             const id = item.id;
             const result = liveBoardResults[id];
@@ -6956,13 +7046,13 @@ export default function App() {
           };
 
           const hitSummary = (type, items) => {
+            if (!items.length) return null;
             const resolved = items
               .map(item => boardOutcome(type, item))
               .filter(v => v !== null);
-            if (!resolved.length) return null;
             return {
               hits: resolved.filter(Boolean).length,
-              total: resolved.length,
+              total: items.length,
             };
           };
 
@@ -7029,8 +7119,21 @@ export default function App() {
 
                 if (isPitcherBoard) {
                   // ── Pitcher card (K Props / Outs) ──────────────────────────
+                  const boardGameStatus = getBoardGameStatus(c.gamePk);
+                  const todayResult = liveBoardResults[c.id] ?? null;
+                  const hasResolvedResult = !!todayResult && !todayResult.live;
+                  const propLineValue = c.propLine?.line ?? c.suggestedLine;
+                  const pitcherHit = hasResolvedResult && propLineValue !== null && propLineValue !== undefined && (
+                    boardTab === "k"
+                      ? ((c.score >= 55 ? "OVER" : "UNDER") === "UNDER" ? todayResult.k < propLineValue : todayResult.k > propLineValue)
+                      : ((c.score >= 55 ? "OVER" : "UNDER") === "UNDER" ? todayResult.outs < propLineValue : todayResult.outs > propLineValue)
+                  );
+                  const resultBorderColor = hasResolvedResult ? (pitcherHit ? "#22c55e" : "#ef4444") : null;
+                  const resultCardStyle = resultBorderColor
+                    ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
+                    : {};
                   return (
-                    <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px" }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
+                    <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                         {/* Rank */}
                         <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", flexShrink: 0, marginTop: 1 }}>{i + 1}</div>
@@ -7040,6 +7143,23 @@ export default function App() {
                             <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
                             <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
                             <span style={{ fontSize: 9, color: "#9ca3af" }}>{c.hand}HP</span>
+                            {boardGameStatus === "LIVE" && (
+                              <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
+                                <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
+                                <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
+                              </div>
+                            )}
+                            {boardGameStatus === "FINAL" && (
+                              <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "1px 6px" }}>
+                                <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
+                              </div>
+                            )}
+                            {hasResolvedResult && pitcherHit && (
+                              <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>✓ HIT</span>
+                            )}
+                            {hasResolvedResult && !pitcherHit && (
+                              <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>✗ MISS</span>
+                            )}
                             {c.umpireRating === "pitcher" && boardTab === "k" && (
                               <span style={{ fontSize: 8, fontWeight: 700, color: "#a78bfa", background: "rgba(167,139,250,0.12)", borderRadius: 4, padding: "1px 5px" }}>⚖ UMP+K</span>
                             )}
@@ -7108,11 +7228,15 @@ export default function App() {
                 // ── Batter card (HR / Hits) ────────────────────────────────
                 const l5dots = Array.from({ length: 5 }, (_, j) => c.hitRate[j] ?? null);
                 const todayResult = liveBoardResults[c.id] ?? null;
+                const boardGameStatus = getBoardGameStatus(c.gamePk);
                 const hasResult   = todayResult && todayResult.ab > 0;
+                const isHrBoard   = boardTab === "hr";
                 const gotHR       = hasResult && todayResult.hr > 0;
                 const gotHit      = hasResult && todayResult.h > 0 && !gotHR;
                 const ohFer       = hasResult && todayResult.h === 0;
-                const resultBorderColor = gotHR ? "#fbbf24" : (gotHit ? "#22c55e" : (ohFer ? "#ef4444" : null));
+                const resultBorderColor = isHrBoard
+                  ? (gotHR ? "#fbbf24" : (boardGameStatus === "FINAL" ? "#ef4444" : null))
+                  : (gotHR ? "#fbbf24" : (gotHit ? "#22c55e" : (ohFer ? "#ef4444" : null)));
                 const resultCardStyle   = resultBorderColor
                   ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
                   : {};
@@ -7128,11 +7252,26 @@ export default function App() {
                           <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
                           <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
                           <span style={{ fontSize: 9, color: "#6b7280" }}>#{c.order}</span>
+                          {boardGameStatus === "LIVE" && (
+                            <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
+                              <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
+                              <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
+                            </div>
+                          )}
+                          {boardGameStatus === "FINAL" && (
+                            <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "1px 6px" }}>
+                              <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
+                            </div>
+                          )}
                           {/* Today's result badge */}
                           {gotHR  && <span style={{ fontSize: 8, fontWeight: 800, color: "#fbbf24", background: "rgba(251,191,36,0.15)", border: "1px solid rgba(251,191,36,0.4)", borderRadius: 4, padding: "1px 6px" }}>⚾ HR{todayResult.hr > 1 ? ` ×${todayResult.hr}` : ""}</span>}
-                          {gotHit && <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)",  border: "1px solid rgba(34,197,94,0.35)",  borderRadius: 4, padding: "1px 6px" }}>✓ HIT{todayResult.h > 1 ? ` ×${todayResult.h}` : ""}</span>}
-                          {ohFer  && <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", background: "rgba(107,114,128,0.1)", border: "1px solid rgba(107,114,128,0.25)", borderRadius: 4, padding: "1px 6px" }}>0-fer</span>}
-                          {todayResult?.live && hasResult && <span style={{ fontSize: 7, color: "#22c55e", fontWeight: 700 }}>● LIVE</span>}
+                          {!isHrBoard && gotHit && <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)",  border: "1px solid rgba(34,197,94,0.35)",  borderRadius: 4, padding: "1px 6px" }}>✓ HIT{todayResult.h > 1 ? ` ×${todayResult.h}` : ""}</span>}
+                          {!isHrBoard && boardGameStatus === "FINAL" && ohFer && (
+                            <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>✗ NO HIT</span>
+                          )}
+                          {isHrBoard && boardGameStatus === "FINAL" && !gotHR && (
+                            <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>✗ NO HR</span>
+                          )}
                           {c.windFav && boardTab === "hr" && (
                             <span style={{ fontSize: 8, fontWeight: 700, color: "#fbbf24", background: "rgba(251,191,36,0.12)", borderRadius: 4, padding: "1px 5px" }}>↑ WIND</span>
                           )}
