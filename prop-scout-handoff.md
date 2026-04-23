@@ -2469,8 +2469,6 @@ The `DB-HIT` confirms Railway Postgres is migrated, populated, and serving the s
 ---
 
 *Updated April 19 2026 — Session 37 complete · Railway Postgres merged/deployed · migration + schedule DB-HIT verified · fallback hardened*
-<<<<<<< Updated upstream
-=======
 
 ---
 
@@ -2704,3 +2702,50 @@ Board tab expanded from 2 tabs (HR, Hits) to 4 tabs — added ⚡ K Props and �
 - ✅ Board view expanded to 4 tabs (K Props + Outs for pitchers)
 
 *Updated April 20 2026 — Session 44 complete · Board K Props + Outs tabs · pitcher card render*
+
+---
+
+## ✅ Session 45 — Model Picks Board Tab + Hit Counters
+
+**What changed:**
+The full tiered Model Picks card was moved out of the Slate view and into the Board view as its own first tab. Slate now stays cleaner with a compact top-3 summary, while the full model workflow lives with the rest of the board research tools.
+
+**Slate view update (`prop-scout-v7.jsx`):**
+- Replaced the full tiered Model Picks card with a compact gold-bordered top-3 card.
+- Header reads `🎯 Model Picks` with a `VIEW ALL →` button.
+- Shows only `topSlatePicks.slice(0, 3)`.
+- Each compact row shows rank, pick label, game, lineup-confirmed badge, OVER/UNDER badge, and confidence percent.
+- Clicking a row or `VIEW ALL →` now sets `boardTab` to `"model"` and switches to `setView("board")`.
+- Scoring logic and `computeTopSlatePicks` were not changed.
+
+**Board view update (`prop-scout-v7.jsx`):**
+- Added a new `🎯 Model` tab before HR.
+- `boardTab` now defaults to `"model"`.
+- The full tiered Model Picks card now renders inside the Model tab as `🎯 Model Picks — Full Card`.
+- Preserved the existing `TierSection` behavior: tier groupings, sportsbook line lookup, signal chips, confidence display, and log buttons.
+- Existing HR / Hits / K / Outs board tabs remain intact and render only when their tab is selected.
+
+**Per-tab hit counters:**
+- Board tabs now show small top-right result pills when completed game data is available.
+- Format is `{hits}/{total} hit`.
+- Counters currently cover Model, HR, Hits, K, and Outs tabs.
+- Live or unfinished games are ignored so they do not count as misses.
+- Batter boards use final boxscore hitting results:
+  - HR tab: hit when player HR > 0.
+  - Hits tab: hit when player H > 0.
+- Pitcher boards use final boxscore pitching results:
+  - K tab: compares pitcher strikeouts against available prop/model line.
+  - Outs tab: converts IP to outs and compares against available prop/model line.
+- Board boxscore fetch now runs whenever Board view is open and stores both batter and pitcher final results in `liveBoardResults`.
+- Board prefetch now loads batter and pitcher board data for all tabs while Board is open so counters can populate without visiting each tab first.
+
+**Verification:**
+- `npm run build` passed after the UI changes.
+
+**Notes for Cowork:**
+- No backend changes were made in this session.
+- No scoring/model logic was changed.
+- The only code file changed was `prop-scout-v7.jsx`.
+- Handoff doc had stray committed conflict marker lines near the Session 37/38 boundary; those were removed while updating this note.
+
+*Updated April 23 2026 — Session 45 complete · compact Slate model summary · Board Model tab · per-tab hit counters*
