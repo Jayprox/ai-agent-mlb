@@ -10,6 +10,7 @@ const TARGET_BOOKS = [
   { key: "fanduel",        label: "FD"  },
   { key: "williamhill_us", label: "CZR" },
   { key: "betmgm",         label: "MGM" },
+  { key: "bovada",         label: "BOV" },
 ];
 
 const MARKET_LABELS = {
@@ -26,7 +27,7 @@ const lastWord = (str) => str.trim().split(/\s+/).pop();
 const fmtOdds = (n) => (n == null ? null : n > 0 ? `+${n}` : String(n));
 
 // ── GET /api/player-props/:gamePk?eventId=xxx ────────────────────────────
-// Returns player prop lines from DK, FD, CZR, MGM for a given game.
+// Returns player prop lines from DK, FD, CZR, MGM, BOV for a given game.
 // Each prop includes a `books` object with per-book line + odds.
 // Optional ?eventId= skips the events-list fetch when the caller already
 // has the Odds API event ID (e.g. from /api/odds eventIdMap).
@@ -130,7 +131,8 @@ router.get("/:gamePk", async (req, res) => {
 
     // ── Step 5: flatten into sorted prop list ─────────────────────────────
     // Each entry: { player, market, marketLabel, books: { DK, FD, CZR, MGM },
-    //               bestLine, bestOverOdds, bestUnderOdds, book (best book label) }
+    //               bestLine, bestOverOdds, bestUnderOdds, book (best book label)
+    //               books: { DK, FD, CZR, MGM, BOV } }
     const props = [];
     for (const [player, markets] of Object.entries(propMap)) {
       for (const [marketKey, data] of Object.entries(markets)) {

@@ -60,4 +60,43 @@ router.get("/me", requireAuth, (req, res) => {
   return res.json({ userId: req.userId, username: req.username });
 });
 
+// ── Preferences ──────────────────────────────────────────────────────────────
+
+const VALID_BOOKS = ["DK", "FD", "CZR", "MGM", "BOV"];
+
+function writeUsers(users) {
+  ensureStore();
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+// GET /api/auth/preferences — returns current user's preferences
+router.get("/preferences", requireAuth, (req, res) => {
+  const users = readUsers();
+  const user  = users.find(u => u.id === req.userId);
+  if (!user) return res.status(404).json({ error: "User not found" });
+  return res.json({ preferences: user.preferences ?? {} });
+});
+
+// PUT /api/auth/preferences — update preferences (partial merge)
+router.put("/preferences", requireAuth, (req, res) => {
+  const { preferredBook } = req.body ?? {};
+
+  // Validate
+  if (preferredBook !== null && preferredBook !== undefined && !VALID_BOOKS.includes(preferredBook)) {
+    return res.status(400).json({ error: `preferredBook must be one of: ${VALID_BOOKS.join(", ")} or null` });
+  }
+
+  const users = readUsers();
+  const idx   = users.findIndex(u => u.id === req.userId);
+  if (idx === -1) return res.status(404).json({ error: "User not found" });
+
+  users[idx].preferences = {
+    ...(users[idx].preferences ?? {}),
+    ...(preferredBook !== undefined ? { preferredBook: preferredBook ?? null } : {}),
+  };
+
+  writeUsers(users);
+  return res.json({ preferences: users[idx].preferences });
+});
+
 module.exports = router;

@@ -75,7 +75,7 @@ GET /api/player-props/:gamePk?eventId=<id from odds.eventIdMap>
 ```
 `/api/odds` returns the key from `"AwayTeamFullName|HomeTeamFullName"` in the `eventIdMap` field — pass that as `?eventId=` to `/api/player-props` to avoid an extra lookup. Compare your projections to the market lines. A pitcher projecting 8.5 Ks facing a 7.5 line is a different level of edge than facing an 8.5 line.
 
-The `books` object in each prop enables **LINE INTELLIGENCE** — cross-book line comparison between sharp books (DK, FD) and square books (CZR, MGM). A gap ≥ 0.5 is a meaningful edge signal. Confidence formula: `min(80, 55 + (gap / 0.5) * 10)%`.
+The `books` object in each prop enables **LINE INTELLIGENCE** — cross-book line comparison between sharp books (DK, FD) and square books (CZR, MGM, BOV). A gap ≥ 0.5 is a meaningful edge signal. Confidence formula: `min(80, 55 + (gap / 0.5) * 10)%`.
 
 **Step 7b — Weather**
 ```
@@ -118,6 +118,17 @@ Total: {total} ({overOdds} / {underOdds}) — {book}
 
 ---
 
+### Sportsbooks
+
+Five books are tracked throughout the app: **DK** (DraftKings), **FD** (FanDuel), **CZR** (Caesars), **MGM** (BetMGM), **BOV** (Bovada).
+
+- **Sharp books:** DK, FD — lines move early with sharp money; trusted for true market price
+- **Square books:** CZR, MGM, BOV — slower to adjust; can lag behind by 0.5+ on player prop lines
+
+A gap ≥ 0.5 between sharp and square book lines is a **LINE INTELLIGENCE** signal. Formula: `min(80, 55 + (gap / 0.5) * 10)%`. Users can set a **preferred sportsbook** via Settings (gear icon in footer) — it surfaces first throughout the UI. Stored server-side in `users.preferences.preferredBook`.
+
+---
+
 ### Model Picks Tier System
 
 The Prop Scout UI surfaces an algorithmic scoring engine ("Model Picks") separate from the AI Daily Card. Understanding both helps you calibrate confidence:
@@ -129,7 +140,37 @@ The Prop Scout UI surfaces an algorithmic scoring engine ("Model Picks") separat
 
 **Daily Card (AI)** — analyzes all games holistically and selects 2–3 highest-value plays using market line context, umpire, NRFI tendency, and lineup confirmation.
 
-**Convergence signal:** when a pick appears in both Model Picks (HIGH or MEDIUM tier) and the Daily Card Official Card, treat this as a strong edge — two independent systems agree.
+**Convergence signal (✦ CARD AGREES badge):** when a pick appears in both Model Picks (HIGH or MEDIUM tier) and the Daily Card Official Card section, the `✦ CARD AGREES` badge is shown. Detection logic: last-name + market-type keyword match against the Official Card text block. Two independent systems agreeing = treat as a strong edge.
+
+**LINES section on Model Pick cards:** each card shows a multi-book line grid (DK / FD / CZR / MGM / BOV) from `/api/player-props`. Sharp books highlighted in white; square books in gray. If sharp-vs-square gap ≥ 0.5, an amber `EDGE` badge appears. The best available line (lowest over line) is surfaced automatically, with preferred book shown first if set.
+
+**Performance header:** a stats bar at the top of the Model view shows today's logged record (W-L-pending) and a rolling 7-day win rate from `propLog`. Computed at render time from `propLog` state — no API call needed.
+
+**Lineup polling:** unconfirmed lineups are re-polled every 3 minutes in the background so Model Picks auto-refresh when batting orders post. Pitchers (home + away) are also prefetched on slate load so the Games Board scoring is immediately available.
+
+---
+
+### Games Board — Game-Level Market Scoring
+
+The **🎲 Games** tab in the Board view scores every game on four game-level markets. Each market has its own sub-tab. All scores are 0–100 sorted descending: high = strong lean toward the "positive" side; low = strong lean toward the "negative" side.
+
+**`computeGameBoard(type, activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)`** — module-level function in `prop-scout-v7.jsx`. Called with the active `gameSubTab` value.
+
+#### NRFI (score > 50 = NRFI lean)
+Factors: home SP ERA (+12 max), away SP ERA (+12 max), park HR factor (±10), weather temp/wind (±8), umpire zone rating (±4), historical 1st-inning scoring pct (±10 if apiNrfi data present). Score clamped 28–82.
+
+#### O/U Total (score > 50 = OVER lean)
+Factors: away SP ERA (±12), home SP ERA (±12), combined WHIP (±8), park HR factor (±10), weather wind/temp (±10), market total line context (±5). Score clamped 30–78.
+
+#### Run Line / Spread (score > 50 = HOME covers -1.5 / score < 50 = AWAY covers +1.5)
+Factors: SP ERA differential (±15), WHIP differential (±6), home field baseline (+3), ML-implied probability vs model (±5). Score clamped 30–78.
+
+#### Moneyline (score > 50 = HOME lean)
+Factors: SP ERA matchup (±15), SP command WHIP (±6), home field advantage (+4), model vs market edge gap (±8), park factor nudge (±2). Score clamped 30–78.
+
+**Data requirements:** `livePitcherStats` (both home + away), `liveNrfiData`, `liveWeather`, `liveOddsMap`, `liveUmpires`. Away pitcher stats now prefetched at app mount alongside home pitchers.
+
+**Why? modal:** game type cards use pre-computed `c.factors[]` array. `generateWhyFactors()` detects game types and returns `c.factors` directly. `whyModal` extended to handle `lean` from game candidate object (not derived from score), and `leanLabel` field for the display string (e.g. `"LAD ML -145"`, `"UNDER 8.5"`).
 
 ---
 
@@ -193,13 +234,27 @@ RISK: [what could kill this prop — injury, lineup change, weather shift, TBD u
 
 ---
 
+## Recent Completions (CW — session log)
+
+The following were built in the CW Cowork session and are already live in `prop-scout-v7.jsx` and `backend/`:
+
+- **Bovada (BOV)** added as 5th sportsbook alongside DK/FD/CZR/MGM in all book arrays, `getBookLine`, LINE INTELLIGENCE square-books set, and `VALID_BOOKS` in `backend/routes/auth.js`
+- **Settings page** (`view === "settings"`) — ⚙ gear icon in footer, preferred sportsbook selector (5 books), saves to `PUT /api/auth/preferences`, clears on logout
+- **LINES section** on Model Pick cards — multi-book grid showing line + odds at each of 5 books, best line auto-highlighted, EDGE badge when sharp/square gap ≥ 0.5
+- **✦ CARD AGREES convergence badge** — purple badge on Model Pick cards when Daily Card Official Card text matches (last-name + market keyword)
+- **Lineup polling** — 3-minute `setInterval` re-polls unconfirmed lineups so Model Picks update without manual refresh
+- **Games tab in Board** — `🎲 Games` tab with 4 sub-tabs (NRFI / O/U Total / Run Line / Moneyline); `computeGameBoard()` module-level function; `gameSubTab` state; game cards with lean badge; Why? modal extended for game types; away pitcher background prefetch added to mount-time effect; sort by score descending
+- **API auth preferences endpoints** — `GET/PUT /api/auth/preferences` in `backend/routes/auth.js`
+
+---
+
 ## Codex Task Queue
 
 Tasks below are pre-scoped for Codex. Work them in order. Each task is self-contained.
 
 ---
 
-### CODEX TASK 1 — Daily Card Scheduled Pre-generation
+### ✅ CODEX TASK 1 — Daily Card Scheduled Pre-generation (COMPLETED)
 
 **Goal:** Run the Daily Card automatically on a schedule so it's always pre-built in the cache. The UI should never trigger a Claude call directly — it just fetches the cached result.
 
@@ -256,7 +311,7 @@ Mount this in `server.js`.
 
 ---
 
-### CODEX TASK 2 — Model Picks Tab (top-level nav)
+### ✅ CODEX TASK 2 — Model Picks Tab (top-level nav) (COMPLETED)
 
 **Goal:** Move the Model Picks full card out of the Board view and into its own dedicated top-level tab in the nav bar.
 
@@ -286,7 +341,7 @@ Mount this in `server.js`.
 
 ---
 
-### CODEX TASK 3 — Model Picks Performance Header
+### ✅ CODEX TASK 3 — Model Picks Performance Header (COMPLETED)
 
 **Goal:** Add a thin stats bar at the top of the MODEL view showing today's logged record and rolling win rate from the pick log.
 
@@ -328,3 +383,206 @@ Today: 2-1-3  |  L7: 67%  |  [pending count] pending
 - If no logs at all today: show `"No picks logged today"`
 
 Style: small monospace text, muted color for labels, white for numbers. Same visual language as the rest of the app.
+
+---
+
+### CODEX TASK 4 — Pick Outcome Auto-Grading
+
+**Goal:** Automatically grade logged picks as `won` or `lost` when the game goes final, instead of requiring manual grading. Eliminate "pending" limbo for all game-day picks.
+
+**Files to modify:**
+- `prop-scout-v7.jsx`
+- `backend/routes/boxscore.js` (may need a new endpoint or extend existing)
+
+**Current state:**
+- `propLog` is stored in `localStorage` under key `propScout_log`
+- Each entry: `{ label, propType, lean, confidence, gamePk, loggedAt, outcome, propLine }`
+- `outcome` starts as `"pending"` and can be manually toggled in the Pick Log view
+- `liveBoardResults[playerId]` already fetches boxscore K/outs/hits/HRs for Board cards
+
+**What to build:**
+
+1. **New backend endpoint: `GET /api/boxscore/:gamePk/summary`**
+   Returns a flat object with final box results keyed by player ID:
+   ```js
+   {
+     gamePk: 12345,
+     final: true,
+     players: {
+       "656302": { k: 7, outs: 18, h: 0, hr: 0, ab: 0 },  // pitcher
+       "592518": { h: 2, hr: 1, ab: 4 }                    // batter
+     }
+   }
+   ```
+   Source: `/api/boxscore/:gamePk` already returns `batting` and `pitching` arrays. This new route just flattens them. Cache 60 min for final games.
+
+2. **Auto-grade useEffect in `prop-scout-v7.jsx`**
+   Runs when `liveSlate` updates (on each slate refresh). For every `pending` pick in `propLog`:
+   - Find the game in `activeSlate` by `gamePk`
+   - If `game.status !== "Final"` and `game.status !== "Game Over"`, skip
+   - Fetch `/api/boxscore/:gamePk/summary` (cache result in a `useRef` map to avoid repeat fetches)
+   - Grade the pick:
+     - `propType === "K"`: won if `players[pick.playerId].k > pick.propLine`, lost if `<`, push if `===`
+     - `propType === "Outs"`: won if `players[pick.playerId].outs > pick.propLine * 3` (line in IP, outs in count)
+     - `propType === "NRFI"`: won if first-inning box score shows 0-0 after 1 inning (need `/api/linescore/:gamePk`)
+     - `propType === "HR"`, `"Hits"`, `"TB"`: grade from batter boxscore fields
+   - Update `propLog` entry: `outcome = "won"` or `"lost"`, `settledAt = ISO timestamp`
+   - Persist updated log to localStorage
+
+3. **`playerId` field on logged picks:**
+   Current picks don't always store `playerId`. When logging a pick from the Board or Model Picks, include the player/pitcher ID so the auto-grader can look them up in the boxscore summary. Add `playerId` to the `logPick()` call where the pick originates.
+
+**Constraints:**
+- Grading is frontend-only — no server-side pick storage in this task
+- Use a `useRef` set (`gradingFetched`) to prevent re-fetching already-graded games
+- `propLine` on NRFI picks is `null` — grade by linescore instead
+- Treat push (exact line hit) as `"push"` outcome — add to the outcome enum
+
+---
+
+### CODEX TASK 5 — Redis Persistent Cache (Backlog)
+
+**Goal:** Replace the in-memory `backend/services/cache.js` with a Redis-backed cache so the server can restart without losing pre-warmed data (odds, player props, boxscores, pitcher stats).
+
+**Files to modify:**
+- `backend/services/cache.js` — swap implementation
+- `backend/server.js` — add Redis client init
+- `.env.example` — add `REDIS_URL`
+
+**What to build:**
+
+1. **Update `cache.js`** to use `ioredis`. Keep the exact same interface (`get(key)`, `set(key, value, ttlMs)`, `del(key)`) so no call sites need to change.
+
+2. **Fallback:** if `REDIS_URL` is not set, fall back to the current in-memory Map implementation. This keeps local dev working without Redis.
+
+3. **Serialization:** Redis stores strings — JSON serialize/deserialize values on `get`/`set`. Store TTL as Redis `PX` option (milliseconds).
+
+4. **Key prefix:** prefix all keys with `propscout:` to namespace cleanly: `propscout:odds`, `propscout:player-props:12345`, etc.
+
+**Install:** `npm install ioredis` in `backend/`.
+
+**Constraints:**
+- Do not change any TTL values — cache durations stay the same
+- The in-memory fallback must be drop-in compatible (same function signatures)
+- Add `REDIS_URL=redis://localhost:6379` to `.env.example`
+
+---
+
+### CODEX TASK 6 — AI Search Chat in Help Overlay (Backlog)
+
+**Goal:** Add an AI-powered chat input at the top of the Help overlay so users can ask plain-language questions about the app and get instant answers scoped to its features.
+
+**Example queries:**
+- "what does LINE INTELLIGENCE mean?"
+- "how does the NRFI score get calculated?"
+- "when does the ✦ CARD AGREES badge appear?"
+- "what's the difference between the Board and Model Picks?"
+
+---
+
+**Backend — new endpoint: `POST /api/help-chat`**
+
+File to create: `backend/routes/helpChat.js`
+Mount in `server.js`: `app.use("/api/help-chat", require("./routes/helpChat"))`
+
+```js
+// POST /api/help-chat
+// Body: { question: string }
+// Returns: { answer: string }
+```
+
+1. Build a condensed `HELP_CONTEXT` string (hardcoded in the route file) covering all major features: Slate card fields, Board tabs + scoring, Games tab markets, Model Picks tiers + LINES + CARD AGREES, LINE INTELLIGENCE formula, Settings/preferred book, Intel tab (umpire, NRFI, bullpen, odds), prop types, stat glossary key terms.
+
+2. Call Claude via `@anthropic-ai/sdk` with a tight system prompt:
+   ```
+   You are a helpful assistant for the Prop Scout MLB betting research app.
+   Answer the user's question using only the context below. Be concise (2–4 sentences max).
+   If the question is not covered by the context, say so briefly.
+   Never make up statistics or features not described in the context.
+   ```
+
+3. Rate-limit: max 20 calls/day (shared counter in memory, same pattern as `dailyCard.js`). Return `{ error: "daily limit reached" }` with 429 if exceeded.
+
+4. Cache responses: `cache.set(\`help:\${hash(question.toLowerCase().trim())}\`, answer, 60 * 60 * 1000)` — 1 hour TTL. Use Node's built-in `crypto.createHash("md5")` for the hash.
+
+5. requireAuth middleware — same as other protected routes.
+
+---
+
+**Frontend — chat UI in Help overlay (`prop-scout-v7.jsx`)**
+
+Add a chat section at the very top of the help content area (above the first `<Section>`):
+
+1. **State:** `const [helpQ, setHelpQ] = useState(""); const [helpA, setHelpA] = useState(null); const [helpLoading, setHelpLoading] = useState(false);`
+   — these are component-level state variables (not inside the IIFE).
+
+2. **UI:** a dark rounded input row with a placeholder `"Ask anything about the app…"` and a `→` submit button. Below it, when `helpA` is set, a card showing the answer with a purple left border. Show a spinner while loading.
+
+3. **Submit handler:** `apiMutate("/api/help-chat", "POST", { question: helpQ })` → set `helpA` from response.
+
+4. **Suggested questions** (shown when `helpA` is null): 3–4 small chip buttons the user can tap to pre-fill the input:
+   - "How does LINE INTELLIGENCE work?"
+   - "What is the ✦ CARD AGREES badge?"
+   - "How is the NRFI score calculated?"
+   - "What's the difference between Board and Model Picks?"
+
+5. **Clear button:** small `✕` next to the answer card to reset `helpA` and `helpQ`.
+
+**Visual language:** same dark card style as the rest of the overlay. Input uses the same `background: "#1a1c2e", border: "1px solid #2d3148"` pattern. Answer card has `borderLeft: "3px solid #818cf8"` (purple). Loading state shows a subtle `…` animated text.
+
+**Constraints:**
+- `helpQ`, `helpA`, `helpLoading` must be component-level state — NOT declared inside the help overlay IIFE (that would cause the React hooks error)
+- Clear `helpA` and `helpQ` when the help overlay is closed (`setShowHelp(false)`)
+- The chat section sits above the Section components but inside the `<div style={{ padding: "16px 14px"... }}>` wrapper
+
+---
+
+### CODEX TASK 7 — Book Filter on Props Tab (Backlog)
+
+**Goal:** Add a book filter control to the Props tab so users can narrow the multi-book comparison grid to one or more specific sportsbooks. Defaults to the user's preferred book if one is set.
+
+**File to modify:** `prop-scout-v7.jsx`
+
+**Current state:**
+- The Props tab shows a multi-book grid (DK / FD / CZR / MGM / BOV) for every player prop line
+- `preferredBook` state exists (string or null) — loaded from server on login/app start
+- The grid renders all books present in `activeBooks` (books that have at least one line for that game)
+- No filter control exists — all books always shown
+
+**What to build:**
+
+1. **New state:** `const [propsBookFilter, setPropsBookFilter] = useState(null);`
+   — `null` = show all books; `"DK"` etc. = show only that book. Component-level state (not inside an IIFE).
+
+2. **Initialize from preference:** in the same `useEffect` that loads `preferredBook` from `/api/auth/preferences`, also set `setPropsBookFilter(d.preferences?.preferredBook ?? null)`. This way the filter defaults to their saved book on every load.
+
+3. **Filter chip row** — render above the props grid, only when `tab === "props"` and props data is loaded. A horizontal scrollable row of book chips:
+   ```
+   [ALL]  [DK]  [FD]  [CZR]  [MGM]  [BOV]
+   ```
+   - `ALL` chip: selected when `propsBookFilter === null`. Clicking sets filter to `null`.
+   - Book chips: selected when `propsBookFilter === bk`. Clicking the active chip deselects (sets `null`); clicking another selects it.
+   - Only show chips for books that actually have data for the current game's props (use the same `activeBooks` array already computed in the props rendering block).
+   - Active chip style: `background: "rgba(251,191,36,0.18)", border: "1px solid #fbbf24", color: "#fbbf24"`. Inactive: `background: "#1a1c2e", border: "1px solid #2d3148", color: "#6b7280"`.
+   - If `preferredBook` is set, add a subtle star (★) on that book's chip label so the user knows it's their saved preference.
+
+4. **Apply filter to the grid:** in the props grid rendering block, where `activeBooks` is used to render column headers and cells, replace:
+   ```js
+   const activeBooks = BOOKS.filter(bk => rows.some(p => p.books?.[bk]));
+   ```
+   with:
+   ```js
+   const allActiveBooks = BOOKS.filter(bk => rows.some(p => p.books?.[bk]));
+   const activeBooks = propsBookFilter && allActiveBooks.includes(propsBookFilter)
+     ? [propsBookFilter]
+     : allActiveBooks;
+   ```
+   This filters the displayed columns while keeping the underlying data intact.
+
+5. **LINE INTELLIGENCE still works:** the gap calculation uses all books regardless of the filter — don't gate it on `propsBookFilter`. The EDGE badge should still appear based on full sharp/square comparison even when only one book's column is visible.
+
+**Constraints:**
+- `propsBookFilter` is component-level state — not inside any IIFE or render function
+- Resetting the filter (tap ALL) always falls back to showing all available books for that game
+- Do not change any prop fetching logic, TTLs, or the `activeBooks` variable used outside the filter scope
+- The filter chip row should not appear on other tabs (Intel, Overview, Lineup, etc.) — only on `tab === "props"`

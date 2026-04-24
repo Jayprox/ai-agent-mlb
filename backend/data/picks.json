@@ -132,6 +132,25 @@
       "playerName": null,
       "result": null,
       "userId": "user10"
+    },
+    {
+      "id": "1777000676542_v19j1",
+      "timestamp": "2026-04-24T03:17:56.542Z",
+      "date": "Apr 23",
+      "game": "ATL @ WSH",
+      "gamePk": 822745,
+      "label": "JR Ritchie Outs OVER 14.5",
+      "lean": "OVER",
+      "confidence": 78,
+      "propType": "Outs",
+      "homeTeam": "WSH",
+      "awayTeam": "ATL",
+      "pitcherId": 676917,
+      "pitcherName": "Cade Cavalli",
+      "playerId": null,
+      "playerName": null,
+      "result": null,
+      "userId": "user10"
     }
   ]
 }
