@@ -771,3 +771,122 @@ const topSlatePicks = preferredBook
 - Do NOT change `highPicks`, `mediumPicks`, `specPicks` — they filter `topSlatePicks` by tier and will automatically reflect the book filter
 - If `preferredBook` is null (no preference set), behavior is identical to today — all picks shown
 - If odds haven't loaded yet for a game, the pick stays visible — only hide when the prop is confirmed posted at other books but missing at the preferred book
+
+---
+
+### CODEX TASK 12 — Fix Duplicate Pick Logging + Stuck Pending Grades (Bug Fix)
+
+**File to modify:** `prop-scout-v7.jsx`
+
+**Three bugs, three targeted fixes:**
+
+---
+
+**Fix 1 — Duplicate logging (line ~3776)**
+
+`logPick` has no dedup guard. Some call sites use `!logged && logPick(...)` but `isLogged` can silently fail when `selectedId` changes between renders. The fix belongs inside `logPick` itself.
+
+Add this check at the TOP of `logPick`, before the entry object is constructed:
+```js
+const alreadyLogged = propLog.some(p =>
+  String(p.gamePk) === String(prop.gamePk ?? selectedId) &&
+  p.label === prop.label &&
+  p.date === new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
+);
+if (alreadyLogged) return;
+```
+
+---
+
+**Fix 2 — Outs and Strikeouts grades stuck pending (line ~3896)**
+
+Root cause: When a Model Pick is logged, the label is constructed as `"Nick Martinez Outs OVER 14.5"` (line ~4054) using the word `OVER`. But `computeGrade` matches Outs props using `label.includes("O/U")` — which never matches `OVER`. Result: grade always returns `null`, pick stays pending forever.
+
+**Fix the Outs branch** (around line 3896):
+```js
+// BEFORE:
+if (label.includes("OUTS") && label.includes("O/U")) {
+
+// AFTER:
+if (label.includes("OUTS") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER"))) {
+```
+
+**Fix the Strikeouts branch** (around line 3874):
+```js
+// BEFORE:
+if (label.includes("K'S") || label.includes("STRIKEOUT") || (label.includes(" K ") && label.includes("O/U"))) {
+
+// AFTER:
+if (label.includes("K'S") || label.includes("STRIKEOUT") || (label.includes(" K ") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
+```
+
+---
+
+**Fix 3 — `gradedGames` blocks retry when grading fails (line ~3309)**
+
+`gradedGames.current.add(gamePk)` fires unconditionally — even when every `computeGrade` call returns `null` (unresolvable). This permanently blacklists the game from retry, so any picks that failed to grade stay pending forever.
+
+Fix: only add to `gradedGames` when at least one pick was successfully graded.
+
+**Replace** the grading block (around line 3309–3313):
+```js
+// BEFORE:
+gradedGames.current.add(gamePk);
+pendingPicks.forEach(pick => {
+  const grade = computeGrade(pick, box);
+  if (grade !== null) markResult(pick.id, grade);
+});
+
+// AFTER:
+let anyGraded = false;
+pendingPicks.forEach(pick => {
+  const grade = computeGrade(pick, box);
+  if (grade !== null) {
+    markResult(pick.id, grade);
+    anyGraded = true;
+  }
+});
+if (anyGraded) gradedGames.current.add(gamePk);
+```
+
+---
+
+---
+
+**Fix 4 — Show actual stat result on pitcher board cards (K and Outs tabs)**
+
+Batter cards already show the count (`✓ HIT ×2`, `⚾ HR ×2`). Pitcher cards only show `✓ HIT` / `✗ MISS` with no number. Update them to show the actual stat.
+
+Find the pitcher HIT/MISS badges in the pitcher card render block (around line 7663–7668):
+
+```jsx
+// BEFORE:
+{hasResolvedResult && pitcherHit && (
+  <span ...>✓ HIT</span>
+)}
+{hasResolvedResult && !pitcherHit && (
+  <span ...>✗ MISS</span>
+)}
+
+// AFTER:
+{hasResolvedResult && pitcherHit && (
+  <span ...>
+    ✓ {boardTab === "k" ? `${todayResult.k}K` : `${todayResult.outs} outs`}
+  </span>
+)}
+{hasResolvedResult && !pitcherHit && (
+  <span ...>
+    ✗ {boardTab === "k" ? `${todayResult.k}K` : `${todayResult.outs} outs`}
+  </span>
+)}
+```
+
+Keep all existing styles on the badges unchanged — only replace the text content.
+
+---
+
+**Constraints:**
+- Do not change `computeGrade`'s signature or any other prop type branches (NRFI, YRFI, Game Total, F5, Run Line) — only fix the Outs and Strikeouts label matching
+- Do not change `markResult`, `deletePick`, or `isLogged`
+- Do not touch any backend routes or API calls
+- All four fixes are independent — implement all four in a single pass

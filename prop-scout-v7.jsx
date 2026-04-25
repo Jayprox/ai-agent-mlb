@@ -3306,11 +3306,15 @@ export default function App() {
         return;
       }
 
-      gradedGames.current.add(gamePk);
+      let anyGraded = false;
       pendingPicks.forEach(pick => {
         const grade = computeGrade(pick, box);
-        if (grade !== null) markResult(pick.id, grade);
+        if (grade !== null) {
+          markResult(pick.id, grade);
+          anyGraded = true;
+        }
       });
+      if (anyGraded) gradedGames.current.add(gamePk);
     });
   }, [liveSlate, liveScores, liveBoxscores, propLog]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -3774,6 +3778,13 @@ export default function App() {
 
   // ── Pick tracker helpers ──────────────────────────────────────────────────
   const logPick = (prop) => {
+    const alreadyLogged = propLog.some(p =>
+      String(p.gamePk) === String(prop.gamePk ?? selectedId) &&
+      p.label === prop.label &&
+      p.date === new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
+    );
+    if (alreadyLogged) return;
+
     const isBatterProp = prop.propType === "Hits" || prop.propType === "TB" || prop.propType === "HR" || prop.propType === "RBI"; // F5 is a game prop, not batter-specific
     const entry = {
       id:          `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -3871,7 +3882,7 @@ export default function App() {
     }
 
     // Pitcher Strikeouts — "Wheeler K's O/U 7.5" or "Pitcher Strikeouts O/U"
-    if (label.includes("K'S") || label.includes("STRIKEOUT") || (label.includes(" K ") && label.includes("O/U"))) {
+    if (label.includes("K'S") || label.includes("STRIKEOUT") || (label.includes(" K ") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
       const m = label.match(/(\d+\.?\d*)/);
       if (!m) return null;
       const line = parseFloat(m[1]);
@@ -3893,7 +3904,7 @@ export default function App() {
     }
 
     // Pitcher Outs recorded
-    if (label.includes("OUTS") && label.includes("O/U")) {
+    if (label.includes("OUTS") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER"))) {
       const m = label.match(/(\d+\.?\d*)/);
       if (!m) return null;
       const line = parseFloat(m[1]);
@@ -7661,10 +7672,14 @@ export default function App() {
                               </div>
                             )}
                             {hasResolvedResult && pitcherHit && (
-                              <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>✓ HIT</span>
+                              <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>
+                                ✓ {boardTab === "k" ? `${todayResult.k}K` : `${todayResult.outs} outs`}
+                              </span>
                             )}
                             {hasResolvedResult && !pitcherHit && (
-                              <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>✗ MISS</span>
+                              <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>
+                                ✗ {boardTab === "k" ? `${todayResult.k}K` : `${todayResult.outs} outs`}
+                              </span>
                             )}
                             {c.umpireRating === "pitcher" && boardTab === "k" && (
                               <span style={{ fontSize: 8, fontWeight: 700, color: "#a78bfa", background: "rgba(167,139,250,0.12)", borderRadius: 4, padding: "1px 5px" }}>⚖ UMP+K</span>
