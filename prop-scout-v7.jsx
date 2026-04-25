@@ -241,99 +241,6 @@ const buildTrendsContext = (game, odds, parkFactors) => {
   return lines.filter(Boolean).join("\n");
 };
 
-// Build structured context string for the AI Props engine
-// playerProps: array from /api/player-props (real sportsbook lines), or null
-const buildPropsContext = (game, odds, parkFactors, playerProps = null) => {
-  const lines = [];
-  lines.push(`Game: ${game.away.abbr} @ ${game.home.abbr} at ${game.stadium ?? "Unknown Stadium"}`);
-
-  const spLine = (p, side) => {
-    if (!p) return null;
-    let s = `${side} SP: ${p.name} (${p.hand ?? "?"}HP) — ERA ${p.era ?? "—"}, WHIP ${p.whip ?? "—"}, K/9 ${p.k9 ?? "—"}, BB/9 ${p.bb9 ?? "—"}, avgIP ${p.avgIP ?? "—"}`;
-    if (p.arsenal?.length > 0) {
-      const pitches = p.arsenal.slice(0, 3).map(a =>
-        `${a.type ?? a.abbr} ${a.pct != null ? Math.round(a.pct) + "%" : ""} whiff ${a.whiffPct ?? "?"}%`
-      ).join(", ");
-      s += ` | Arsenal: ${pitches}`;
-    }
-    return s;
-  };
-  if (spLine(game.awayPitcher, "Away")) lines.push(spLine(game.awayPitcher, "Away"));
-  if (spLine(game.pitcher,     "Home")) lines.push(spLine(game.pitcher,     "Home"));
-
-  if (game.weather) {
-    const w = game.weather;
-    lines.push(w.roof
-      ? "Weather: Dome — controlled environment"
-      : `Weather: ${w.temp ?? "?"}°F, ${w.wind ?? "calm"}, ${w.condition ?? ""}${w.hrFavorable ? " — HR-favorable wind" : ""}${w.rainChance && w.rainChance !== "N/A" ? `, ${w.rainChance} rain chance` : ""}`
-    );
-  }
-
-  if (game.umpire?.name && game.umpire.name !== "TBD") {
-    const u = game.umpire;
-    const parts = [`Umpire: ${u.name}`];
-    if (u.kRate)    parts.push(`K Rate ${u.kRate}`);
-    if (u.bbRate)   parts.push(`BB Rate ${u.bbRate}`);
-    if (u.tendency) parts.push(u.tendency);
-    lines.push(parts.join(" — "));
-  }
-
-  const bpLine = (b, side, abbr) => {
-    if (!b) return null;
-    const top = b.relievers?.slice(0, 3).map(r =>
-      `${r.name} (${r.pitches ?? r.pitchesLast3 ?? 0}pc/${r.lastApp ?? "?"})`
-    ).join(", ");
-    return `${side} Bullpen (${abbr}): Grade ${b.grade ?? "?"} — ${b.fatigueLevel ?? "?"} fatigue, ${b.pitchesLast3 ?? "?"}pc last 3d${top ? ` | Top arms: ${top}` : ""}`;
-  };
-  if (bpLine(game.bullpen?.away, "Away", game.away.abbr)) lines.push(bpLine(game.bullpen.away, "Away", game.away.abbr));
-  if (bpLine(game.bullpen?.home, "Home", game.home.abbr)) lines.push(bpLine(game.bullpen.home, "Home", game.home.abbr));
-
-  if (game.nrfi?.lean) {
-    const n = game.nrfi;
-    lines.push(`First Inning: ${n.lean} at ${n.confidence ?? "?"}% confidence — ${game.away.abbr} scores 1st inn ${n.awayFirst?.scoredPct ?? "?"}, ${game.home.abbr} scores 1st inn ${n.homeFirst?.scoredPct ?? "?"}`);
-  }
-
-  const awayLineup = game.lineups?.away ?? [];
-  const homeLineup = game.lineups?.home ?? [];
-  if (awayLineup.length >= 3) {
-    const R = awayLineup.filter(b => b.hand === "R").length;
-    const L = awayLineup.filter(b => b.hand === "L").length;
-    lines.push(`${game.away.abbr} lineup vs ${game.pitcher?.hand ?? "?"}HP: ${R} RHB / ${L} LHB`);
-  }
-  if (homeLineup.length >= 3) {
-    const R = homeLineup.filter(b => b.hand === "R").length;
-    const L = homeLineup.filter(b => b.hand === "L").length;
-    lines.push(`${game.home.abbr} lineup vs ${game.awayPitcher?.hand ?? "?"}HP: ${R} RHB / ${L} LHB`);
-  }
-
-  if (odds?.total) {
-    const ml = odds.awayML && odds.homeML ? ` | ML: ${game.away.abbr} ${odds.awayML} / ${game.home.abbr} ${odds.homeML}` : "";
-    const rl = odds.awaySpread ? ` | RL: ${game.away.abbr} ${odds.awaySpread}(${odds.awaySpreadOdds ?? "?"})` : "";
-    lines.push(`Odds: O/U ${odds.total}${ml}${rl}`);
-  }
-
-  const pf = parkFactors?.[game.home?.abbr];
-  if (pf) lines.push(`Park: ${game.stadium} — ${pf.label} (HR ${pf.hr}x, Hit ${pf.hit}x)`);
-
-  // Inject real sportsbook lines when available — AI anchors against actual market prices
-  if (playerProps?.length) {
-    const fmtLine = (p) => {
-      const o = p.overOdds  ?? "?";
-      const u = p.underOdds ?? "?";
-      return `${p.player} ${p.marketLabel} O/U ${p.line} (O:${o}/U:${u} ${p.book})`;
-    };
-    const kLines  = playerProps.filter(p => p.market === "pitcher_strikeouts").map(fmtLine).join(", ");
-    const tbLines = playerProps.filter(p => p.market === "batter_total_bases").map(fmtLine).join(", ");
-    const hLines  = playerProps.filter(p => p.market === "batter_hits").map(fmtLine).join(", ");
-    if (kLines)  lines.push(`Market K lines: ${kLines}`);
-    if (tbLines) lines.push(`Market TB lines: ${tbLines}`);
-    if (hLines)  lines.push(`Market Hits lines: ${hLines}`);
-  }
-
-  lines.push("\nGenerate 3–5 prop recommendations as a JSON array. Return ONLY the JSON array, no other text.");
-  return lines.filter(Boolean).join("\n");
-};
-
 // ─────────────────────────────────────────────────────────────
 // PLAYER PROPS — routed through backend (shared server-side 10-min cache)
 // Passes the Odds API eventId (from oddsCache) to the backend so it can skip
@@ -2880,6 +2787,7 @@ export default function App() {
   const [loginLoading, setLoginLoading] = useState(false);
 
   const [preferredBook,    setPreferredBook]    = useState(null); // "DK"|"FD"|"CZR"|"MGM"|"BOV"|null
+  const [propsBookFilter,  setPropsBookFilter]  = useState("ALL");
   const [prefSaving,       setPrefSaving]       = useState(false);
   const [prefSaveMsg,      setPrefSaveMsg]      = useState("");
 
@@ -2889,6 +2797,12 @@ export default function App() {
   const [whyModal, setWhyModal] = useState(null); // { c, type: boardTab, rank }
   const [picksFilter, setPicksFilter] = useState("all"); // "all" | "pending" | "hit" | "miss"
   const [showTrends, setShowTrends] = useState(true);   // collapse/expand Trends card in Picks view
+  const [collapsedMarkets, setCollapsedMarkets] = useState({
+    pitcher_strikeouts: true,
+    batter_home_runs: true,
+    batter_total_bases: true,
+    batter_hits: true,
+  });
   const [liveDigest, setLiveDigest] = useState(null);   // { period, total, hits, misses, pct, bestHit, worstMiss, byType }
   const [digestLoading, setDigestLoading] = useState(false);
   const [showDigest, setShowDigest] = useState(true);   // collapse/expand 7-day digest card
@@ -2936,8 +2850,6 @@ export default function App() {
   const [gameNotes,    setGameNotes]    = useState({});     // gamePk → note string
   const [liveTrends,   setLiveTrends]   = useState({});     // gamePk → summary string | "loading" | null
   const trendsFetched  = useRef(new Set());                  // tracks gamePks already fetched (avoids stale-closure re-fetch)
-  const [liveAiProps,    setLiveAiProps]    = useState({});  // gamePk → [...props] | "loading" | null
-  const aiPropsFetched   = useRef(new Set());                 // guards against stale-closure re-fetch
   const [livePlayerProps, setLivePlayerProps] = useState({}); // gamePk → { props: [] } | "loading" | null
   const [dailyCard,      setDailyCard]      = useState(null);  // null | "loading" | { card, date, gamesAnalyzed, cap, ... }
   const [dailyCardOpen,  setDailyCardOpen]  = useState(false); // controls panel visibility
@@ -3072,43 +2984,6 @@ export default function App() {
       });
   }, [view, selectedId, tab]);
 
-  // Fetch AI Props when Props tab opens — waits for sportsbook lines so they can be included in context
-  // livePlayerProps in dependency array: re-fires when lines load, ref blocks duplicate AI calls
-  useEffect(() => {
-    if (IS_STATS_SANDBOX) return;
-    if (view !== "game" || !selectedId || tab !== "props") return;
-    const key = String(selectedId);
-
-    // Wait for player props to resolve before building context (skip wait in sandbox)
-    const ppState = livePlayerProps[key];
-    const ppReady = IS_ODDS_SANDBOX || (ppState !== undefined && ppState !== "loading" && typeof ppState === "object");
-    if (!ppReady) return;
-
-    if (aiPropsFetched.current.has(key)) return;
-
-    const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
-    if (!game) return;
-
-    aiPropsFetched.current.add(key);
-    const odds           = getGameOdds(game);
-    const playerLines    = Array.isArray(ppState?.props) ? ppState.props : null;
-    const context        = buildPropsContext(game, odds, PARK_FACTORS, playerLines);
-
-    setLiveAiProps(prev => ({ ...prev, [key]: "loading" }));
-    apiMutate(`/api/props/${key}`, "POST", { context })
-      .then(d => {
-        const props = Array.isArray(d?.props) ? d.props : null;
-        // Store full response so searchUsed flag is preserved alongside props
-        const result = props ? { props, searchUsed: d.searchUsed ?? false } : null;
-        setLiveAiProps(prev => ({ ...prev, [key]: result }));
-        if (!props || props.length === 0) aiPropsFetched.current.delete(key); // allow retry
-      })
-      .catch(() => {
-        aiPropsFetched.current.delete(key);
-        setLiveAiProps(prev => ({ ...prev, [key]: null }));
-      });
-  }, [view, selectedId, tab, livePlayerProps]);
-
   // Pre-fetch all data needed by the Board + Model views when opened
   useEffect(() => {
     if (view !== "board" && view !== "model") return;
@@ -3199,7 +3074,11 @@ export default function App() {
   useEffect(() => {
     if (!authToken) return;
     apiFetch("/api/auth/preferences")
-      .then(d => setPreferredBook(d.preferences?.preferredBook ?? null))
+      .then(d => {
+        const nextBook = d.preferences?.preferredBook ?? null;
+        setPreferredBook(nextBook);
+        setPropsBookFilter(nextBook ?? "ALL");
+      })
       .catch(() => {});
   }, [authToken]);
 
@@ -3228,7 +3107,11 @@ export default function App() {
       setLoginPass("");
       // Load preferences after login
       apiFetch("/api/auth/preferences")
-        .then(d => setPreferredBook(d.preferences?.preferredBook ?? null))
+        .then(d => {
+          const nextBook = d.preferences?.preferredBook ?? null;
+          setPreferredBook(nextBook);
+          setPropsBookFilter(nextBook ?? "ALL");
+        })
         .catch(() => {});
     } catch (err) {
       setLoginError(err.message === "Unauthorized" || err.message?.includes("401")
@@ -3244,10 +3127,13 @@ export default function App() {
     setAuthToken(null);
     setCurrentUser(null);
     setPreferredBook(null);
+    setPropsBookFilter("ALL");
     setPropLog([]);
     setLiveDigest(null);
     setView("slate");
   };
+
+  const toggleMarket = (mKey) => setCollapsedMarkets(prev => ({ ...prev, [mKey]: !prev[mKey] }));
 
   // Fetch 7-day digest when Picks view opens (lazy — only if not already loaded)
   useEffect(() => {
@@ -3326,6 +3212,16 @@ export default function App() {
     const id = setInterval(pollUnconfirmed, 3 * 60 * 1000);
     return () => clearInterval(id);
   }, [liveSlate, liveLineups]);
+
+  // Auto-refresh odds every 10 minutes so Games board and Model Picks stay current
+  useEffect(() => {
+    if (IS_ODDS_SANDBOX || !liveSlate?.length) return;
+    const id = setInterval(async () => {
+      const result = await fetchOdds(true);
+      if (result?.data) setLiveOddsMap(result.data);
+    }, 10 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [liveSlate]);
 
   // Poll linescore every 60s for all in-progress games
   useEffect(() => {
@@ -6196,8 +6092,11 @@ export default function App() {
                 const hasData   = allProps.length > 0;
                 const propReason = spState?.reason ?? null; // "ok" | "no_props" | "no_event" | null
 
-                const BOOKS      = ["DK", "FD", "CZR", "MGM", "BOV"];
-                const BOOK_COLORS = { DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa" };
+                const ALL_BOOKS  = ["DK", "FD", "CZR", "MGM", "BOV"];
+                const BOOKS      = propsBookFilter === "ALL"
+                  ? ALL_BOOKS
+                  : ALL_BOOKS.filter(b => b === propsBookFilter);
+                const BOOK_COLORS = { DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa", BOV: "#f87171" };
 
                 const grouped = {
                   pitcher_strikeouts: allProps.filter(p => p.market === "pitcher_strikeouts"),
@@ -6210,6 +6109,29 @@ export default function App() {
 
                 return (
                   <>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+                      {["ALL", "DK", "FD", "CZR", "MGM", "BOV"].map(bk => {
+                        const active = propsBookFilter === bk;
+                        return (
+                          <button
+                            key={bk}
+                            onClick={() => setPropsBookFilter(bk)}
+                            style={{
+                              fontSize: 9,
+                              fontWeight: 700,
+                              padding: "3px 8px",
+                              borderRadius: 6,
+                              cursor: "pointer",
+                              background: active ? "rgba(139,92,246,0.25)" : "rgba(255,255,255,0.04)",
+                              border: `1px solid ${active ? "rgba(139,92,246,0.6)" : "rgba(255,255,255,0.08)"}`,
+                              color: active ? "#c4b5fd" : "#6b7280",
+                            }}
+                          >
+                            {bk}{bk === preferredBook ? " ★" : ""}
+                          </button>
+                        );
+                      })}
+                    </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, marginBottom: 8 }}>
                       <SLabel style={{ marginBottom: 0 }}>Sportsbook Lines</SLabel>
                       {hasData && <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>}
@@ -6270,14 +6192,19 @@ export default function App() {
                         ].map(({ mKey, label, badge, color }) => {
                           const rows = grouped[mKey];
                           if (!rows?.length) return null;
+                          const isCollapsed = !!collapsedMarkets[mKey];
 
-                          // Which books have at least one line in this market group?
+                          // Keep scoring/best-line logic on the full book set; chips only hide visible columns.
+                          const allActiveBooks = ALL_BOOKS.filter(bk => rows.some(p => p.books?.[bk]));
                           const activeBooks = BOOKS.filter(bk => rows.some(p => p.books?.[bk]));
 
                           return (
                             <Card key={mKey} style={{ padding: "0", marginBottom: 10, overflow: "hidden" }}>
                               {/* Market header */}
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px 6px", borderBottom: "1px solid #1f2437" }}>
+                              <div
+                                onClick={() => toggleMarket(mKey)}
+                                style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px 6px", borderBottom: "1px solid #1f2437", cursor: "pointer" }}
+                              >
                                 <span style={{ fontSize: 8, fontWeight: 700, color, background: `${color}1a`, border: `1px solid ${color}40`, borderRadius: 4, padding: "1px 5px" }}>{badge}</span>
                                 <span style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", flex: 1 }}>{label}</span>
                                 {/* Active book legend for this market */}
@@ -6286,18 +6213,21 @@ export default function App() {
                                     <span key={bk} style={{ fontSize: 7, fontWeight: 700, color: BOOK_COLORS[bk], background: `${BOOK_COLORS[bk]}18`, border: `1px solid ${BOOK_COLORS[bk]}40`, borderRadius: 3, padding: "1px 4px" }}>{bk}</span>
                                   ))}
                                 </div>
+                                <span style={{ fontSize: 10, color: "#6b7280", marginLeft: 6 }}>{isCollapsed ? "▶" : "▼"}</span>
                               </div>
 
-                              {/* Column header row */}
-                              <div style={{ display: "grid", gridTemplateColumns: `1fr ${activeBooks.map(() => "52px").join(" ")}`, gap: 0, padding: "4px 10px", background: "#0e0f1a" }}>
-                                <div style={{ fontSize: 7, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.05em" }}>Player</div>
-                                {activeBooks.map(bk => (
-                                  <div key={bk} style={{ fontSize: 7, fontWeight: 700, color: BOOK_COLORS[bk], textAlign: "center" }}>{bk}</div>
-                                ))}
-                              </div>
+                              {!isCollapsed && (
+                                <>
+                                  {/* Column header row */}
+                                  <div style={{ display: "grid", gridTemplateColumns: `1fr ${activeBooks.map(() => "52px").join(" ")}`, gap: 0, padding: "4px 10px", background: "#0e0f1a" }}>
+                                    <div style={{ fontSize: 7, color: "#4b5563", textTransform: "uppercase", letterSpacing: "0.05em" }}>Player</div>
+                                    {activeBooks.map(bk => (
+                                      <div key={bk} style={{ fontSize: 7, fontWeight: 700, color: BOOK_COLORS[bk], textAlign: "center" }}>{bk}</div>
+                                    ))}
+                                  </div>
 
-                              {/* Player rows */}
-                              {rows.map((p, i) => {
+                                  {/* Player rows */}
+                                  {rows.map((p, i) => {
                                 const books          = p.books ?? {};
                                 const rowKey         = `${mKey}:${p.player}`;
                                 const isExpanded     = expandedPropRow === rowKey;
@@ -6310,7 +6240,7 @@ export default function App() {
                                 const underLogged    = isLogged(underPick);
 
                                 // Line discrepancy detection
-                                const availLines     = activeBooks.map(bk => books[bk]?.line).filter(Boolean);
+                                const availLines     = allActiveBooks.map(bk => books[bk]?.line).filter(Boolean);
                                 const uniqueLines    = [...new Set(availLines)];
                                 const hasDiscrepancy = uniqueLines.length > 1;
                                 const lowestLine     = hasDiscrepancy ? Math.min(...uniqueLines) : null;
@@ -6339,7 +6269,7 @@ export default function App() {
                                   : "#fbbf24";
 
                                 // Best over odds among all books
-                                const bestOverOdds = activeBooks
+                                const bestOverOdds = allActiveBooks
                                   .map(bk => books[bk]?.overOdds)
                                   .filter(Boolean)
                                   .sort((a, b) => parseInt(b) - parseInt(a))[0] ?? null;
@@ -6452,7 +6382,9 @@ export default function App() {
                                     )}
                                   </div>
                                 );
-                              })}
+                                  })}
+                                </>
+                              )}
                             </Card>
                           );
                         })}
@@ -6462,61 +6394,6 @@ export default function App() {
                 );
               })()}
 
-              {/* ── AI ANALYSIS section ───────────────────────── */}
-              {!IS_STATS_SANDBOX && (() => {
-                const aiKey    = String(selectedId);
-                const aiState  = liveAiProps[aiKey];
-                if (aiState === null) return null; // silent failure — don't show anything
-                // aiState is { props: [...], searchUsed: bool } | "loading" | null
-                const aiProps    = Array.isArray(aiState?.props) ? aiState.props : [];
-                const searchUsed = aiState?.searchUsed === true;
-                return (
-                  <>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, marginBottom: 8 }}>
-                      <SLabel style={{ marginBottom: 0 }}>AI Analysis</SLabel>
-                      <span style={{ fontSize: 8, fontWeight: 700, color: "#a78bfa", background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 4, padding: "2px 6px" }}>AI</span>
-                      {searchUsed && <span style={{ fontSize: 8, fontWeight: 700, color: "#38bdf8", background: "rgba(56,189,248,0.12)", border: "1px solid rgba(56,189,248,0.3)", borderRadius: 4, padding: "2px 6px" }}>WEB</span>}
-                    </div>
-
-                    {aiState === "loading" ? (
-                      <Card>
-                        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0" }}>
-                          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#a78bfa", flexShrink: 0, animation: "pulse 1.5s ease-in-out infinite" }} />
-                          <span style={{ fontSize: 12, color: "#6b7280" }}>Analyzing game data…</span>
-                        </div>
-                      </Card>
-                    ) : aiProps.map((p, i) => {
-                      const logged   = isLogged(p);
-                      const inParlay = parlayLabels.includes(p.label);
-                      const parlayFull = parlayLabels.length >= 3 && !inParlay;
-                      return (
-                        <Card key={i} style={inParlay ? { borderColor: "rgba(251,191,36,0.4)" } : {}}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-                            <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", flex: 1, paddingRight: 8, lineHeight: 1.4 }}>{p.label}</div>
-                            <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                              <LeanBadge label={p.lean} positive={p.positive} small />
-                              <button
-                                onClick={() => { if (parlayFull) return; setParlayLabels(prev => inParlay ? prev.filter(l => l !== p.label) : [...prev, p.label]); }}
-                                title={parlayFull ? "Max 3 legs" : inParlay ? "Remove from parlay" : "Add to parlay"}
-                                style={{ fontSize: 10, fontWeight: 700, background: inParlay ? "rgba(251,191,36,0.15)" : "rgba(255,255,255,0.04)", border: `1px solid ${inParlay ? "rgba(251,191,36,0.5)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 6px", cursor: parlayFull ? "default" : "pointer", color: inParlay ? "#fbbf24" : "#4b5563", opacity: parlayFull ? 0.35 : 1, lineHeight: 1 }}>
-                                🔗
-                              </button>
-                              <button
-                                onClick={() => !logged && logPick(p)}
-                                title={logged ? "Already logged" : "Log this pick"}
-                                style={{ fontSize: 13, background: logged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)", border: `1px solid ${logged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 7px", cursor: logged ? "default" : "pointer", color: logged ? "#22c55e" : "#6b7280", transition: "all 0.15s", lineHeight: 1 }}>
-                                {logged ? "✓" : "＋"}
-                              </button>
-                            </div>
-                          </div>
-                          <ConfBar pct={p.confidence} positive={p.positive} />
-                          <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, lineHeight: 1.4 }}>{p.reason}</div>
-                        </Card>
-                      );
-                    })}
-                  </>
-                );
-              })()}
             </>)}
           </>)}
 
@@ -7477,6 +7354,67 @@ export default function App() {
             outs:  hitSummary("outs", boardCandidatesByType.outs),
           };
 
+          const gameBoardOutcome = (type, item) => {
+            const game = (activeSlate ?? []).find(g => (g.gamePk ?? g.id) === item.gamePk);
+            const status = game?.status ?? "";
+            const isFinal = status === "Final" || status === "Game Over";
+            if (!isFinal) return null;
+
+            const liveScore = liveScores[item.gamePk];
+            if (!liveScore) return null;
+
+            if (type === "nrfi") {
+              const f1 = liveScore.firstInning;
+              if (!f1 || f1.away === null || f1.home === null) return null;
+              const wasNrfi = f1.away === 0 && f1.home === 0;
+              return item.lean === "NRFI" ? wasNrfi : !wasNrfi;
+            }
+
+            if (type === "total") {
+              const line = parseFloat(item.line);
+              if (!Number.isFinite(line)) return null;
+              const totalRuns = (liveScore.awayScore ?? 0) + (liveScore.homeScore ?? 0);
+              return item.lean === "OVER" ? totalRuns > line : totalRuns < line;
+            }
+
+            if (type === "spread") {
+              const line = parseFloat(item.line);
+              if (!Number.isFinite(line)) return null;
+              const awayScore = liveScore.awayScore ?? 0;
+              const homeScore = liveScore.homeScore ?? 0;
+              if (item.lean === "HOME") return (homeScore + line) > awayScore;
+              if (item.lean === "AWAY") return (awayScore + line) > homeScore;
+              return null;
+            }
+
+            if (type === "ml") {
+              const awayScore = liveScore.awayScore ?? 0;
+              const homeScore = liveScore.homeScore ?? 0;
+              if (awayScore === homeScore) return null;
+              if (item.lean === "HOME") return homeScore > awayScore;
+              if (item.lean === "AWAY") return awayScore > homeScore;
+              return null;
+            }
+
+            return null;
+          };
+
+          const gameHitSummary = (type, items) => {
+            if (!items.length) return null;
+            const resolved = items
+              .map(item => gameBoardOutcome(type, item))
+              .filter(v => v !== null);
+            return {
+              hits: resolved.filter(Boolean).length,
+              total: items.length,
+            };
+          };
+
+          const gameSubtabHitSummary = {
+            nrfi: gameHitSummary("nrfi", computeGameBoard("nrfi", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+            total: gameHitSummary("total", computeGameBoard("total", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+          };
+
           // Lean color for game board cards
           const leanColor = (lean) =>
             lean === "NRFI" || lean === "OVER" || lean === "HOME" ? "#22c55e"
@@ -7508,11 +7446,16 @@ export default function App() {
                 <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
                   {[["nrfi", "NRFI"], ["total", "O/U Total"], ["spread", "Run Line"], ["ml", "Moneyline"]].map(([sub, label]) => (
                     <button key={sub} onClick={() => setGameSubTab(sub)}
-                      style={{ flex: 1, background: gameSubTab === sub ? "rgba(129,140,248,0.18)" : "rgba(255,255,255,0.03)",
+                      style={{ position: "relative", flex: 1, background: gameSubTab === sub ? "rgba(129,140,248,0.18)" : "rgba(255,255,255,0.03)",
                         border: `1px solid ${gameSubTab === sub ? "#818cf8" : "#1f2437"}`,
                         borderRadius: 6, padding: "5px 4px", fontSize: 9, fontFamily: "monospace",
                         fontWeight: 700, color: gameSubTab === sub ? "#818cf8" : "#6b7280", cursor: "pointer" }}>
                       {label}
+                      {gameSubtabHitSummary[sub] && (
+                        <span style={{ position: "absolute", top: -7, right: -5, background: gameSubtabHitSummary[sub].hits > 0 ? "#22c55e" : "#374151", color: gameSubtabHitSummary[sub].hits > 0 ? "#03140a" : "#d1d5db", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999, padding: "1px 5px", fontSize: 7, fontWeight: 900, lineHeight: 1.2, fontFamily: "monospace", whiteSpace: "nowrap" }}>
+                          {gameSubtabHitSummary[sub].hits}/{gameSubtabHitSummary[sub].total} hit
+                        </span>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -7556,8 +7499,19 @@ export default function App() {
                       const sc = scoreColor(c.score);
                       const lc = leanColor(c.lean);
                       const gameStatus = getBoardGameStatus(c.gamePk);
+                      const liveScore = liveScores[c.gamePk];
+                      const finalTotalRuns = gameSubTab === "total" && gameStatus === "FINAL" && liveScore
+                        ? (liveScore.awayScore ?? 0) + (liveScore.homeScore ?? 0)
+                        : null;
+                      const gameHit = (gameSubTab === "nrfi" || gameSubTab === "total" || gameSubTab === "spread" || gameSubTab === "ml")
+                        ? gameBoardOutcome(gameSubTab, c)
+                        : null;
+                      const resultBorderColor = gameHit === null ? null : (gameHit ? "#22c55e" : "#ef4444");
+                      const resultCardStyle = resultBorderColor
+                        ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
+                        : {};
                       return (
-                        <Card key={c.gamePk} style={{ cursor: "pointer", padding: "10px 12px" }}
+                        <Card key={c.gamePk} style={{ cursor: "pointer", padding: "10px 12px", ...resultCardStyle }}
                           onClick={() => setWhyModal({ c, type: gameSubTab, rank: i + 1 })}>
                           <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                             {/* Rank + score */}
@@ -7571,6 +7525,12 @@ export default function App() {
                                 <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{c.away?.abbr ?? "?"} @ {c.home?.abbr ?? "?"}</span>
                                 {gameStatus && (
                                   <span style={{ fontSize: 8, fontWeight: 800, color: gameStatus === "LIVE" ? "#22c55e" : "#6b7280", background: gameStatus === "LIVE" ? "rgba(34,197,94,0.12)" : "#1e2030", border: `1px solid ${gameStatus === "LIVE" ? "rgba(34,197,94,0.35)" : "#374151"}`, borderRadius: 4, padding: "1px 5px" }}>{gameStatus}</span>
+                                )}
+                                {gameHit === true && (
+                                  <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>✓ HIT</span>
+                                )}
+                                {gameHit === false && (
+                                  <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>✗ MISS</span>
                                 )}
                               </div>
                               {/* SP row */}
@@ -7601,6 +7561,11 @@ export default function App() {
                                 )}
                                 {c.weather?.roof && <span style={{ fontSize: 9, color: "#6b7280" }}>Dome</span>}
                                 {(() => { const pf = PARK_FACTORS[c.home?.abbr]; return pf && pf.hr !== 1.0 ? <span style={{ fontSize: 9, color: "#6b7280" }}>{pf.label}</span> : null; })()}
+                                {finalTotalRuns !== null && (
+                                  <span style={{ fontSize: 9, color: "#d1d5db", fontFamily: "monospace" }}>
+                                    Final runs <span style={{ color: "#f9fafb", fontWeight: 700 }}>{finalTotalRuns}</span>
+                                  </span>
+                                )}
                               </div>
                             </div>
                             {/* Lean badge */}
@@ -7858,6 +7823,7 @@ export default function App() {
           const handleBookSelect = async (book) => {
             const next = book === preferredBook ? null : book; // toggle off if same
             setPreferredBook(next);
+            setPropsBookFilter(next ?? "ALL");
             setPrefSaving(true);
             setPrefSaveMsg("");
             try {

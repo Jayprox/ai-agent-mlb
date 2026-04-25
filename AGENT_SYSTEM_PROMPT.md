@@ -586,3 +586,129 @@ Add a chat section at the very top of the help content area (above the first `<S
 - Resetting the filter (tap ALL) always falls back to showing all available books for that game
 - Do not change any prop fetching logic, TTLs, or the `activeBooks` variable used outside the filter scope
 - The filter chip row should not appear on other tabs (Intel, Overview, Lineup, etc.) — only on `tab === "props"`
+
+---
+
+**⚠️ REDO NOTE (April 2026):** Codex attempted this task but made zero changes to the file. The implementation was missing entirely — no `propsBookFilter` state, no chip UI, no column filtering. Use the pinpoint instructions below instead of the general spec above.
+
+**Exact 3-edit implementation:**
+
+**Edit 1 — Add state** near line 2882 (where other filter states live):
+```js
+const [propsBookFilter, setPropsBookFilter] = useState("ALL");
+```
+
+**Edit 2 — Default to preferredBook** inside the `useEffect` that calls `/api/auth/preferences` (around line 3202), add after `setPreferredBook(...)`:
+```js
+setPropsBookFilter(d.preferences?.preferredBook ?? "ALL");
+```
+
+**Edit 3 — Filter chips + column filter** in the Sportsbook Lines section (around line 6199–6213). Change the `BOOKS` constant and add chips:
+```js
+const ALL_BOOKS = ["DK", "FD", "CZR", "MGM", "BOV"];
+const BOOKS = propsBookFilter === "ALL" ? ALL_BOOKS : ALL_BOOKS.filter(b => b === propsBookFilter);
+```
+Then insert chip row just before the `<SLabel>Sportsbook Lines</SLabel>` div:
+```jsx
+<div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+  {["ALL","DK","FD","CZR","MGM","BOV"].map(bk => {
+    const active = propsBookFilter === bk;
+    return (
+      <button key={bk} onClick={() => setPropsBookFilter(bk)}
+        style={{
+          fontSize: 9, fontWeight: 700, padding: "3px 8px", borderRadius: 6, cursor: "pointer",
+          background: active ? "rgba(139,92,246,0.25)" : "rgba(255,255,255,0.04)",
+          border: `1px solid ${active ? "rgba(139,92,246,0.6)" : "rgba(255,255,255,0.08)"}`,
+          color: active ? "#c4b5fd" : "#6b7280"
+        }}>{bk}{bk === preferredBook ? " ★" : ""}</button>
+    );
+  })}
+</div>
+```
+
+**LINE INTELLIGENCE note:** `sharpLines` and `allBooks` scoring logic must use `ALL_BOOKS`, not the filtered `BOOKS`. Only the rendered column headers and cells use the filtered `BOOKS` array.
+
+---
+
+### CODEX TASK 8 — Auto-Refresh Odds in Background (Task #20)
+
+**Goal:** Re-poll `/api/odds` on a background interval so `liveOddsMap` stays current during the hour before first pitch. Currently odds are fetched once on app load and cached — line movement after that is not reflected until a manual reload.
+
+**File to modify:** `prop-scout-v7.jsx`
+
+**What to add:**
+Add a `useEffect` near the other polling effects (around line 3340, alongside the lineup poll and linescore poll) that calls `fetchOdds(true)` every 10 minutes and updates `liveOddsMap` state:
+
+```js
+// Auto-refresh odds every 10 minutes so Games board and Model Picks stay current
+useEffect(() => {
+  if (IS_ODDS_SANDBOX || !liveSlate?.length) return;
+  const id = setInterval(async () => {
+    const result = await fetchOdds(true);
+    if (result?.data) setLiveOddsMap(result.data);
+  }, 10 * 60 * 1000);
+  return () => clearInterval(id);
+}, [liveSlate]);
+```
+
+**Constraints:**
+- Use `fetchOdds(true)` — the `true` flag bypasses the client-side cache and forces a fresh fetch
+- Only run when `!IS_ODDS_SANDBOX` and `liveSlate` is populated
+- Do not change any existing odds fetch logic, TTLs, or the initial load effect
+- `setLiveOddsMap` already exists in component state — just call it with `result.data`
+
+---
+
+### CODEX TASK 9 — Collapsible Market Sections in Props Tab Sportsbook Lines (Task #23)
+
+**Goal:** Add collapse/expand toggles to each market section header (Strikeouts, Home Runs, Total Bases, Hits) in the Sportsbook Lines grid on the Props tab.
+
+**File to modify:** `prop-scout-v7.jsx`
+
+**What to add:**
+
+**Step 1 — Add state** near other collapse state (around line 2892, alongside `showTrends`, `showDigest`):
+```js
+const [collapsedMarkets, setCollapsedMarkets] = useState({}); // { pitcher_strikeouts: true, ... }
+```
+
+**Step 2 — Toggle function:**
+```js
+const toggleMarket = (mKey) => setCollapsedMarkets(prev => ({ ...prev, [mKey]: !prev[mKey] }));
+```
+
+**Step 3 — Update market header row** (around line 6302–6317 where each `{ mKey, label, badge, color }` is mapped). In the market header `<div>`, add a clickable toggle:
+- Make the entire header row `onClick={() => toggleMarket(mKey)}`
+- Add a chevron indicator: `▼` when expanded, `▶` when collapsed — right-aligned in the header
+- Wrap the player rows content in `{!collapsedMarkets[mKey] && (...)}` so the body hides when collapsed
+
+**Default state:** All sections expanded (empty object = nothing collapsed).
+
+**Constraints:**
+- State is component-level (not inside the IIFE or render loop)
+- `toggleMarket` must be defined at component level too
+- Collapse only hides the player rows — the market header badge row always stays visible
+- Do not change any data fetching, scoring, or LINE INTELLIGENCE logic
+
+---
+
+### CODEX TASK 10 — Remove AI Analysis Section from Props Tab (Task #24)
+
+**Goal:** Remove the AI Analysis section entirely from the Props tab and clean up all related code.
+
+**File to modify:** `prop-scout-v7.jsx`
+
+**What to remove:**
+
+1. **Section render block** — find the comment `{/* ── AI ANALYSIS section */}` (around line 6502) and delete the entire block through its closing `})()}` — this includes the section header, loading state, and all `aiProps.map(...)` card rendering.
+
+2. **State declaration** — remove `const [liveAiProps, setLiveAiProps] = useState({});` (around line 2940)
+
+3. **Ref declaration** — remove `const aiPropsFetched = useRef(new Set());` (around line 2941)
+
+4. **Fetch useEffect** — remove the `useEffect` that fetches `/api/ai-props` when the Props tab opens (around line 3076–3110). It starts with `// Fetch AI Props when Props tab opens`.
+
+**Constraints:**
+- Verify `liveAiProps` and `aiPropsFetched` are not referenced anywhere else in the file before deleting — do a search first
+- Do not touch the Prop Confidence Meters section, the Sportsbook Lines section, or any other Props tab content
+- Do not remove any backend route — only remove frontend references
