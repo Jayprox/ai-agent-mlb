@@ -3742,9 +3742,28 @@ export default function App() {
   // ── Cross-slate Best Bets ────────────────────────────────────────────────
   // Delegates to module-level computeTopSlatePicks() to avoid minifier
   // variable-name collisions (TDZ) with render-body locals.
-  const topSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length
+  const isAvailableAtPreferredBook = (pick) => {
+    if (!preferredBook) return true; // no preference — show everything
+    const ppState = livePlayerProps[String(pick.gamePk)];
+    // Odds not loaded yet — don't hide the pick prematurely
+    if (!ppState || ppState === "loading" || !Array.isArray(ppState?.props)) return true;
+    const lastName = (pick.fullName ?? "").split(" ").pop().toLowerCase();
+    const match = ppState.props.find(pr =>
+      pr.market === pick.market &&
+      pr.player?.toLowerCase().includes(lastName)
+    );
+    // Prop not in odds API yet — don't hide
+    if (!match) return true;
+    // Prop IS posted — only show if preferred book has a line
+    return match.books?.[preferredBook]?.line != null;
+  };
+
+  const rawSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length
     ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather)
     : [];
+  const topSlatePicks = preferredBook
+    ? rawSlatePicks.filter(isAvailableAtPreferredBook)
+    : rawSlatePicks;
 
   // Group model picks by tier for display
   const highPicks   = topSlatePicks.filter(p => p.tier === "HIGH");
@@ -6328,11 +6347,11 @@ export default function App() {
                                             return (
                                               <div key={bk} style={{ background: isLow ? `${bkColor}15` : "#161827", border: `1px solid ${isLow ? `${bkColor}55` : "#1f2437"}`, borderRadius: 8, padding: "8px 6px", textAlign: "center" }}>
                                                 <div style={{ fontSize: 8, fontWeight: 700, color: bkColor, marginBottom: 4 }}>{bk}</div>
-                                                <div style={{ fontSize: 14, fontWeight: 800, color: isLow ? bkColor : "#f9fafb", fontFamily: "monospace", lineHeight: 1, marginBottom: 4 }}>{b.line}</div>
+                                                <div style={{ fontSize: 14, fontWeight: 800, color: isLow ? bkColor : "#f9fafb", fontFamily: "monospace", lineHeight: 1, marginBottom: 4 }}>{b?.line ?? "—"}</div>
                                                 <div style={{ fontSize: 9, fontFamily: "monospace" }}>
-                                                  <span style={{ color: "#22c55e" }}>{fmtO(b.overOdds)}</span>
+                                                  <span style={{ color: "#22c55e" }}>{fmtO(b?.overOdds)}</span>
                                                   <span style={{ color: "#374151" }}> / </span>
-                                                  <span style={{ color: "#ef4444" }}>{fmtO(b.underOdds)}</span>
+                                                  <span style={{ color: "#ef4444" }}>{fmtO(b?.underOdds)}</span>
                                                 </div>
                                                 {isLow && <div style={{ fontSize: 7, color: bkColor, marginTop: 3, fontWeight: 700 }}>BEST LINE</div>}
                                               </div>

@@ -712,3 +712,62 @@ const toggleMarket = (mKey) => setCollapsedMarkets(prev => ({ ...prev, [mKey]: !
 - Verify `liveAiProps` and `aiPropsFetched` are not referenced anywhere else in the file before deleting — do a search first
 - Do not touch the Prop Confidence Meters section, the Sportsbook Lines section, or any other Props tab content
 - Do not remove any backend route — only remove frontend references
+
+---
+
+### CODEX TASK 11 — Personalization Level 1: Filter Model Picks by Preferred Book Availability (Task #21)
+
+**Goal:** If a user has a `preferredBook` set, hide Model Pick cards where that sportsbook does not have the prop posted. Users should only see picks they can actually bet at their book.
+
+**File to modify:** `prop-scout-v7.jsx`
+
+**Background:**
+- `topSlatePicks` is computed at line ~3745 by calling `computeTopSlatePicks(...)` — a module-level function that scores pitchers using stats only. It does NOT have access to `livePlayerProps`.
+- Each pick object has: `fullName` (pitcher full name), `gamePk`, `market` ("pitcher_strikeouts" or "pitcher_outs_recorded"), and other display fields.
+- `livePlayerProps` is component state: `{ [gamePk]: { props: [...] } | "loading" | null }` — each prop entry has a `books` object keyed by book abbreviation.
+- `preferredBook` is component state: `"DK" | "FD" | "CZR" | "MGM" | "BOV" | null`
+
+**What to add — 2 edits only:**
+
+**Edit 1 — Add filter helper** just before the `topSlatePicks` line (around line 3743):
+```js
+// Returns true if the pick is available at the user's preferred book (or no preference set)
+const isAvailableAtPreferredBook = (pick) => {
+  if (!preferredBook) return true; // no preference — show everything
+  const ppState = livePlayerProps[String(pick.gamePk)];
+  // Odds not loaded yet — don't hide the pick prematurely
+  if (!ppState || ppState === "loading" || !Array.isArray(ppState?.props)) return true;
+  const lastName = (pick.fullName ?? "").split(" ").pop().toLowerCase();
+  const match = ppState.props.find(pr =>
+    pr.market === pick.market &&
+    pr.player?.toLowerCase().includes(lastName)
+  );
+  // Prop not in odds API yet — don't hide
+  if (!match) return true;
+  // Prop IS posted — only show if preferred book has a line
+  return match.books?.[preferredBook]?.line != null;
+};
+```
+
+**Edit 2 — Apply the filter to `topSlatePicks`** — replace the existing line (around line 3745):
+```js
+// BEFORE:
+const topSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length
+  ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather)
+  : [];
+
+// AFTER:
+const rawSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length
+  ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather)
+  : [];
+const topSlatePicks = preferredBook
+  ? rawSlatePicks.filter(isAvailableAtPreferredBook)
+  : rawSlatePicks;
+```
+
+**Constraints:**
+- `isAvailableAtPreferredBook` must be defined at component level — NOT inside an IIFE or render block
+- Do NOT modify `computeTopSlatePicks` — it's a module-level function and should stay pure/stateless
+- Do NOT change `highPicks`, `mediumPicks`, `specPicks` — they filter `topSlatePicks` by tier and will automatically reflect the book filter
+- If `preferredBook` is null (no preference set), behavior is identical to today — all picks shown
+- If odds haven't loaded yet for a game, the pick stays visible — only hide when the prop is confirmed posted at other books but missing at the preferred book

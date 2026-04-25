@@ -151,6 +151,44 @@
       "playerName": null,
       "result": null,
       "userId": "user10"
+    },
+    {
+      "id": "1777125919350_imkr8",
+      "timestamp": "2026-04-25T14:05:19.350Z",
+      "date": "Apr 25",
+      "game": "BOS @ BAL",
+      "gamePk": 824851,
+      "label": "Duran OVER 0.5 H",
+      "lean": "OVER",
+      "confidence": null,
+      "propType": "H",
+      "homeTeam": "BAL",
+      "awayTeam": "BOS",
+      "pitcherId": 669432,
+      "pitcherName": "Trevor Rogers",
+      "playerId": null,
+      "playerName": null,
+      "result": null,
+      "userId": "user10"
+    },
+    {
+      "id": "1777125920767_eh5gs",
+      "timestamp": "2026-04-25T14:05:20.767Z",
+      "date": "Apr 25",
+      "game": "BOS @ BAL",
+      "gamePk": 824851,
+      "label": "Duran UNDER 0.5 H",
+      "lean": "UNDER",
+      "confidence": null,
+      "propType": "H",
+      "homeTeam": "BAL",
+      "awayTeam": "BOS",
+      "pitcherId": 669432,
+      "pitcherName": "Trevor Rogers",
+      "playerId": null,
+      "playerName": null,
+      "result": null,
+      "userId": "user10"
     }
   ]
 }
