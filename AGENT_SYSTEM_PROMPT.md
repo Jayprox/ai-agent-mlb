@@ -831,6 +831,53 @@ REDIS_URL=redis://localhost:6379
 
 ---
 
+### CODEX TASK 18 — Add pitcher_outs to Player Props API Fetch
+
+**Goal:** The Outs board in Model Picks shows "Odds Unavailable" on every card because `pitcher_outs` is never requested from the Odds API. Two-line fix in `backend/routes/playerProps.js`.
+
+**File: `backend/routes/playerProps.js`**
+
+**Edit 1 — Add `pitcher_outs` to MARKET_LABELS** (line 16):
+```js
+// OLD:
+const MARKET_LABELS = {
+  pitcher_strikeouts: "K",
+  batter_total_bases: "TB",
+  batter_hits:        "H",
+  batter_home_runs:   "HR",
+};
+// NEW:
+const MARKET_LABELS = {
+  pitcher_strikeouts: "K",
+  pitcher_outs:       "Outs",
+  batter_total_bases: "TB",
+  batter_hits:        "H",
+  batter_home_runs:   "HR",
+};
+```
+
+**Edit 2 — Add `pitcher_outs` to the Odds API markets query string** (~line 89):
+```js
+// OLD:
+`&markets=pitcher_strikeouts,batter_total_bases,batter_hits,batter_home_runs`
+// NEW:
+`&markets=pitcher_strikeouts,pitcher_outs,batter_total_bases,batter_hits,batter_home_runs`
+```
+
+**Constraints:** No other changes. Do not touch any other routes, scoring logic, or frontend code.
+
+---
+
+**Design note — why we did NOT fold Outs signal into K scoring (Option B):**
+
+The alternative considered was using avgIP as an additional weight inside the K confidence algorithm. This was rejected for two reasons:
+1. avgIP is already partially captured by ERA/WHIP — good pitchers with low ERA tend to go deep anyway, so the signal is mostly redundant.
+2. The K board is already producing clean, well-differentiated results. Adding avgIP risked boosting contact-management workhorses (high avgIP, mediocre K/9) above true strikeout arms, which would degrade a system that's working well.
+
+Option A (just fetch the missing market) is lower risk and preserves the K scoring exactly as-is. If `pitcher_outs` lines are consistently unavailable on sportsbooks after this fix, revisit at that point.
+
+---
+
 ### CODEX TASK 17 — Remove F5 Props
 
 **Goal:** Remove all F5 (first 5 innings) prop references from the app. Pure deletion — no new features. Can be re-introduced later if demand exists.

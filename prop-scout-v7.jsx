@@ -247,7 +247,7 @@ const buildTrendsContext = (game, odds, parkFactors) => {
 // its own events-list lookup — saves a credit per game.
 // ─────────────────────────────────────────────────────────────
 const playerPropsCache   = {};  // browser-side dedup: key = gamePk string
-const PLAYER_PROP_LABELS = { pitcher_strikeouts: "K", pitcher_outs_recorded: "Outs", batter_total_bases: "TB", batter_hits: "H", batter_home_runs: "HR" };
+const PLAYER_PROP_LABELS = { pitcher_strikeouts: "K", pitcher_outs: "Outs", batter_total_bases: "TB", batter_hits: "H", batter_home_runs: "HR" };
 
 const fetchPlayerPropsDirect = async (awayName, homeName, gamePk) => {
   if (IS_ODDS_SANDBOX) return [];
@@ -1669,7 +1669,7 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
         confidence:     oScore,
         tier:           MODEL_TIER(oScore),
         propType:       "Outs",
-        market:         "pitcher_outs_recorded",
+        market:         "pitcher_outs",
         modelLine:      oLine,
         gamePk:         sg.gamePk,
         game:           sgGameLabel,
@@ -1827,7 +1827,7 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
       const ppKey   = String(game.gamePk);
       const props   = Array.isArray(livePlayerProps[ppKey]?.props) ? livePlayerProps[ppKey].props : [];
       const lastName = (p.name ?? "").split(" ").pop().toLowerCase();
-      const market  = type === "k" ? "pitcher_strikeouts" : "pitcher_outs_recorded";
+      const market  = type === "k" ? "pitcher_strikeouts" : "pitcher_outs";
       const propLine = props.find(pr => pr.market === market && pr.player.toLowerCase().includes(lastName)) ?? null;
 
       const recentStarts = (gamelog?.games ?? []).slice(0, 3);
@@ -4250,7 +4250,7 @@ export default function App() {
         if (result.k === undefined) return null;
         return p.lean === "UNDER" ? result.k < line : result.k > line;
       }
-      if (p.propType === "Outs" || p.market === "pitcher_outs_recorded") {
+      if (p.propType === "Outs" || p.market === "pitcher_outs") {
         if (result.outs === undefined) return null;
         return p.lean === "UNDER" ? result.outs < line : result.outs > line;
       }
@@ -7358,7 +7358,7 @@ export default function App() {
               return lean === "UNDER" ? result.k < line : result.k > line;
             }
 
-            if (type === "outs" || item.propType === "Outs" || item.market === "pitcher_outs_recorded") {
+            if (type === "outs" || item.propType === "Outs" || item.market === "pitcher_outs") {
               if (result.outs === undefined) return null;
               return lean === "UNDER" ? result.outs < line : result.outs > line;
             }

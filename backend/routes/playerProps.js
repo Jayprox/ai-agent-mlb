@@ -15,6 +15,7 @@ const TARGET_BOOKS = [
 
 const MARKET_LABELS = {
   pitcher_strikeouts: "K",
+  pitcher_outs:       "Outs",
   batter_total_bases: "TB",
   batter_hits:        "H",
   batter_home_runs:   "HR",
@@ -86,7 +87,7 @@ router.get("/:gamePk", async (req, res) => {
     const propsRes = await axios.get(
       `https://api.the-odds-api.com/v4/sports/baseball_mlb/events/${eventId}/odds` +
       `?apiKey=${apiKey}` +
-      `&markets=pitcher_strikeouts,batter_total_bases,batter_hits,batter_home_runs` +
+      `&markets=pitcher_strikeouts,pitcher_outs,batter_total_bases,batter_hits,batter_home_runs` +
       `&regions=us&oddsFormat=american` +
       `&bookmakers=${bookKeys}`,
       { timeout: 12000 }
