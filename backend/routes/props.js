@@ -1,18 +1,18 @@
 const express   = require("express");
 const router    = express.Router();
-const Anthropic = require("@anthropic-ai/sdk");
+const OpenAI    = require("openai");
 const axios     = require("axios");
 const cache     = require("../services/cache");
 
 const PROPS_TTL  = 45 * 60 * 1000; // 45 minutes
 const SEARCH_TTL = 20 * 60 * 1000; // 20 minutes — news is more time-sensitive than game data
 
-// Lazy-init Anthropic client so missing key doesn't crash on startup
+// Lazy-init OpenAI client so missing key doesn't crash on startup
 let _client = null;
 const getClient = () => {
   if (!_client) {
-    if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
-    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+    _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
   return _client;
 };
@@ -147,14 +147,16 @@ router.post("/:gamePk", async (req, res) => {
 
     // ── Step 3: AI prop generation ────────────────────────────────────────
     const client  = getClient();
-    const message = await client.messages.create({
-      model:      "claude-haiku-4-5-20251001",
+    const message = await client.chat.completions.create({
+      model:      "gpt-4o-mini",
       max_tokens: 1000,
-      system:     SYSTEM_PROMPT,
-      messages:   [{ role: "user", content: enrichedContext }],
+      messages:   [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: enrichedContext },
+      ],
     });
 
-    const raw = message.content?.[0]?.text?.trim() ?? "";
+    const raw = message.choices?.[0]?.message?.content?.trim() ?? "";
     if (!raw) return res.status(502).json({ error: "Empty response from AI" });
 
     // Extract JSON array — handle possible stray markdown fences

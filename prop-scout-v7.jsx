@@ -419,7 +419,10 @@ const apiMutate = async (path, method, body) => {
     window.dispatchEvent(new Event("propscout:unauthorized"));
     throw new Error("Unauthorized");
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? body.error ?? `HTTP ${res.status}`);
+  }
   return res.json();
 };
 
@@ -3790,8 +3793,8 @@ export default function App() {
       id:          `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       timestamp:   new Date().toISOString(),
       date:        new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-      game:        `${game.away.abbr} @ ${game.home.abbr}`,
-      gamePk:      selectedId,
+      game:        prop.game ?? `${game.away.abbr} @ ${game.home.abbr}`,
+      gamePk:      prop.gamePk ?? selectedId,
       label:       prop.label,
       lean:        prop.lean,
       confidence:  prop.confidence,
@@ -3799,10 +3802,10 @@ export default function App() {
       propType:    prop.propType   ?? null,
       homeTeam:    game.home?.abbr ?? null,
       awayTeam:    game.away?.abbr ?? null,
-      pitcherId:   pitcher?.id     ?? null,
-      pitcherName: pitcher?.name   ?? null,
-      playerId:    isBatterProp ? (activeBatter?.id   ?? null) : null,
-      playerName:  isBatterProp ? (activeBatter?.name ?? null) : null,
+      pitcherId:   prop.pitcherId   ?? prop.id ?? pitcher?.id ?? null,
+      pitcherName: prop.pitcherName ?? prop.fullName ?? prop.name ?? pitcher?.name ?? null,
+      playerId:    isBatterProp ? (prop.playerId ?? prop.id ?? activeBatter?.id ?? null) : null,
+      playerName:  isBatterProp ? (prop.playerName ?? prop.fullName ?? prop.name ?? activeBatter?.name ?? null) : null,
       result:      null,
     };
     setPropLog(prev => {
@@ -3826,6 +3829,24 @@ export default function App() {
     const awayRuns  = box.linescore?.away?.runs ?? 0;
     const homeRuns  = box.linescore?.home?.runs ?? 0;
     const totalRuns = awayRuns + homeRuns;
+    const allBatters = [...(box.batting?.away ?? []), ...(box.batting?.home ?? [])];
+    const findBatter = () => {
+      const storedId = pick.playerId != null ? String(pick.playerId) : null;
+      if (storedId) {
+        const byId = allBatters.find(b => String(b.id) === storedId);
+        if (byId) return byId;
+      }
+      const storedName = (pick.playerName ?? "").toUpperCase();
+      if (storedName) {
+        const byName = allBatters.find(b =>
+          b.name.toUpperCase().includes(storedName) ||
+          storedName.includes(b.name.toUpperCase().split(" ").pop())
+        );
+        if (byName) return byName;
+      }
+      const lastName = label.split(" ")[0];
+      return allBatters.find(b => b.name.toUpperCase().includes(lastName)) ?? null;
+    };
 
     // NRFI — no runs scored in 1st inning
     // label may have game appended: "NRFI" or "NRFI · TEX @ SEA"
@@ -3881,6 +3902,13 @@ export default function App() {
       return null;
     }
 
+    // Moneyline — side to win outright
+    if (label.includes("MONEYLINE") || /\bML\b/.test(label)) {
+      if (lean === "HOME") return homeRuns > awayRuns ? "hit" : "miss";
+      if (lean === "AWAY") return awayRuns > homeRuns ? "hit" : "miss";
+      return null;
+    }
+
     // Pitcher Strikeouts — "Wheeler K's O/U 7.5" or "Pitcher Strikeouts O/U"
     if (label.includes("K'S") || label.includes("STRIKEOUT") || (label.includes(" K ") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
       const m = label.match(/(\d+\.?\d*)/);
@@ -3924,6 +3952,54 @@ export default function App() {
       return null;
     }
 
+    // Batter Hits
+    if (pick.propType === "Hits" || (label.includes("HITS") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
+      const m = label.match(/(\d+\.?\d*)/);
+      if (!m) return null;
+      const line = parseFloat(m[1]);
+      const batter = findBatter();
+      if (!batter) return null;
+      if (lean === "OVER")  return (batter.h ?? 0) > line ? "hit" : "miss";
+      if (lean === "UNDER") return (batter.h ?? 0) < line ? "hit" : "miss";
+      return null;
+    }
+
+    // Batter Total Bases
+    if (pick.propType === "TB" || label.includes("TOTAL BASES") || (/\bTB\b/.test(label) && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
+      const m = label.match(/(\d+\.?\d*)/);
+      if (!m) return null;
+      const line = parseFloat(m[1]);
+      const batter = findBatter();
+      if (!batter || batter.tb === undefined) return null;
+      if (lean === "OVER")  return (batter.tb ?? 0) > line ? "hit" : "miss";
+      if (lean === "UNDER") return (batter.tb ?? 0) < line ? "hit" : "miss";
+      return null;
+    }
+
+    // Batter Home Runs
+    if (pick.propType === "HR" || label.includes(" HR ")) {
+      const m = label.match(/(\d+\.?\d*)/);
+      if (!m) return null;
+      const line = parseFloat(m[1]);
+      const batter = findBatter();
+      if (!batter) return null;
+      if (lean === "OVER" || lean === "YES")  return (batter.hr ?? 0) > line ? "hit" : "miss";
+      if (lean === "UNDER" || lean === "NO")  return (batter.hr ?? 0) < line ? "hit" : "miss";
+      return null;
+    }
+
+    // Batter RBI
+    if (pick.propType === "RBI" || label.includes("RBI")) {
+      const m = label.match(/(\d+\.?\d*)/);
+      if (!m) return null;
+      const line = parseFloat(m[1]);
+      const batter = findBatter();
+      if (!batter) return null;
+      if (lean === "OVER")  return (batter.rbi ?? 0) > line ? "hit" : "miss";
+      if (lean === "UNDER") return (batter.rbi ?? 0) < line ? "hit" : "miss";
+      return null;
+    }
+
     return null; // prop type not gradeable from boxscore alone
   };
 
@@ -3954,6 +4030,7 @@ export default function App() {
       .then(() => { setNoteSaveState("saved"); setTimeout(() => setNoteSaveState(null), 2000); })
       .catch(() => setNoteSaveState(null));
   };
+
   const syncPicksToServer = async () => {
     setSyncStatus("syncing");
     setSyncMessage(`Syncing… 0/${propLog.length}`);
@@ -4062,6 +4139,18 @@ export default function App() {
         {tierPicks.map((p, i) => {
           const bookLine = getBookLine(p);
           const lineMismatch = bookLine && Math.abs(bookLine.line - p.modelLine) >= 0.5;
+          const mv = (() => {
+            if (!bookLine) {
+              const ppState = livePlayerProps[String(p.gamePk)];
+              if (!ppState || ppState === "loading") return { status: "ODDS_PULL_FAILED",    label: "Checking Odds…",    color: "#4b5563", icon: "⟳" };
+              return                                        { status: "MARKET_UNAVAILABLE",  label: "Odds Unavailable", color: "#4b5563", icon: "—" };
+            }
+            const diff      = Math.abs((p.modelLine ?? 0) - bookLine.line);
+            const bookCount = bookLine.allBooks?.length ?? 0;
+            if (diff === 0)    return { status: "MARKET_MATCHED",    label: "Verified Market",   color: "#22c55e", icon: "✓", diff, bookCount };
+            if (diff <= 1.0)   return { status: "MARKET_NEARBY",     label: "Alt Line",          color: "#f59e0b", icon: "~", diff, bookCount };
+            return                    { status: "MARKET_MISMATCH",   label: "Model Projection",  color: "#ef4444", icon: "⚠", diff, bookCount };
+          })();
           const overPick = { label: `${p.fullName} ${p.propType === "K" ? "Strikeouts" : "Outs"} OVER ${bookLine?.line ?? p.modelLine}`, lean: "OVER", positive: true, confidence: p.confidence, propType: p.propType, gamePk: p.gamePk };
           const logged = propLog.some(pl => pl.gamePk === p.gamePk && pl.label === overPick.label);
           const result = liveBoardResults[p.pitcherId ?? p.playerId ?? p.id] ?? null;
@@ -4151,6 +4240,34 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {/* Market Validation Badge */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: mv.status !== "ODDS_PULL_FAILED" ? 6 : 0, flexWrap: "wrap" }}>
+                <span style={{
+                  fontSize: 8, fontWeight: 700, padding: "2px 7px", borderRadius: 4,
+                  color: mv.color,
+                  background: `${mv.color}18`,
+                  border: `1px solid ${mv.color}44`,
+                  fontFamily: "monospace",
+                  letterSpacing: "0.04em"
+                }}>
+                  {mv.icon} {mv.label}
+                  {mv.status === "MARKET_MATCHED" && mv.bookCount > 0 && ` · ${mv.bookCount} book${mv.bookCount > 1 ? "s" : ""}`}
+                  {mv.status === "MARKET_NEARBY"  && ` · Model: ${p.modelLine} · Books: ${bookLine?.line}`}
+                  {mv.status === "MARKET_MISMATCH" && ` · Model: ${p.modelLine} · Books: ${bookLine?.line}`}
+                </span>
+                {mv.status === "MARKET_MATCHED" && bookLine?.overOdds && (
+                  <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>
+                    Best: {bookLine.book} {bookLine.overOdds}
+                  </span>
+                )}
+                {mv.status === "MARKET_NEARBY" && (
+                  <span style={{ fontSize: 8, color: "#6b7280", fontStyle: "italic" }}>Check before betting</span>
+                )}
+                {mv.status === "MARKET_MISMATCH" && (
+                  <span style={{ fontSize: 8, color: "#6b7280", fontStyle: "italic" }}>Not directly actionable</span>
+                )}
+              </div>
 
               {p.signals?.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
@@ -8088,7 +8205,6 @@ export default function App() {
           </div>
 
           <div style={{ padding: "16px 14px", display: "flex", flexDirection: "column", gap: 20 }}>
-
             {/* Color Guide */}
             {(() => {
               const Section = ({ title, children }) => (

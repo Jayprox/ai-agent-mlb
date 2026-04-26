@@ -114,6 +114,8 @@ if (process.env.NODE_ENV === "production" || process.env.ENABLE_JOBS === "true")
   startScheduler();
 }
 
+cache.init().catch(() => {}); // seed in-memory from Redis on startup if available
+
 app.listen(PORT, () => {
   console.log(`\n⚾  Prop Scout API  →  http://localhost:${PORT}`);
 

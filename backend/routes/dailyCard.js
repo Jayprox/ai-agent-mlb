@@ -4,22 +4,22 @@
  * Gathers data across every game on today's slate and asks Claude to surface
  * only the 2–3 strongest plays, using a disciplined bankroll-building lens.
  *
- * Rate cap:  10 uncached Anthropic calls per calendar day (~$1.50 max)
+ * Rate cap:  10 uncached OpenAI calls per calendar day
  * Cache:     45 minutes — all users share one result per window
- * Model:     claude-sonnet-4-6  (more capable than Haiku; worth it for full-slate reasoning)
+ * Model:     gpt-4o-mini
  */
 
 const express   = require("express");
 const router    = express.Router();
 const axios     = require("axios");
-const Anthropic = require("@anthropic-ai/sdk");
+const OpenAI    = require("openai");
 const cache     = require("../services/cache");
 const { query, isConnected } = require("../services/db");
 const { todayHonolulu } = require("../jobs/snapshotJobs");
 
 const CARD_TTL     = 45 * 60 * 1000; // 45-minute result cache
-const DAILY_CAP    = 10;             // max uncached Anthropic calls per day (~$1.50)
-const CARD_MODEL   = "claude-sonnet-4-6";
+const DAILY_CAP    = 10;             // max uncached OpenAI calls per day
+const CARD_MODEL   = "gpt-4o-mini";
 
 // ── Daily call counter (resets at midnight Honolulu time) ────────────────────
 let _cap = { date: null, calls: 0 };
@@ -38,12 +38,12 @@ function capStatus() {
   return { date: _cap.date, calls: _cap.calls, remaining: DAILY_CAP - _cap.calls };
 }
 
-// ── Lazy Anthropic client ────────────────────────────────────────────────────
+// ── Lazy OpenAI client ───────────────────────────────────────────────────────
 let _client = null;
 const getClient = () => {
   if (!_client) {
-    if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
-    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+    _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
   return _client;
 };
@@ -76,7 +76,7 @@ async function readDailyCardSnapshot(date = todayHonolulu()) {
     gamesAnalyzed: row.games_analyzed,
     generatedAt: row.generated_at,
     tokens: row.tokens ?? null,
-    source: row.source ?? "anthropic",
+    source: row.source ?? "openai",
     status: row.status ?? "ready",
   };
 }
@@ -107,8 +107,8 @@ async function writeDailyCardSnapshot(result) {
 }
 
 async function generateDailyCard() {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured");
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY not configured");
 
   const cacheKey = `daily-card:${todayHonolulu()}`;
 
@@ -178,17 +178,19 @@ async function generateDailyCard() {
     console.log(`  · Daily Card context built  games=${games.length}  chars=${context.length}`);
 
     const client = getClient();
-    const message = await client.messages.create({
+    const message = await client.chat.completions.create({
       model:      CARD_MODEL,
       max_tokens: 2048,
-      system:     SYSTEM_PROMPT,
-      messages:   [{ role: "user", content: context }],
+      messages:   [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: context },
+      ],
     });
 
-    const text = message.content?.[0]?.text ?? "";
-    const inputTokens  = message.usage?.input_tokens  ?? 0;
-    const outputTokens = message.usage?.output_tokens ?? 0;
-    const estCost      = ((inputTokens * 3 + outputTokens * 15) / 1_000_000).toFixed(4);
+    const text = message.choices?.[0]?.message?.content ?? "";
+    const inputTokens  = message.usage?.prompt_tokens  ?? 0;
+    const outputTokens = message.usage?.completion_tokens ?? 0;
+    const estCost      = ((inputTokens * 0.15 + outputTokens * 0.60) / 1_000_000).toFixed(4);
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     console.log(`  ✓ Daily Card complete  games=${games.length}  in=${inputTokens}  out=${outputTokens}  cost=$${estCost}  elapsed=${elapsed}s  cap=${_cap.calls}/${DAILY_CAP}`);
@@ -199,7 +201,7 @@ async function generateDailyCard() {
       gamesAnalyzed: games.length,
       generatedAt:   new Date().toISOString(),
       tokens: { input: inputTokens, output: outputTokens, estCost },
-      source: "anthropic",
+      source: "openai",
       status: "ready",
     };
 

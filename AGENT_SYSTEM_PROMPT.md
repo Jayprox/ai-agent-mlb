@@ -440,31 +440,394 @@ Style: small monospace text, muted color for labels, white for numbers. Same vis
 
 ---
 
+### CODEX TASK 16 — Migrate AI from Anthropic to OpenAI GPT-4o mini
+
+**Decision:** Switched from Anthropic Claude to OpenAI GPT-4o mini across all three AI-powered routes for cost efficiency (~95% cheaper per season). Quality is acceptable for props/trends; Daily Card uses the same model for now with a backlog item to re-evaluate if quality drops.
+
+**Install:** `npm install openai` in `backend/`. Do NOT remove `@anthropic-ai/sdk` yet (leave it installed).
+
+**Add to `.env.example`:**
+```
+OPENAI_API_KEY=sk-...
+```
+
+**Files to modify: `backend/routes/dailyCard.js`, `backend/routes/props.js`, `backend/routes/trends.js`**
+
+---
+
+#### `backend/routes/dailyCard.js` — exact changes:
+
+**Line 8** — update comment:
+```js
+// Rate cap:  10 uncached OpenAI calls per calendar day
+// Model:     gpt-4o-mini
+```
+
+**Line 15** — replace SDK import:
+```js
+// OLD:
+const Anthropic = require("@anthropic-ai/sdk");
+// NEW:
+const OpenAI = require("openai");
+```
+
+**Line 22** — replace model constant:
+```js
+// OLD:
+const CARD_MODEL = "claude-sonnet-4-6";
+// NEW:
+const CARD_MODEL = "gpt-4o-mini";
+```
+
+**Lines 41–49** — replace lazy client (getClient function):
+```js
+// OLD:
+let _client = null;
+const getClient = () => {
+  if (!_client) {
+    if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
+    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return _client;
+};
+// NEW:
+let _client = null;
+const getClient = () => {
+  if (!_client) {
+    if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+    _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return _client;
+};
+```
+
+**Line 110** — update key check in generateDailyCard:
+```js
+// OLD:
+const apiKey = process.env.ANTHROPIC_API_KEY;
+if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured");
+// NEW:
+const apiKey = process.env.OPENAI_API_KEY;
+if (!apiKey) throw new Error("OPENAI_API_KEY not configured");
+```
+
+**Lines 180–194** — replace AI call and response parsing:
+```js
+// OLD:
+const client = getClient();
+const message = await client.messages.create({
+  model:      CARD_MODEL,
+  max_tokens: 2048,
+  system:     SYSTEM_PROMPT,
+  messages:   [{ role: "user", content: context }],
+});
+const text = message.content?.[0]?.text ?? "";
+const inputTokens  = message.usage?.input_tokens  ?? 0;
+const outputTokens = message.usage?.output_tokens ?? 0;
+const estCost      = ((inputTokens * 3 + outputTokens * 15) / 1_000_000).toFixed(4);
+
+// NEW:
+const client = getClient();
+const message = await client.chat.completions.create({
+  model:      CARD_MODEL,
+  max_tokens: 2048,
+  messages:   [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user",   content: context },
+  ],
+});
+const text = message.choices?.[0]?.message?.content ?? "";
+const inputTokens  = message.usage?.prompt_tokens     ?? 0;
+const outputTokens = message.usage?.completion_tokens ?? 0;
+const estCost      = ((inputTokens * 0.15 + outputTokens * 0.60) / 1_000_000).toFixed(4);
+```
+
+**Line 202** — update source field:
+```js
+// OLD:
+source: "anthropic",
+// NEW:
+source: "openai",
+```
+
+---
+
+#### `backend/routes/props.js` — exact changes:
+
+**Line 3** — replace SDK import:
+```js
+// OLD:
+const Anthropic = require("@anthropic-ai/sdk");
+// NEW:
+const OpenAI = require("openai");
+```
+
+**Lines 11–18** — replace lazy client:
+```js
+// OLD:
+let _client = null;
+const getClient = () => {
+  if (!_client) {
+    if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
+    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return _client;
+};
+// NEW:
+let _client = null;
+const getClient = () => {
+  if (!_client) {
+    if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+    _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return _client;
+};
+```
+
+**Lines 149–155** — replace AI call:
+```js
+// OLD:
+const client  = getClient();
+const message = await client.messages.create({
+  model:      "claude-haiku-4-5-20251001",
+  max_tokens: 1000,
+  system:     SYSTEM_PROMPT,
+  messages:   [{ role: "user", content: enrichedContext }],
+});
+const raw = message.content?.[0]?.text?.trim() ?? "";
+// NEW:
+const client  = getClient();
+const message = await client.chat.completions.create({
+  model:      "gpt-4o-mini",
+  max_tokens: 1000,
+  messages:   [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user",   content: enrichedContext },
+  ],
+});
+const raw = message.choices?.[0]?.message?.content?.trim() ?? "";
+```
+
+---
+
+#### `backend/routes/trends.js` — exact changes:
+
+**Line 3** — replace SDK import:
+```js
+// OLD:
+const Anthropic = require("@anthropic-ai/sdk");
+// NEW:
+const OpenAI = require("openai");
+```
+
+**Lines 9–16** — replace lazy client:
+```js
+// OLD:
+let _client = null;
+const getClient = () => {
+  if (!_client) {
+    if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
+    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return _client;
+};
+// NEW:
+let _client = null;
+const getClient = () => {
+  if (!_client) {
+    if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+    _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return _client;
+};
+```
+
+**Lines 39–45** — replace AI call:
+```js
+// OLD:
+const client  = getClient();
+const message = await client.messages.create({
+  model:      "claude-haiku-4-5-20251001",
+  max_tokens: 300,
+  system:     SYSTEM_PROMPT,
+  messages:   [{ role: "user", content: context }],
+});
+const summary = message.content?.[0]?.text?.trim() ?? null;
+// NEW:
+const client  = getClient();
+const message = await client.chat.completions.create({
+  model:      "gpt-4o-mini",
+  max_tokens: 300,
+  messages:   [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user",   content: context },
+  ],
+});
+const summary = message.choices?.[0]?.message?.content?.trim() ?? null;
+```
+
+**Constraints:**
+- Do NOT change any system prompt text — same prompts, just different API call structure
+- Do NOT touch any other files (server.js, cache.js, scheduler, etc.)
+- Do NOT remove `@anthropic-ai/sdk` from package.json
+- All TTLs, cap counters, and cache logic stay identical
+- The `readDailyCardSnapshot` fallback `source: row.source ?? "anthropic"` is fine — leave it (existing DB rows will correctly show as anthropic)
+
+---
+
 ### CODEX TASK 5 — Redis Persistent Cache (Backlog)
 
-**Goal:** Replace the in-memory `backend/services/cache.js` with a Redis-backed cache so the server can restart without losing pre-warmed data (odds, player props, boxscores, pitcher stats).
+**Goal:** Make the cache survive server restarts by adding a Redis persistence layer under the existing in-memory store. Pre-warmed data (odds, player props, boxscores, pitcher stats) should not be lost on a restart.
 
 **Files to modify:**
-- `backend/services/cache.js` — swap implementation
-- `backend/server.js` — add Redis client init
+- `backend/services/cache.js` — add Redis write-through layer
+- `backend/server.js` — call `cache.init()` on startup
 - `.env.example` — add `REDIS_URL`
-
-**What to build:**
-
-1. **Update `cache.js`** to use `ioredis`. Keep the exact same interface (`get(key)`, `set(key, value, ttlMs)`, `del(key)`) so no call sites need to change.
-
-2. **Fallback:** if `REDIS_URL` is not set, fall back to the current in-memory Map implementation. This keeps local dev working without Redis.
-
-3. **Serialization:** Redis stores strings — JSON serialize/deserialize values on `get`/`set`. Store TTL as Redis `PX` option (milliseconds).
-
-4. **Key prefix:** prefix all keys with `propscout:` to namespace cleanly: `propscout:odds`, `propscout:player-props:12345`, etc.
 
 **Install:** `npm install ioredis` in `backend/`.
 
+---
+
+### CODEX TASK 15 — Redis Persistent Cache — Detailed Implementation (Task #16)
+
+**Critical architectural note:** The current `cache.js` is fully synchronous (`get`, `set`, `clear`, `stats` all return values directly). Redis operations are async. Do NOT change any function signatures to async — there are 20+ call sites across the backend and changing them all is risky and unnecessary.
+
+**The correct approach: write-through hybrid**
+- Keep the in-memory store as the synchronous source of truth for all reads/writes during the session (all existing call sites work unchanged)
+- On every `set()`, also write to Redis asynchronously in the background (fire-and-forget)
+- On every `clear(key)`, also delete from Redis in the background
+- Add an async `init()` function that seeds the in-memory store from Redis on server startup — this is what survives restarts
+- If `REDIS_URL` is not set, skip all Redis operations silently (local dev keeps working with in-memory only)
+
+**Files to modify:**
+
+**1. `backend/services/cache.js`** — replace the entire file with this implementation:
+
+```js
+// cache.js — in-memory TTL cache with optional Redis write-through persistence.
+// All public methods remain synchronous so no call sites need to change.
+// Redis (if configured) seeds the in-memory store on startup and receives
+// background writes on every set() so data survives server restarts.
+
+const store = {};
+let redis = null;
+
+const PREFIX = "propscout:";
+
+function redisKey(key) { return PREFIX + key; }
+
+// Lazy Redis connect — only if REDIS_URL is set
+function getRedis() {
+  if (redis) return redis;
+  if (!process.env.REDIS_URL) return null;
+  try {
+    const Redis = require("ioredis");
+    redis = new Redis(process.env.REDIS_URL, {
+      lazyConnect:        true,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 1,
+      connectTimeout:     3000,
+    });
+    redis.on("error", () => {}); // suppress unhandled error events
+    return redis;
+  } catch { return null; }
+}
+
+module.exports = {
+  /** Seed in-memory store from Redis. Call once on server startup. */
+  async init() {
+    const r = getRedis();
+    if (!r) return;
+    try {
+      await r.connect().catch(() => {});
+      const keys = await r.keys(PREFIX + "*");
+      for (const rk of keys) {
+        const raw = await r.get(rk);
+        const ttl = await r.pttl(rk); // remaining TTL in ms
+        if (!raw || ttl <= 0) continue;
+        try {
+          const parsed = JSON.parse(raw);
+          const localKey = rk.slice(PREFIX.length);
+          store[localKey] = { data: parsed, expiresAt: Date.now() + ttl };
+        } catch {}
+      }
+    } catch {}
+  },
+
+  get(key) {
+    const entry = store[key];
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      delete store[key];
+      const r = getRedis();
+      if (r) r.del(redisKey(key)).catch(() => {});
+      return undefined;
+    }
+    return entry.data;
+  },
+
+  set(key, data, ttlMs) {
+    store[key] = { data, expiresAt: Date.now() + ttlMs };
+    const r = getRedis();
+    if (r) {
+      try {
+        r.set(redisKey(key), JSON.stringify(data), "PX", ttlMs).catch(() => {});
+      } catch {}
+    }
+  },
+
+  clear(key) {
+    const r = getRedis();
+    if (key) {
+      delete store[key];
+      if (r) r.del(redisKey(key)).catch(() => {});
+    } else {
+      Object.keys(store).forEach(k => delete store[k]);
+      if (r) r.keys(PREFIX + "*").then(keys => keys.length && r.del(...keys)).catch(() => {});
+    }
+  },
+
+  stats() {
+    const now = Date.now();
+    return Object.entries(store).map(([k, v]) => ({
+      key: k,
+      expiresIn: Math.max(0, Math.round((v.expiresAt - now) / 1000)) + "s",
+    }));
+  },
+};
+```
+
+**2. `backend/server.js`** — call `cache.init()` at startup. Find where the server starts listening and add the init call before it:
+```js
+// Near the top where cache is already required:
+const cache = require("./services/cache");
+
+// Before or alongside app.listen(...):
+cache.init().catch(() => {}); // seed from Redis if available
+```
+
+**3. `.env.example`** — add:
+```
+REDIS_URL=redis://localhost:6379
+```
+
 **Constraints:**
-- Do not change any TTL values — cache durations stay the same
-- The in-memory fallback must be drop-in compatible (same function signatures)
-- Add `REDIS_URL=redis://localhost:6379` to `.env.example`
+- Do NOT change any function signatures to async — `get`, `set`, `clear`, `stats` must stay synchronous
+- Do NOT modify any route files — only `cache.js` and `server.js` change
+- Do NOT change any TTL values anywhere
+- All Redis operations use fire-and-forget `.catch(() => {})` — a Redis failure must never crash or slow down a request
+- If `REDIS_URL` is not in env, the module behaves identically to today (pure in-memory)
+
+### HANDOFF NOTE — 2026-04-25
+
+- AI Help Chat from CODEX TASK 14 was intentionally removed after local reliability issues and unclear UX around auth/error states.
+- Current state: the Help overlay is back to static guide content only.
+- Ignore `backend/routes/helpChat.js` and `/api/help-chat` for now; they are no longer part of the active app surface.
+- If revived later, restart from CODEX TASK 14 as a fresh re-scope rather than assuming the prior implementation is still desired.
+- Current Anthropic-backed app surfaces are:
+  - `backend/routes/dailyCard.js` — active, user-facing
+  - `backend/routes/trends.js` — active, user-facing
+  - `backend/routes/props.js` — still mounted, but the current frontend no longer appears to call it after Props-tab AI Analysis removal
 
 ---
 
@@ -890,3 +1253,276 @@ Keep all existing styles on the badges unchanged — only replace the text conte
 - Do not change `markResult`, `deletePick`, or `isLogged`
 - Do not touch any backend routes or API calls
 - All four fixes are independent — implement all four in a single pass
+
+---
+
+### CODEX TASK 13 — Market Validation Badge on Model Pick Cards
+
+**Goal:** Add a market validation badge to each Model Pick card so users know whether the model's suggested line matches a real sportsbook market, is close but different, or is a model-only projection not directly bettable.
+
+**File to modify:** `prop-scout-v7.jsx`
+
+**Why this is simple:** No new state, no new API calls, no architecture changes. All the data is already computed on each card:
+- `bookLine` — real sportsbook line from `getBookLine(p)` (already called at line ~4063)
+- `p.modelLine` — model's suggested line (already on every pick object)
+- `lineMismatch` — already partially computed as `bookLine && Math.abs(bookLine.line - p.modelLine) >= 0.5`
+- `livePlayerProps[String(p.gamePk)]` — already in state, used to detect if odds haven't loaded yet
+
+**What to add — 2 edits only:**
+
+**Edit 1 — Extend the inline validation logic** right after `lineMismatch` is computed (around line 4064), add:
+```js
+const mv = (() => {
+  if (!bookLine) {
+    const ppState = livePlayerProps[String(p.gamePk)];
+    if (!ppState || ppState === "loading") return { status: "ODDS_PULL_FAILED",    label: "Checking Odds…",    color: "#4b5563", icon: "⟳" };
+    return                                        { status: "MARKET_UNAVAILABLE",  label: "Odds Unavailable", color: "#4b5563", icon: "—" };
+  }
+  const diff      = Math.abs((p.modelLine ?? 0) - bookLine.line);
+  const bookCount = bookLine.allBooks?.length ?? 0;
+  if (diff === 0)    return { status: "MARKET_MATCHED",    label: "Verified Market",   color: "#22c55e", icon: "✓", diff, bookCount };
+  if (diff <= 1.0)   return { status: "MARKET_NEARBY",     label: "Alt Line",          color: "#f59e0b", icon: "~", diff, bookCount };
+  return                    { status: "MARKET_MISMATCH",   label: "Model Projection",  color: "#ef4444", icon: "⚠", diff, bookCount };
+})();
+```
+
+**Edit 2 — Render the badge** between the LINES grid closing tag and the signals section (between lines ~4153 and ~4155, after `</div>` that closes the bookLine block and before `{p.signals?.length > 0 &&`):
+
+```jsx
+{/* Market Validation Badge */}
+<div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: mv.status !== "ODDS_PULL_FAILED" ? 6 : 0, flexWrap: "wrap" }}>
+  <span style={{
+    fontSize: 8, fontWeight: 700, padding: "2px 7px", borderRadius: 4,
+    color: mv.color,
+    background: `${mv.color}18`,
+    border: `1px solid ${mv.color}44`,
+    fontFamily: "monospace",
+    letterSpacing: "0.04em"
+  }}>
+    {mv.icon} {mv.label}
+    {mv.status === "MARKET_MATCHED" && mv.bookCount > 0 && ` · ${mv.bookCount} book${mv.bookCount > 1 ? "s" : ""}`}
+    {mv.status === "MARKET_NEARBY"  && ` · Model: ${p.modelLine} · Books: ${bookLine?.line}`}
+    {mv.status === "MARKET_MISMATCH" && ` · Model: ${p.modelLine} · Books: ${bookLine?.line}`}
+  </span>
+  {mv.status === "MARKET_MATCHED" && bookLine?.overOdds && (
+    <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>
+      Best: {bookLine.book} {bookLine.overOdds}
+    </span>
+  )}
+  {mv.status === "MARKET_NEARBY" && (
+    <span style={{ fontSize: 8, color: "#6b7280", fontStyle: "italic" }}>Check before betting</span>
+  )}
+  {mv.status === "MARKET_MISMATCH" && (
+    <span style={{ fontSize: 8, color: "#6b7280", fontStyle: "italic" }}>Not directly actionable</span>
+  )}
+</div>
+```
+
+**Status enum reference:**
+- `MARKET_MATCHED` — exact line exists at one or more books → green `✓ Verified Market · 3 books · Best: FD -118`
+- `MARKET_NEARBY` — same prop, line differs ≤ 1.0 → amber `~ Alt Line · Model: 5.5 · Books: 4.5 · Check before betting`
+- `MARKET_MISMATCH` — line differs > 1.0 → red `⚠ Model Projection · Model: 14.5 · Books: 18.5 · Not directly actionable`
+- `MARKET_UNAVAILABLE` — prop not found at any book → gray `— Odds Unavailable`
+- `ODDS_PULL_FAILED` — odds not loaded yet → gray `⟳ Checking Odds…`
+
+**Constraints:**
+- All logic is inline inside `TierSection`'s `tierPicks.map(...)` — no new component, no new state, no new helper function needed
+- Do NOT modify `getBookLine`, `computeTopSlatePicks`, or any scoring functions
+- Do NOT add any new API calls or useEffects
+- The badge only appears on the MODEL tab pick cards (inside `TierSection`) — not on the Board or anywhere else
+- Keep the existing `lineMismatch` variable — it still drives the `model: {p.modelLine}` display in the LINES grid header
+
+---
+
+## Latest Codex Update (Apr 25, 2026)
+
+- **Auto-grading expanded beyond the earlier game-level + pitcher-only set.**
+- `computeGrade(...)` in `prop-scout-v7.jsx` now also handles:
+  - `Moneyline`
+  - batter `Hits`
+  - batter `Home Runs`
+  - batter `RBI`
+  - batter `Total Bases`
+- **Important enabling change:** `backend/routes/boxscore.js` now includes `doubles`, `triples`, and `tb` (`totalBases`) on each batter row so `TB` props can be graded from final boxscore data instead of staying manual forever.
+- **Logging reliability improved:** `logPick(...)` now prefers IDs/names already present on the prop object (`prop.gamePk`, `prop.pitcherId`, `prop.playerId`, `prop.fullName`, `prop.name`) before falling back to the currently selected game/batter. This makes auto-grading much more reliable for picks logged from MODEL / BOARD contexts, not just the Game tab.
+- **Current practical status:** all core logged prop types in the app are now intended to auto-grade once final boxscore/linescore data is available, provided the app is open or reopened after game end so the grading effect can run.
+
+---
+
+### CODEX TASK 14 — AI Search Chat in Help Overlay (Task #18)
+
+**Read CODEX TASK 6 first** (earlier in this doc) for the full original spec. This entry adds exact line numbers and an updated HELP_CONTEXT covering all features built since Task 6 was written.
+
+**Files to create/modify:**
+- **Create:** `backend/routes/helpChat.js`
+- **Modify:** `backend/server.js` — add mount line
+- **Modify:** `prop-scout-v7.jsx` — state + UI
+
+---
+
+**Backend: `backend/routes/helpChat.js`**
+
+Follow the exact same pattern as `backend/routes/dailyCard.js`:
+- Lazy Anthropic client (`getClient()`)
+- Daily cap counter using `todayHonolulu()` — set cap to **20 calls/day**
+- MD5 hash cache using `crypto.createHash("md5")` — TTL **1 hour**
+- `requireAuth` middleware
+
+Use `claude-haiku-4-5-20251001` (not Sonnet) — answers are short and factual, Haiku is sufficient and cheaper.
+
+**HELP_CONTEXT** (hardcode this string in the route file):
+```
+PROP SCOUT — Feature Reference
+
+SLATE TAB: Lists today's MLB games. Each card shows teams, time, probable pitchers, weather (temp/wind), park name, and live score if in progress. Tap a card to open the Game view.
+
+GAME VIEW TABS:
+- Overview: pitcher stats (ERA, K/9, WHIP, BB/9, avgIP), home/away splits, recent form
+- Lineup: confirmed batting order with platoon matchup indicators (L/R splits)
+- Arsenal: pitcher pitch mix, whiff rates, usage % from Baseball Savant
+- Intel: umpire zone tendencies (K-friendly/hitter-friendly rating), NRFI/YRFI lean, bullpen fatigue (pitch count last 3 days), odds card (moneyline, spread, O/U, F5 total), line movement arrow
+- Props: Prop Confidence Meters (scored 0–100), Sportsbook Lines grid with book filter chips (ALL/DK/FD/CZR/MGM/BOV), collapsible K/HR/TB/H sections
+- Bullpen: each reliever's recent usage, ERA, handedness
+- Boxscore: live or final inning-by-inning scoring, batting and pitching lines
+
+BOARD TAB: Ranked player lists scored by the internal algorithm.
+- HR tab: top home run candidates scored on SLG, park HR factor, wind, batting order, platoon split
+- Hits tab: top hit candidates scored on AVG, contact rate, park hit factor, platoon split
+- K tab (Strikeouts): top K over candidates scored on K/9, ERA, WHIP, park K factor, umpire, recent form
+- Outs tab: top Outs recorded over candidates scored on avgIP, ERA, WHIP, BB/9
+- Games tab: sub-tabs for NRFI / O/U Total / Run Line / Moneyline — each game scored algorithmically
+Score badge (0–100): 70+ green (strong), 55–69 amber (moderate), below 55 red (weak)
+Tap WHY? on any card to see the exact factors that built the score.
+
+MODEL PICKS TAB (🎯): Algorithm-selected top pitcher props for the day.
+- HIGH CONFIDENCE (≥75%), MEDIUM CONFIDENCE (55–74%), SPECULATIVE (<55%)
+- Each card shows: pitcher name, matchup, confidence %, lean (OVER/UNDER), factor signals
+- LINES grid: book-by-book line and juice for DK/FD/CZR/MGM/BOV. Best line highlighted green.
+- LINE INTELLIGENCE (EDGE badge): if sharp books (DK/FD) have a lower line than square books (CZR/MGM/BOV) by 0.5+, it signals a mispriced market — the lower line is the smarter number.
+- ✦ CARD AGREES badge: the Daily Card AI analysis independently selected the same pitcher for the same prop type — two separate systems agreeing is a convergence signal.
+- Market Validation badge: ✓ Verified Market (exact line at 1+ books), ~ Alt Line (line within 1.0 of model), ⚠ Model Projection (line differs >1.0, not directly bettable), — Odds Unavailable
+- Preferred book filter: if a preferred sportsbook is set, only picks available at that book are shown.
+
+PICKS TAB: Your personal pick log. Tap + Log on any prop to save it. Shows HIT/MISS/pending result. Auto-grades once final boxscore data is available. W-L record and 7-day win rate displayed.
+
+SPORTSBOOKS: DK = DraftKings, FD = FanDuel, CZR = Caesars, MGM = BetMGM, BOV = Bovada. DK and FD are sharp books (tighter, more accurate lines). CZR, MGM, BOV are square books. LINE INTELLIGENCE fires when sharp lines are 0.5+ lower than square lines.
+
+SETTINGS: Set preferred sportsbook — affects which book's line appears first in LINES grids and filters Model Picks to only show props available at your book. Options: DK, FD, CZR, MGM, BOV.
+
+DAILY CARD: AI-generated full-slate analysis surfacing 2–3 strongest plays with reasoning. Appears in the Intel tab. Updates up to 10 times per day.
+
+STAT GLOSSARY: ERA = earned run average (lower = better). K/9 = strikeouts per 9 innings. WHIP = walks + hits per inning pitched (lower = better). BB/9 = walks per 9 innings. avgIP = average innings pitched per start. SLG = slugging percentage. OPS = on-base + slugging. L3 avg = average over last 3 starts. Park factor = multiplier showing how a stadium inflates/suppresses hits, HRs, or Ks vs league average (1.0 = neutral).
+```
+
+**Endpoint logic:**
+```js
+router.post("/", requireAuth, async (req, res) => {
+  const question = (req.body.question ?? "").trim().slice(0, 300);
+  if (!question) return res.status(400).json({ error: "question required" });
+
+  const cacheKey = `help:${crypto.createHash("md5").update(question.toLowerCase()).digest("hex")}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return res.json({ answer: cached, cached: true });
+
+  if (!capCheck()) return res.status(429).json({ error: "daily limit reached" });
+
+  const client = getClient();
+  const msg = await client.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 200,
+    system: `You are a helpful assistant for the Prop Scout MLB betting research app. Answer the user's question using only the context below. Be concise (2–4 sentences). If the question is not covered, say so briefly. Never invent features.\n\n${HELP_CONTEXT}`,
+    messages: [{ role: "user", content: question }],
+  });
+  const answer = msg.content[0]?.text ?? "Sorry, I couldn't generate an answer.";
+  cache.set(cacheKey, answer, 60 * 60 * 1000);
+  res.json({ answer });
+});
+```
+
+**Mount in `server.js`:** add `app.use("/api/help-chat", require("./routes/helpChat"));` alongside the other route mounts.
+
+---
+
+**Frontend: `prop-scout-v7.jsx`**
+
+**Step 1 — Add state** near line 2796 (alongside `showHelp`):
+```js
+const [helpQ,       setHelpQ]       = useState("");
+const [helpA,       setHelpA]       = useState(null);
+const [helpLoading, setHelpLoading] = useState(false);
+```
+
+**Step 2 — Clear state when help closes** — find the CLOSE button at line ~8200 where `setShowHelp(false)` is called, and add:
+```js
+onClick={() => { setShowHelp(false); setHelpQ(""); setHelpA(null); }}
+```
+
+**Step 3 — Insert chat UI** inside the help content wrapper at line ~8203, directly before the first `{(() => {` IIFE (the Color Guide section). Insert:
+
+```jsx
+{/* ── AI Help Chat ── */}
+<div style={{ background: "#161827", border: "1px solid #2d3148", borderRadius: 10, padding: "12px 14px" }}>
+  <div style={{ fontSize: 10, fontWeight: 700, color: "#818cf8", fontFamily: "monospace", letterSpacing: "0.08em", marginBottom: 10 }}>⚡ ASK PROP SCOUT</div>
+
+  {/* Suggested chips — shown when no answer yet */}
+  {!helpA && (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+      {["How does LINE INTELLIGENCE work?", "What is ✦ CARD AGREES?", "How is the NRFI score calculated?", "What's the difference between Board and Model Picks?"].map(q => (
+        <button key={q} onClick={() => setHelpQ(q)}
+          style={{ fontSize: 8, padding: "3px 8px", borderRadius: 6, background: "rgba(129,140,248,0.08)", border: "1px solid rgba(129,140,248,0.25)", color: "#818cf8", cursor: "pointer", fontFamily: "monospace" }}>
+          {q}
+        </button>
+      ))}
+    </div>
+  )}
+
+  {/* Input row */}
+  <div style={{ display: "flex", gap: 8 }}>
+    <input
+      value={helpQ}
+      onChange={e => setHelpQ(e.target.value)}
+      onKeyDown={e => { if (e.key === "Enter" && helpQ.trim() && !helpLoading) submitHelpQ(); }}
+      placeholder="Ask anything about the app…"
+      style={{ flex: 1, background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 8, padding: "7px 10px", fontSize: 11, color: "#f9fafb", fontFamily: "monospace", outline: "none" }}
+    />
+    <button
+      onClick={submitHelpQ}
+      disabled={!helpQ.trim() || helpLoading}
+      style={{ background: helpQ.trim() ? "rgba(129,140,248,0.2)" : "rgba(255,255,255,0.04)", border: "1px solid rgba(129,140,248,0.3)", borderRadius: 8, padding: "7px 12px", fontSize: 12, color: "#818cf8", cursor: helpQ.trim() ? "pointer" : "default", fontWeight: 700 }}>
+      {helpLoading ? "…" : "→"}
+    </button>
+  </div>
+
+  {/* Answer card */}
+  {helpA && (
+    <div style={{ marginTop: 10, background: "#0f1020", borderLeft: "3px solid #818cf8", borderRadius: "0 8px 8px 0", padding: "10px 12px", position: "relative" }}>
+      <button onClick={() => { setHelpA(null); setHelpQ(""); }}
+        style={{ position: "absolute", top: 6, right: 8, background: "none", border: "none", color: "#4b5563", cursor: "pointer", fontSize: 12 }}>✕</button>
+      <div style={{ fontSize: 11, color: "#e5e7eb", lineHeight: 1.6, fontFamily: "monospace", paddingRight: 16 }}>{helpA}</div>
+    </div>
+  )}
+</div>
+```
+
+**Step 4 — Add submit handler** at component level (near other helper functions, around line 3940):
+```js
+const submitHelpQ = async () => {
+  if (!helpQ.trim() || helpLoading) return;
+  setHelpLoading(true);
+  setHelpA(null);
+  try {
+    const data = await apiMutate("/api/help-chat", "POST", { question: helpQ });
+    setHelpA(data.answer ?? "No answer returned.");
+  } catch {
+    setHelpA("Sorry, couldn't reach the help service. Try again.");
+  } finally {
+    setHelpLoading(false);
+  }
+};
+```
+
+**Constraints:**
+- `helpQ`, `helpA`, `helpLoading`, and `submitHelpQ` must ALL be at component level — never inside the help overlay IIFE or any render block
+- `submitHelpQ` uses `apiMutate` (already in scope) — not a raw fetch
+- Do not change any existing Section or Row components inside the help overlay
+- The chat block sits inside the `<div style={{ padding: "16px 14px" ... }}>` wrapper, as the very first child before all Section content

@@ -1,6 +1,6 @@
 const express   = require("express");
 const router    = express.Router();
-const Anthropic = require("@anthropic-ai/sdk");
+const OpenAI    = require("openai");
 const cache     = require("../services/cache");
 
 const TRENDS_TTL = 2 * 60 * 60 * 1000; // 2 hours
@@ -9,8 +9,8 @@ const TRENDS_TTL = 2 * 60 * 60 * 1000; // 2 hours
 let _client = null;
 const getClient = () => {
   if (!_client) {
-    if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
-    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
+    _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
   return _client;
 };
@@ -37,14 +37,16 @@ router.post("/:gamePk", async (req, res) => {
 
   try {
     const client  = getClient();
-    const message = await client.messages.create({
-      model:      "claude-haiku-4-5-20251001",
+    const message = await client.chat.completions.create({
+      model:      "gpt-4o-mini",
       max_tokens: 300,
-      system:     SYSTEM_PROMPT,
-      messages:   [{ role: "user", content: context }],
+      messages:   [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: context },
+      ],
     });
 
-    const summary = message.content?.[0]?.text?.trim() ?? null;
+    const summary = message.choices?.[0]?.message?.content?.trim() ?? null;
     if (!summary) return res.status(502).json({ error: "Empty response from AI" });
 
     const result = { summary, gamePk: parseInt(gamePk, 10) };
