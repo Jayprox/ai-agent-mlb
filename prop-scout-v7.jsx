@@ -1609,9 +1609,12 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
         kSigs.push(`Cold weather ${sgWx.temp}°F (suppresses contact)`);
       }
       if (lineupAdj !== 0 && lineupSignal) { kScore += lineupAdj; kSigs.push(lineupSignal); }
-      if (avgIP >= 6.0) kSigs.push(`Avg IP ${avgIP.toFixed(1)} (deep outings, more K opportunities)`);
+      if      (avgIP >= 6.0) { kScore += 6; kSigs.push(`Avg IP ${avgIP.toFixed(1)} (deep outings, more K opportunities)`); }
+      else if (avgIP >= 5.5) { kScore += 3; kSigs.push(`Avg IP ${avgIP.toFixed(1)} (consistent depth)`); }
+      else if (avgIP < 4.5)  { kScore -= 6; kSigs.push(`Avg IP ${avgIP.toFixed(1)} (short outings, fewer Ks)`); }
+      else if (avgIP < 5.0)  { kScore -= 3; kSigs.push(`Avg IP ${avgIP.toFixed(1)} (below average depth)`); }
 
-      kScore = Math.max(38, Math.min(78, kScore));
+      kScore = Math.max(38, Math.min(88, kScore));
       const kLine = Math.max(0.5, Math.round(avgK) - 0.5);
 
       picks.push({
@@ -1654,11 +1657,13 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
       else if (bbPer9 > 3.5) { oScore -= 4; oSigs.push(`BB/9 ${bbPer9.toFixed(1)} (elevated walks)`); }
 
       if (lineupAdj !== 0 && lineupSignal) { oScore += lineupAdj; oSigs.push(lineupSignal); }
-      if (avgIP >= 6.0) oSigs.push(`Avg IP ${avgIP.toFixed(1)} (consistently works deep)`);
-      else if (avgIP < 5.0) oSigs.push(`Avg IP ${avgIP.toFixed(1)} (short outing risk)`);
+      if      (avgIP >= 6.0) { oScore += 8; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (consistently works deep)`); }
+      else if (avgIP >= 5.5) { oScore += 4; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (deep outings)`); }
+      else if (avgIP < 4.5)  { oScore -= 8; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (short outing risk)`); }
+      else if (avgIP < 5.0)  { oScore -= 4; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (below average depth)`); }
 
-      oScore = Math.max(38, Math.min(78, oScore));
-      const oLine = Math.max(0.5, Math.round(avgIP * 3) - 0.5);
+      oScore = Math.max(38, Math.min(88, oScore));
+      const oLine = Math.max(0.5, Math.round(avgIP * 3) + 0.5);
 
       picks.push({
         label:          `${lastName} Outs O/U ${oLine}`,
@@ -4083,10 +4088,6 @@ export default function App() {
               ? (p.lean === "UNDER" ? result.k < p.modelLine : result.k > p.modelLine)
               : (p.lean === "UNDER" ? result.outs < p.modelLine : result.outs > p.modelLine)
           );
-          const resultBorderColor = isResolved ? (modelHit ? "#22c55e" : "#ef4444") : null;
-          const resultCardStyle = resultBorderColor
-            ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
-            : {};
           const gameStatus = (() => {
             const g = (activeSlate ?? []).find(game => (game.gamePk ?? game.id) === p.gamePk);
             const status = g?.status ?? "";
@@ -4094,6 +4095,13 @@ export default function App() {
             if (status === "Final" || status === "Game Over") return "FINAL";
             return null;
           })();
+          // Only show red border (miss) once game is final — never mid-game
+          const resultBorderColor = isResolved
+            ? (modelHit ? "#22c55e" : (gameStatus === "FINAL" ? "#ef4444" : null))
+            : null;
+          const resultCardStyle = resultBorderColor
+            ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
+            : {};
           return (
             <div key={i} style={{ background: "#0f1020", border: `1px solid ${borderColor}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6, ...resultCardStyle }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
@@ -5343,24 +5351,31 @@ export default function App() {
 
                         {/* Name + position */}
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                            <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{b.name}</div>
+                          {/* Name row — always full width, never truncated by badges */}
+                          <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, flex: 1 }}>{b.name}</div>
                             {injuredIds.has(String(b.id)) && (
                               <span style={{ background: "rgba(239,68,68,0.14)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 999, padding: "1px 5px", fontSize: 8, fontWeight: 800, color: "#ef4444", textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>⚠ IL</span>
                             )}
-                            {streakTone && (
-                              <span style={{ background: streakTone.bg, border: `1px solid ${streakTone.border}`, borderRadius: 999, padding: "1px 5px", fontSize: 8, fontWeight: 800, color: streakTone.color, textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>{streakTone.label}</span>
-                            )}
-                            {(() => {
-                              const OF = new Set(["LF","CF","RF"]);
-                              const oop = b.primaryPos && b.pos !== b.primaryPos
-                                && b.pos !== "DH" && b.primaryPos !== "DH"
-                                && !(OF.has(b.pos) && OF.has(b.primaryPos));
-                              return oop ? (
-                                <span style={{ background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.35)", borderRadius: 999, padding: "1px 5px", fontSize: 8, fontWeight: 800, color: "#fbbf24", textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>⚠ {b.pos} (norm. {b.primaryPos})</span>
-                              ) : null;
-                            })()}
                           </div>
+                          {/* Badge row — only rendered when at least one badge exists */}
+                          {(() => {
+                            const OF = new Set(["LF","CF","RF"]);
+                            const oop = b.primaryPos && b.pos !== b.primaryPos
+                              && b.pos !== "DH" && b.primaryPos !== "DH"
+                              && !(OF.has(b.pos) && OF.has(b.primaryPos));
+                            if (!streakTone && !oop) return null;
+                            return (
+                              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 3 }}>
+                                {streakTone && (
+                                  <span style={{ background: streakTone.bg, border: `1px solid ${streakTone.border}`, borderRadius: 999, padding: "1px 5px", fontSize: 8, fontWeight: 800, color: streakTone.color, textTransform: "uppercase", letterSpacing: "0.06em" }}>{streakTone.label}</span>
+                                )}
+                                {oop && (
+                                  <span style={{ background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.35)", borderRadius: 999, padding: "1px 5px", fontSize: 8, fontWeight: 800, color: "#fbbf24", textTransform: "uppercase", letterSpacing: "0.06em" }}>⚠ {b.pos} (norm. {b.primaryPos})</span>
+                                )}
+                              </div>
+                            );
+                          })()}
                           <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>{b.pos} · {b.hand}H · {b.avg}</div>
                         </div>
 

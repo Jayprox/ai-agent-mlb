@@ -831,6 +831,39 @@ REDIS_URL=redis://localhost:6379
 
 ---
 
+### CODEX TASK 19 — Fix Outs Model Line Calibration and Score Clustering
+
+**Goal:** Two fixes in `computeTopSlatePicks` in `prop-scout-v7.jsx`:
+1. The model line for Outs is consistently ~1 out below actual sportsbook lines (generating 14.5 when books post 15.5–17.5)
+2. All Outs picks cluster at 78% confidence because `avgIP` only appears in signal text, never in the score
+
+**File: `prop-scout-v7.jsx` — function `computeTopSlatePicks` (~line 1542)**
+
+**Edit 1 — Fix line formula** (~line 1661). Change `-0.5` to `+0.5`:
+```js
+// OLD:
+const oLine = Math.max(0.5, Math.round(avgIP * 3) - 0.5);
+// NEW:
+const oLine = Math.max(0.5, Math.round(avgIP * 3) + 0.5);
+```
+
+**Edit 2 — Make avgIP affect oScore** (~lines 1657–1658). Replace the two signal-only lines with scoring branches:
+```js
+// OLD:
+if (avgIP >= 6.0) oSigs.push(`Avg IP ${avgIP.toFixed(1)} (consistently works deep)`);
+else if (avgIP < 5.0) oSigs.push(`Avg IP ${avgIP.toFixed(1)} (short outing risk)`);
+
+// NEW:
+if      (avgIP >= 6.0) { oScore += 8; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (consistently works deep)`); }
+else if (avgIP >= 5.5) { oScore += 4; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (deep outings)`); }
+else if (avgIP < 4.5)  { oScore -= 8; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (short outing risk)`); }
+else if (avgIP < 5.0)  { oScore -= 4; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (below average depth)`); }
+```
+
+**Constraints:** Only touch these two edits inside `computeTopSlatePicks`. Do not modify K scoring, the game-view scoring block (~line 2330), or any other function.
+
+---
+
 ### CODEX TASK 18 — Add pitcher_outs to Player Props API Fetch
 
 **Goal:** The Outs board in Model Picks shows "Odds Unavailable" on every card because `pitcher_outs` is never requested from the Odds API. Two-line fix in `backend/routes/playerProps.js`.
@@ -877,6 +910,50 @@ The alternative considered was using avgIP as an additional weight inside the K 
 Option A (just fetch the missing market) is lower risk and preserves the K scoring exactly as-is. If `pitcher_outs` lines are consistently unavailable on sportsbooks after this fix, revisit at that point.
 
 ---
+
+### CODEX TASK 20 — Score Cap Fix: K and Outs picks clustering at 78% (COMPLETED by CW)
+
+**Status: Done — no action needed. Documented here for context.**
+
+Both K and Outs scoring caps were raised from 78 → 88 in `prop-scout-v7.jsx`, and avgIP was added as a scoring factor (not just signal text) for K picks.
+
+Changes applied:
+- Line ~1617: `kScore = Math.max(38, Math.min(88, kScore));` (was 78)
+- Line ~1665: `oScore = Math.max(38, Math.min(88, oScore));` (was 78)
+- Lines ~1612–1615: avgIP now scores K picks (+6/+3/-3/-6) matching Outs scoring pattern
+
+Effect: Elite aces (ERA <3, K/9 ≥10, WHIP <1.10, avgIP ≥6) now score 81–88 and are distinguishable from solid-but-not-elite starters. Previously everything compressed to 78.
+
+---
+
+### BACKLOG TASK 27 — Label and Unify Algorithmic vs AI-Powered Picks
+
+**Background:**
+Prop Scout has two independent pick-generation systems that currently show no UI distinction:
+
+1. **Model Picks tab** — Pure algorithmic scoring via `computeTopSlatePicks` in `prop-scout-v7.jsx`. Inputs: ERA, K/9, WHIP, BB/9, avgIP, park factor, weather, platoon matchup. Zero LLM involvement.
+2. **Props tab** — AI-generated per game via OpenAI GPT-4o mini (`backend/routes/props.js`). Reads full per-game context (lineups, umpire, NRFI, odds, sportsbook lines, real-time news via Tavily) and reasons holistically.
+
+These systems can disagree because they use different methodologies and evaluate different lines. A user seeing "Model: K OVER 7.5 @ 81%" and "AI: K UNDER 6.5 @ 49%" has no context for why.
+
+**Phase A — Label clearly in UI (low effort, frontend only):**
+- Add a small badge to Model Picks cards: e.g. `⚙ Algorithmic`
+- Add a small badge to Props tab picks: e.g. `✦ AI-Powered`
+- Add tooltip/help text explaining the difference in plain language
+
+**Phase B — Hybrid AI pick (high value, medium effort):**
+- Refactor `backend/routes/props.js` context builder to inject `computeTopSlatePicks` model scores as structured input alongside existing per-game context
+- The enriched context would include: model K score, model Outs score, model line estimates, and key scoring signals (ERA, K/9, WHIP, avgIP) for the starting pitcher
+- Let GPT-4o mini reason over both the quantitative model scores AND the qualitative game context together
+- Output: a single unified pick card that combines model confidence + AI reasoning
+- Goal: eliminate divergence where model and AI point in opposite directions without explanation
+
+**Files to touch for Phase B:**
+- `prop-scout-v7.jsx` — expose `computeTopSlatePicks` signals in the context string sent to `/api/props/:gamePk`
+- `backend/routes/props.js` — update SYSTEM_PROMPT to reference model scores; add model score fields to JSON output schema
+- Possibly a new `/api/hybrid-props/:gamePk` endpoint to keep concerns separate
+
+**Decision note:** Start with Phase A (transparency) before Phase B (unification). Phase A alone resolves user confusion. Phase B is the long-term architecture improvement.
 
 ### CODEX TASK 17 — Remove F5 Props
 
