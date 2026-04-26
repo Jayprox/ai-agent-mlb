@@ -831,6 +831,62 @@ REDIS_URL=redis://localhost:6379
 
 ---
 
+### CODEX TASK 17 — Remove F5 Props
+
+**Goal:** Remove all F5 (first 5 innings) prop references from the app. Pure deletion — no new features. Can be re-introduced later if demand exists.
+
+**File 1: `prop-scout-v7.jsx`**
+
+**Edit 1 — Remove F5 scoring block** (~line 2395). Find and delete the entire block from:
+```js
+let f5Score = 50;
+const f5R = [];
+const f5GameKey = ...
+```
+through to and including the closing object with `propType: "F5"`, `confidence`, `lean`, `positive`, `reason` fields and any trailing comma.
+
+**Edit 2 — Remove computeGrade F5 branch** (~line 3877). Delete:
+```js
+// F5 — first 5 innings total
+if (label.includes("F5") || label.includes("FIRST 5")) {
+  const f5 = innings.slice(0, 5).reduce((s, i) => s + (i.away ?? 0) + (i.home ?? 0), 0);
+  const m  = label.match(/(\d+\.?\d*)/);
+  if (!m) return null;
+  const line = parseFloat(m[1]);
+  if (lean === "OVER")  return f5 > line ? "hit" : "miss";
+  if (lean === "UNDER") return f5 < line ? "hit" : "miss";
+  return null;
+}
+```
+
+**Edit 3 — Remove F5 Lean card in Intel tab** (~line 5278). Delete the entire `{/* ── F5 Lean ── */}` JSX block through its closing `}` — the block that computes `f5Lean` from `avgEra` and renders `<SLabel>F5 Lean</SLabel>`.
+
+**Edit 4 — Remove F5 from props type grouping** (~lines 6889, 6951, 6960). Three sub-edits:
+- Remove both instances of: `if (/\bF5\b|first.?5/i.test(lbl)) return "F5";`
+- In the `typeGroups` object, remove `F5: []` entry
+
+**Edit 5 — Clean up help text** (~lines 8345, 8363, 8532):
+- Line 8345: In "Game Lean Card" description, remove `F5 lean from combined SP ERA. Quick directional read for F5 and NRFI props.` → replace with `Quick directional read for NRFI props.`
+- Line 8363: In "Bullpen Card" description, remove `and caution on F5 unders`
+- Line 8532: Delete the entire `<PropRow type="F5" def="..." />` line
+
+**File 2: `backend/routes/props.js`**
+
+**Edit 1 — Remove F5 from system prompt priority list** (~line 76). Delete:
+```
+4. F5 total — based on SP ERA/WHIP comparison, early-inning tendencies
+```
+Renumber remaining items so numbering is continuous.
+
+**Edit 2 — Remove F5 from field rules** (~lines 90–91):
+- `propType` field: remove `"F5"` from the allowed values list
+- `lean` field: remove `"OVER F5" | "UNDER F5"`
+- `positive` field: remove `OVER F5→true, UNDER F5→false`
+
+**Constraints:** Do not touch any other prop types (K, Total, NRFI, Outs, RL, Hits, TB, HR, RBI). Do not change TTLs, cache logic, or any other routes.
+
+---
+
 ### CODEX TASK 6 — AI Search Chat in Help Overlay (Backlog)
 
 **Goal:** Add an AI-powered chat input at the top of the Help overlay so users can ask plain-language questions about the app and get instant answers scoped to its features.

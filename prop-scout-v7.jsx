@@ -2384,72 +2384,6 @@ function computeLiveProps({
       }
     }
 
-    {
-      const homeSp = pitcher;
-      const awaySp = game.awayPitcher;
-      const homeEra = parseFloat(homeSp?.era);
-      const awayEra = parseFloat(awaySp?.era);
-      const hasSpData = (!isNaN(homeEra) && homeEra > 0) || (!isNaN(awayEra) && awayEra > 0);
-
-      if (hasSpData) {
-        let f5Score = 50;
-        const f5R = [];
-        const f5GameKey = `${game.away.name}|${game.home.name}`;
-        const f5LineRaw = liveOddsMap[f5GameKey]?.f5Total ?? null;
-        const f5Label   = f5LineRaw ? `F5 O/U ${f5LineRaw}` : "F5 O/U";
-
-        const eras = [homeEra, awayEra].filter(n => !isNaN(n) && n > 0);
-        if (eras.length > 0) {
-          const avgEra = eras.reduce((a, b) => a + b, 0) / eras.length;
-          if      (avgEra < 3.00) { f5Score -= 8; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)} — elite`); }
-          else if (avgEra < 3.80) { f5Score -= 4; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)}`); }
-          else if (avgEra > 5.00) { f5Score += 8; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)} — vulnerable`); }
-          else if (avgEra > 4.20) { f5Score += 4; f5R.push(`Avg SP ERA ${avgEra.toFixed(2)}`); }
-        }
-
-        const k9s = [parseFloat(homeSp?.kPer9), parseFloat(awaySp?.kPer9)].filter(n => !isNaN(n) && n > 0);
-        if (k9s.length > 0) {
-          const avgK9 = k9s.reduce((a, b) => a + b, 0) / k9s.length;
-          if      (avgK9 >= 10.5) { f5Score -= 7; f5R.push(`Avg K/9 ${avgK9.toFixed(1)} — swing-miss arms`); }
-          else if (avgK9 >=  9.0) { f5Score -= 3; f5R.push(`Avg K/9 ${avgK9.toFixed(1)}`); }
-          else if (avgK9 <=  6.5) { f5Score += 6; f5R.push(`Avg K/9 ${avgK9.toFixed(1)} — contact-heavy`); }
-          else if (avgK9 <=  7.5) { f5Score += 2; f5R.push(`Avg K/9 ${avgK9.toFixed(1)}`); }
-        }
-
-        const pHit = parkFactor?.hit ?? 1.00;
-        if      (pHit >= 1.15) { f5Score += 7; f5R.push(`${game.home.abbr} hitter-friendly park (${pHit}x)`); }
-        else if (pHit >= 1.08) { f5Score += 3; f5R.push(`Hitter-friendly park`); }
-        else if (pHit <= 0.90) { f5Score -= 6; f5R.push(`Pitcher-friendly park (${pHit}x)`); }
-        else if (pHit <= 0.95) { f5Score -= 3; f5R.push(`Pitcher-friendly park`); }
-
-        if (!weather?.roof) {
-          const f5Temp = parseInt(weather?.temp) || 72;
-          if      (f5Temp < 48) { f5Score -= 5; f5R.push(`Cold ${f5Temp}° — suppresses scoring`); }
-          else if (f5Temp < 58) { f5Score -= 2; f5R.push(`Cool ${f5Temp}°`); }
-          else if (f5Temp > 85) { f5Score += 3; f5R.push(`Hot ${f5Temp}° — hitter-friendly`); }
-          if      (weather?.hrFavorable)                                  { f5Score += 4; f5R.push("Wind blowing OUT"); }
-          else if ((weather?.wind || "").toLowerCase().includes(" in ")) { f5Score -= 3; f5R.push("Wind blowing IN"); }
-        }
-
-        const nrfiLeanVal = game.nrfi?.lean;
-        const nrfiConfVal = parseInt(game.nrfi?.confidence) || 50;
-        if      (nrfiLeanVal === "NRFI" && nrfiConfVal >= 62) { f5Score -= 5; f5R.push(`NRFI lean ${nrfiConfVal}% — both SPs lock in early`); }
-        else if (nrfiLeanVal === "NRFI" && nrfiConfVal >= 55) { f5Score -= 2; f5R.push(`Moderate NRFI lean`); }
-        else if (nrfiLeanVal === "YRFI" && nrfiConfVal >= 62) { f5Score += 4; f5R.push(`YRFI lean ${nrfiConfVal}% — active F1`); }
-
-        f5Score = Math.max(35, Math.min(72, f5Score));
-        const f5Lean = f5Score >= 50 ? "OVER" : "UNDER";
-        out.push({
-          label:      f5Label,
-          propType:   "F5",
-          confidence: Math.round(f5Score),
-          lean:       f5Lean,
-          positive:   f5Lean === "OVER",
-          reason:     f5R.slice(0, 3).join(" · "),
-        });
-      }
-    }
-
     const batAvg = parseFloat(activeBatter?.avg) || 0;
     if (IS_STATS_SANDBOX && batAvg >= 0.180 && activeBatter?.name) {
       const hitProb = 1 - Math.pow(1 - batAvg, 4);
@@ -3788,7 +3722,7 @@ export default function App() {
     );
     if (alreadyLogged) return;
 
-    const isBatterProp = prop.propType === "Hits" || prop.propType === "TB" || prop.propType === "HR" || prop.propType === "RBI"; // F5 is a game prop, not batter-specific
+    const isBatterProp = prop.propType === "Hits" || prop.propType === "TB" || prop.propType === "HR" || prop.propType === "RBI";
     const entry = {
       id:          `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       timestamp:   new Date().toISOString(),
@@ -3870,17 +3804,6 @@ export default function App() {
       const line = parseFloat(m[1]);
       if (lean === "OVER")  return totalRuns > line  ? "hit" : "miss";
       if (lean === "UNDER") return totalRuns < line  ? "hit" : "miss";
-      return null;
-    }
-
-    // F5 — first 5 innings total
-    if (label.includes("F5") || label.includes("FIRST 5")) {
-      const f5 = innings.slice(0, 5).reduce((s, i) => s + (i.away ?? 0) + (i.home ?? 0), 0);
-      const m  = label.match(/(\d+\.?\d*)/);
-      if (!m) return null;
-      const line = parseFloat(m[1]);
-      if (lean === "OVER")  return f5 > line ? "hit" : "miss";
-      if (lean === "UNDER") return f5 < line ? "hit" : "miss";
       return null;
     }
 
@@ -5271,44 +5194,6 @@ export default function App() {
                       </div>
                     );
                   })()}
-                </Card>
-              );
-            })()}
-
-            {/* ── F5 Lean ── */}
-            {(() => {
-              const homePitcher = pitcher;
-              const awayPitcher = game.awayPitcher ?? null;
-
-              // F5 lean: both SPs' ERA as combined proxy
-              const homeEra = parseFloat(homePitcher?.era);
-              const awayEra = parseFloat(awayPitcher?.era ?? homePitcher?.era);
-              const avgEra  = (!isNaN(homeEra) && !isNaN(awayEra)) ? (homeEra + awayEra) / 2 : null;
-
-              const f5Lean = avgEra !== null
-                ? avgEra < 3.5  ? { label: "F5 UNDER LEAN", color: "#22c55e" }
-                : avgEra > 4.5  ? { label: "F5 OVER LEAN",  color: "#ef4444" }
-                : { label: "F5 NEUTRAL", color: "#f59e0b" }
-                : null;
-
-              if (!f5Lean) return null;
-
-              return (
-                <Card>
-                  <SLabel>F5 Lean</SLabel>
-                  <div style={{ background: "#0e0f1a", borderRadius: 8, padding: "12px", textAlign: "center" }}>
-                    <div style={{ fontSize: 15, fontWeight: 800, color: f5Lean.color, fontFamily: "monospace", marginBottom: 6 }}>{f5Lean.label}</div>
-                    {avgEra !== null && (
-                      <div style={{ display: "flex", justifyContent: "center", gap: 20 }}>
-                        <div style={{ fontSize: 10, color: "#6b7280" }}>
-                          <span style={{ color: "#9ca3af", fontWeight: 600 }}>{game.home.abbr}</span> ERA {isNaN(homeEra) ? "—" : homeEra.toFixed(2)}
-                        </div>
-                        <div style={{ fontSize: 10, color: "#6b7280" }}>
-                          <span style={{ color: "#9ca3af", fontWeight: 600 }}>{game.away.abbr}</span> ERA {isNaN(awayEra) ? "—" : awayEra.toFixed(2)}
-                        </div>
-                      </div>
-                    )}
-                  </div>
                 </Card>
               );
             })()}
@@ -6886,7 +6771,6 @@ export default function App() {
                   if (p.propType) return p.propType;
                   const lbl = p.label || "";
                   if (/\bK\b|strikeout/i.test(lbl)) return "K";
-                  if (/\bF5\b|first.?5/i.test(lbl)) return "F5";
                   if (/\bNRFI\b/i.test(lbl))        return "NRFI";
                   if (/\bHR\b|home run/i.test(lbl)) return "HR";
                   if (/\bRBI\b/i.test(lbl))         return "RBI";
@@ -6948,7 +6832,6 @@ export default function App() {
                 if (p.propType) return p.propType;
                 const lbl = p.label || "";
                 if (/\bK\b|strikeout/i.test(lbl))   return "K";
-                if (/\bF5\b|first.?5/i.test(lbl))   return "F5";
                 if (/\bHR\b|home run/i.test(lbl))   return "HR";
                 if (/\bRBI\b/i.test(lbl))           return "RBI";
                 if (/TB|total base/i.test(lbl))     return "TB";
@@ -6957,7 +6840,7 @@ export default function App() {
               };
 
               // ── By prop type ───────────────────────────────
-              const typeGroups = { K: [], F5: [], Hits: [], TB: [], HR: [], RBI: [], Other: [] };
+              const typeGroups = { K: [], Hits: [], TB: [], HR: [], RBI: [], Other: [] };
               graded2.forEach(p => {
                 const t = getPropType(p);
                 (typeGroups[t] ?? typeGroups.Other).push(p);
@@ -8137,7 +8020,21 @@ export default function App() {
                     #{rank} · {typeLabel}
                   </div>
                   <div style={{ fontSize: 15, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{c.name}</div>
-                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{isGameType ? (c.stadium ?? c.gameLabel) : c.gameLabel}</div>
+                  {isGameType ? (
+                    <button
+                      onClick={() => { setWhyModal(null); openGame(c.gamePk); }}
+                      style={{ marginTop: 2, padding: 0, background: "none", border: "none", fontSize: 10, color: "#818cf8", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}
+                    >
+                      {c.stadium ?? c.gameLabel}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => { setWhyModal(null); openGame(c.gamePk); }}
+                      style={{ marginTop: 2, padding: 0, background: "none", border: "none", fontSize: 10, color: "#818cf8", cursor: "pointer", fontFamily: "inherit" }}
+                    >
+                      {c.gameLabel}
+                    </button>
+                  )}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                   <div style={{ textAlign: "center" }}>
@@ -8328,7 +8225,7 @@ export default function App() {
                     {[
                       ["Pitcher Card", "Season ERA, WHIP, K/9, BB/9, avg IP/K/PC/ER, and a sparkline of recent outings. Shows W-L record and how many of his last 5 starts were clean (0 ER). A red ⚠ IL badge next to the pitcher name means he has an active IL placement — verify before logging any K or Outs props. Use this for K props and Outs lines."],
                       ["Lineup Matchup Intel", "Counts how many RHB, LHB, and switch hitters are in the opposing lineup vs the pitcher's hand — higher same-hand count = pitcher edge. Shows the aggregate matchup score across all opposing batters and flags the top 3 danger hitters by score. Use this for deciding whether to lean Over or Under on team runs."],
-                      ["Game Lean Card", "NRFI lean derived from both SPs' clean-start rate (0 ER starts / recent starts). F5 lean from combined SP ERA. Quick directional read for F5 and NRFI props."],
+                      ["Game Lean Card", "NRFI lean derived from both SPs' clean-start rate (0 ER starts / recent starts). Quick directional read for NRFI props."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                         <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
@@ -8346,7 +8243,7 @@ export default function App() {
                     {[
                       ["Umpire Card", "Shows the home plate ump with a SCORECARD LIVE badge when real UmpScorecards data is loaded. Four accuracy metrics: Accuracy (overall ball/strike %, avg ~92–93%), vs Exp (how many points above/below expected — positive is sharper), Consistency (zone reliability across the game), and Favor/Gm (run impact per game). Without live data, falls back to historical K Rate / BB Rate estimates. Badge: ACCURATE (≥+0.5% vs expected), INCONSISTENT (≤−1.0%), or PITCHER/NEUTRAL UMP from static data."],
                       ["NRFI / YRFI Card", "First inning scoring tendencies for both teams — scored % of games and avg 1st inning runs. Lean (NRFI or YRFI) with a confidence %. The NRFI badge on the slate card only shows when confidence hits 62%+."],
-                      ["Bullpen Card", "Grade (A–C), fatigue level (FRESH / MODERATE / HIGH based on pitches thrown last 3 days), setup depth, and L/R balance. Expand the Relievers drawer to see each arm: ERA, WHIP, Last App, Pitches from last outing, K/9 (swing-and-miss rate — 10+ is elite), and BB/9 (walk rate — under 3 is sharp). High fatigue + thin depth = lean toward OVER on totals and caution on F5 unders."],
+                      ["Bullpen Card", "Grade (A–C), fatigue level (FRESH / MODERATE / HIGH based on pitches thrown last 3 days), setup depth, and L/R balance. Expand the Relievers drawer to see each arm: ERA, WHIP, Last App, Pitches from last outing, K/9 (swing-and-miss rate — 10+ is elite), and BB/9 (walk rate — under 3 is sharp). High fatigue + thin depth = lean toward OVER on totals."],
                       ["Odds & Line Movement", "Multi-book table (DK / FD / CZR / MGM / BOV) showing moneyline, total, O/U odds, and runline for each book. Missing books omitted. Shows PRE-GAME LINES for in-progress and final games (The Odds API removes games at first pitch). Line movement arrow on the slate card shows direction the total shifted from open. DK and FD are sharp books; CZR, MGM, and BOV are square books — a gap of 0.5+ between their lines is a meaningful edge signal (LINE INTELLIGENCE)."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
@@ -8515,7 +8412,6 @@ export default function App() {
                   <PropRow type="Hits" def="Batter hits — typically Over 0.5 hits (get at least one hit) or Under 1.5. Red matchup score = good over spot." />
                   <PropRow type="TB" def="Total Bases — counts singles (1), doubles (2), triples (3), home runs (4). Over 1.5 TB is a popular line." />
                   <PropRow type="HR" def="Home Run — will this batter hit at least one HR? Looks at power metrics, park factor, and pitcher tendencies." />
-                  <PropRow type="F5" def="First 5 Innings Over/Under — the game total through just the first 5 innings. Depends heavily on starting pitchers since relievers haven't entered yet." />
                   <PropRow type="NRFI" def="No Run First Inning — neither team scores in the 1st inning. Good when both SPs have low first-inning scoring rates and low walk rates." />
                   <PropRow type="RBI" def="Runs Batted In — will this batter drive in at least one run? Looks at batting order position, runners on base tendencies, and extra-base hit rate." />
                 </Section>

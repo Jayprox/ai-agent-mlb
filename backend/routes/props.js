@@ -73,8 +73,7 @@ Prop types to consider (in priority order):
 1. Starting pitcher K O/U — based on K/9, umpire zone, weather, park K factor, lineup profile, any market K line provided
 2. Game total O/U — based on both SP quality, weather, park HR/hit factor, bullpen grades
 3. NRFI/YRFI — based on first-inning scoring % (provided directly), SP clean-start tendency
-4. F5 total — based on SP ERA/WHIP comparison, early-inning tendencies
-5. Run line lean — only if one side has a clear SP + bullpen edge
+4. Run line lean — only if one side has a clear SP + bullpen edge
 
 Each prop object must have exactly these six fields:
 {
@@ -87,9 +86,9 @@ Each prop object must have exactly these six fields:
 }
 
 Field rules:
-- propType: "K" | "Total" | "NRFI" | "F5" | "Outs" | "RL"
-- lean: "OVER" | "UNDER" | "NRFI" | "YRFI" | "OVER F5" | "UNDER F5" | "AWAY -1.5" | "HOME -1.5"
-- positive: OVER→true, UNDER→false, NRFI→true, YRFI→false, OVER F5→true, UNDER F5→false, AWAY -1.5→true, HOME -1.5→true
+- propType: "K" | "Total" | "NRFI" | "Outs" | "RL"
+- lean: "OVER" | "UNDER" | "NRFI" | "YRFI" | "AWAY -1.5" | "HOME -1.5"
+- positive: OVER→true, UNDER→false, NRFI→true, YRFI→false, AWAY -1.5→true, HOME -1.5→true
 - confidence: integer 55–80 only (never below 55 — omit the prop instead)
 - reason: exactly one sentence, cite at least two specific numbers`;
 
