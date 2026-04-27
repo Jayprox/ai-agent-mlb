@@ -2,7 +2,7 @@ const cron = require("node-cron");
 const { query, isConnected } = require("../services/db");
 const {
   snapshotSlate, snapshotOdds, snapshotBullpen,
-  snapshotLinescore, snapshotUmpires, todayHonolulu,
+  snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, todayHonolulu,
 } = require("./snapshotJobs");
 const { warmCache } = require("./warmCache");
 const { regenerateDailyCard } = require("../routes/dailyCard");
@@ -46,6 +46,8 @@ function startScheduler() {
   console.log("  ✓ Job scheduler started");
 
   cron.schedule("0 8 * * *", () => snapshotSlate(), { timezone: "Pacific/Honolulu" });
+  cron.schedule("*/30 * * * *", () => pollSchedule(), { timezone: "Pacific/Honolulu" });
+  cron.schedule("*/30 * * * *", () => pollInjuries(), { timezone: "Pacific/Honolulu" });
   cron.schedule("*/15 * * * *", () => snapshotOdds());
   cron.schedule("*/30 * * * *", async () => {
     const gamePks = await getTodayGamePks();

@@ -59,3 +59,16 @@ CREATE TABLE IF NOT EXISTS daily_card_snapshots (
   source          TEXT         NOT NULL DEFAULT 'anthropic',
   status          TEXT         NOT NULL DEFAULT 'ready'
 );
+
+-- Phase 1 snapshot tables (schedule + injuries)
+CREATE TABLE IF NOT EXISTS schedule_snapshots (
+  slate_date  DATE         PRIMARY KEY,
+  fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  games       JSONB        NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS injury_snapshots (
+  snapshot_date DATE         PRIMARY KEY,
+  fetched_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  injuries      JSONB        NOT NULL
+);

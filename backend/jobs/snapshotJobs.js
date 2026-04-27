@@ -4,7 +4,7 @@ require("dotenv").config({ path: path.join(__dirname, "../.env") });
 require("dotenv").config({ path: path.join(__dirname, "../../.env") });
 const axios = require("axios");
 const mlb = require("../services/mlbApi");
-const { query } = require("../services/db");
+const { query, isConnected } = require("../services/db");
 
 const SEASON = new Date().getFullYear();
 const UMPIRES_DATA_PATH = path.join(__dirname, "..", "data", "umpires.json");
@@ -20,6 +20,24 @@ const TEAM_ABBR = {
 
 function todayHonolulu() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+}
+
+async function ensurePhaseOneTables() {
+  if (!isConnected()) return;
+  await query(`
+    CREATE TABLE IF NOT EXISTS schedule_snapshots (
+      slate_date  DATE PRIMARY KEY,
+      fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      games       JSONB NOT NULL
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS injury_snapshots (
+      snapshot_date DATE PRIMARY KEY,
+      fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      injuries      JSONB NOT NULL
+    )
+  `);
 }
 
 function formatGameTime(iso) {
@@ -159,6 +177,44 @@ async function snapshotSlate(date = todayHonolulu()) {
   }
 }
 
+async function pollSchedule(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: pollSchedule  date=${date}`);
+  try {
+    await ensurePhaseOneTables();
+    const { buildSchedulePayloadForJob } = require("../routes/schedule");
+    const games = await buildSchedulePayloadForJob(date);
+    await query(
+      `INSERT INTO schedule_snapshots (slate_date, fetched_at, games)
+       VALUES ($1, NOW(), $2)
+       ON CONFLICT (slate_date) DO UPDATE SET fetched_at = NOW(), games = $2`,
+      [date, JSON.stringify(games)]
+    );
+    console.log(`  ✓ pollSchedule  date=${date}  games=${games.length}`);
+  } catch (err) {
+    console.error(`  ✗ pollSchedule failed: ${err.message}`);
+  }
+}
+
+async function pollInjuries(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: pollInjuries  date=${date}`);
+  try {
+    await ensurePhaseOneTables();
+    const { buildInjuriesPayloadForJob } = require("../routes/injuries");
+    const result = await buildInjuriesPayloadForJob();
+    await query(
+      `INSERT INTO injury_snapshots (snapshot_date, fetched_at, injuries)
+       VALUES ($1, NOW(), $2)
+       ON CONFLICT (snapshot_date) DO UPDATE SET fetched_at = NOW(), injuries = $2`,
+      [date, JSON.stringify(result)]
+    );
+    console.log(`  ✓ pollInjuries  date=${date}  injuries=${result.injuries?.length ?? 0}`);
+  } catch (err) {
+    console.error(`  ✗ pollInjuries failed: ${err.message}`);
+  }
+}
+
 async function snapshotOdds(date = todayHonolulu()) {
   const key = process.env.ODDS_API_KEY;
   if (!key) { console.warn("  ⚠ snapshotOdds: ODDS_API_KEY not set"); return; }
@@ -253,4 +309,4 @@ async function snapshotUmpires(gamePk) {
   }
 }
 
-module.exports = { snapshotSlate, snapshotOdds, snapshotBullpen, snapshotLinescore, snapshotUmpires, todayHonolulu };
+module.exports = { snapshotSlate, snapshotOdds, snapshotBullpen, snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, todayHonolulu };

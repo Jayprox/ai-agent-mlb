@@ -4,6 +4,35 @@ Paste the following as the system prompt for any AI agent or model you want to a
 
 ---
 
+## FOR CHATBOTS (Claude Chat, ChatGPT, etc.)
+
+Use this section when you want a general-purpose chatbot to browse or research the live Prop Scout app.
+
+### App Access
+
+**Production URL:** `https://ai-agent-mlb-production.up.railway.app/`
+
+**How to log in:**
+1. Navigate to the production URL
+2. Use the test account credentials below (fill in at paste-time — do not commit to repo):
+   - Username: `<TEST_USERNAME>`
+   - Password: `<TEST_PASSWORD>`
+3. Once logged in you have full access to all tabs: Slate, Game, Props, Picks, Model, Board
+
+**Key tabs to explore:**
+- **Slate** — today's game cards with odds, NRFI lean, and best bet badges
+- **Game** — tap any game to see Overview (pitcher stats), Lineup (batter matchups), Props (sportsbook lines), Boxscore
+- **Props** — per-game AI-generated prop recommendations with multi-book line comparison
+- **Picks** — your saved pick log with auto-grading
+- **Model** — algorithmic Model Picks board (HR, Hits, K, Outs, Games tabs)
+- **Board** — K board and Outs board ranked by confidence score
+
+**API endpoints (if browsing via tools):**
+All endpoints are at `https://ai-agent-mlb-production.up.railway.app/api/`
+For authenticated endpoints, pass the JWT token as `Authorization: Bearer <token>` — obtain the token from the login response or browser localStorage after signing in.
+
+---
+
 ## SYSTEM PROMPT
 
 You are a sharp, data-driven MLB sports betting analyst with deep knowledge of player props, game totals, and first-inning markets. You have access to the Prop Scout research API — a backend that aggregates MLB schedule data, Statcast pitch analytics, sportsbook odds, umpire tendencies, bullpen health, and injury reports into a unified research layer.
@@ -911,6 +940,222 @@ Option A (just fetch the missing market) is lower risk and preserves the K scori
 
 ---
 
+### CODEX TASK 21 — Use DraftKings Line as Model Pick Line (replaces algorithmically computed line)
+
+**Goal:** Model Picks (K and Outs boards) currently compute their own line algorithmically (`Math.round(avgK) - 0.5` for K, `Math.round(avgIP * 3) + 0.5` for Outs). These lines don't match what DraftKings actually posts, creating a disconnect where the app shows "OVER 15.5 Outs" but the user can only bet 17.5 or 18.5 at DK. Fix this by using the actual DK-posted line as the pick line.
+
+**File: `prop-scout-v7.jsx`**
+
+---
+
+#### Edit 1 — Add `playerPropsMap` parameter to `computeTopSlatePicks` (~line 1543)
+
+```js
+// OLD:
+function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather) {
+
+// NEW:
+function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather, playerPropsMap = {}) {
+```
+
+---
+
+#### Edit 2 — Add DK line lookup helper inside the inner `.forEach`, after `avgK` is computed (~line 1569, just before the lineup platoon block)
+
+Insert this block after `const avgK = ...` and before the `// ── Lineup platoon adjustment` comment:
+
+```js
+// ── DraftKings line lookup for this pitcher ────────────────────────────────
+const gamePropsState = playerPropsMap[String(sg.gamePk)];
+const gameProps = (gamePropsState && gamePropsState !== "loading")
+  ? (gamePropsState.props ?? [])
+  : [];
+const findDKLine = (market) => {
+  const prop = gameProps.find(p =>
+    p.market === market &&
+    (p.player ?? "").toLowerCase().includes(lastName.toLowerCase())
+  );
+  return prop?.books?.DK?.line ?? null;
+};
+```
+
+---
+
+#### Edit 3 — Replace K line + pick push block (~lines 1618–1637)
+
+```js
+// OLD:
+kScore = Math.max(38, Math.min(88, kScore));
+const kLine = Math.max(0.5, Math.round(avgK) - 0.5);
+
+picks.push({
+  label:          `${lastName} K O/U ${kLine}`,
+  fullName,
+  pitcherId:      pitcher.id,
+  lean:           kScore >= 50 ? "OVER" : "UNDER",
+  positive:       kScore >= 50,
+  confidence:     kScore,
+  tier:           MODEL_TIER(kScore),
+  propType:       "K",
+  market:         "pitcher_strikeouts",
+  modelLine:      kLine,
+  gamePk:         sg.gamePk,
+  game:           sgGameLabel,
+  lineupConfirmed: sgConfirmed,
+  signals:        kSigs,
+  avgIP,
+});
+
+// NEW:
+kScore = Math.max(38, Math.min(88, kScore));
+const dkKLine = findDKLine("pitcher_strikeouts");
+if (dkKLine != null) {
+  const projectedK = avgK;
+  const kLean = projectedK > dkKLine ? "OVER" : "UNDER";
+  picks.push({
+    label:           `${lastName} K O/U ${dkKLine}`,
+    fullName,
+    pitcherId:       pitcher.id,
+    lean:            kLean,
+    positive:        kLean === "OVER",
+    confidence:      kScore,
+    tier:            MODEL_TIER(kScore),
+    propType:        "K",
+    market:          "pitcher_strikeouts",
+    modelLine:       dkKLine,
+    projectedValue:  +projectedK.toFixed(1),
+    lineSource:      "DK",
+    gamePk:          sg.gamePk,
+    game:            sgGameLabel,
+    lineupConfirmed: sgConfirmed,
+    signals:         kSigs,
+    avgIP,
+  });
+}
+```
+
+---
+
+#### Edit 4 — Replace Outs line + pick push block (~lines 1666–1685)
+
+```js
+// OLD:
+oScore = Math.max(38, Math.min(88, oScore));
+const oLine = Math.max(0.5, Math.round(avgIP * 3) + 0.5);
+
+picks.push({
+  label:          `${lastName} Outs O/U ${oLine}`,
+  fullName,
+  pitcherId:      pitcher.id,
+  lean:           oScore >= 50 ? "OVER" : "UNDER",
+  positive:       oScore >= 50,
+  confidence:     oScore,
+  tier:           MODEL_TIER(oScore),
+  propType:       "Outs",
+  market:         "pitcher_outs",
+  modelLine:      oLine,
+  gamePk:         sg.gamePk,
+  game:           sgGameLabel,
+  lineupConfirmed: sgConfirmed,
+  signals:        oSigs,
+  avgIP,
+});
+
+// NEW:
+oScore = Math.max(38, Math.min(88, oScore));
+const dkOutsLine = findDKLine("pitcher_outs");
+if (dkOutsLine != null) {
+  const projectedOuts = +(avgIP * 3).toFixed(1);
+  const outsLean = projectedOuts > dkOutsLine ? "OVER" : "UNDER";
+  picks.push({
+    label:           `${lastName} Outs O/U ${dkOutsLine}`,
+    fullName,
+    pitcherId:       pitcher.id,
+    lean:            outsLean,
+    positive:        outsLean === "OVER",
+    confidence:      oScore,
+    tier:            MODEL_TIER(oScore),
+    propType:        "Outs",
+    market:          "pitcher_outs",
+    modelLine:       dkOutsLine,
+    projectedValue:  projectedOuts,
+    lineSource:      "DK",
+    gamePk:          sg.gamePk,
+    game:            sgGameLabel,
+    lineupConfirmed: sgConfirmed,
+    signals:         oSigs,
+    avgIP,
+  });
+}
+```
+
+---
+
+#### Edit 5 — Update call site (~line 3708)
+
+```js
+// OLD:
+? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather)
+
+// NEW:
+? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather, livePlayerProps)
+```
+
+---
+
+#### Edit 6 — Replace `lineMismatch` in Model Picks render with projected value display (~line 4067)
+
+```js
+// OLD:
+const lineMismatch = bookLine && Math.abs(bookLine.line - p.modelLine) >= 0.5;
+
+// NEW — remove this line entirely (no longer meaningful since modelLine IS the DK line)
+```
+
+And replace the JSX that uses it (~line 4151):
+```jsx
+// OLD:
+{lineMismatch && (
+  <span style={{ fontSize: 8, fontWeight: 700, color: "#fbbf24", marginLeft: "auto" }}>model: {p.modelLine}</span>
+)}
+
+// NEW:
+{p.projectedValue != null && (
+  <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", marginLeft: "auto" }}>proj: {p.projectedValue}</span>
+)}
+```
+
+---
+
+#### Edit 7 — Add "DK" source tag to Model Pick card header row
+
+In the pick card render, on the same line as the pick label and confidence %, add a small "DK" badge. Find the line containing `<LeanBadge label={p.lean}` (~line 4139) and add the badge just before it:
+
+```jsx
+{p.lineSource && (
+  <span style={{ fontSize: 7, fontWeight: 800, color: "#38bdf8", background: "rgba(56,189,248,0.1)", border: "1px solid rgba(56,189,248,0.25)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em", flexShrink: 0 }}>{p.lineSource}</span>
+)}
+<LeanBadge label={p.lean} positive={p.positive} small />
+```
+
+---
+
+**Constraints:**
+- Only touch `computeTopSlatePicks` and the Model Picks render section (the `tierPicks.map` block). Do not modify the K/Outs board scoring logic in `kBoardScore`/`outsBoardScore` or any other function.
+- Do not change the existing `isAvailableAtPreferredBook` filter — it stays as-is.
+- The `livePlayerProps` variable already exists in component state. Do not declare it again — just pass it as the 5th argument to `computeTopSlatePicks`.
+
+---
+
+**Expected outcome:**
+- Model Picks will only appear for pitchers that DK has posted a line for
+- K and Outs lines will exactly match what a user sees at DraftKings
+- A small "DK" badge appears on each Model Pick card
+- A "proj: X.X" label shows the model's projected value for context (e.g., "proj: 19.2" next to DK line 18.5 → user understands why it's OVER)
+- The pick list may be shorter on days when DK is slow to post lines — this is expected and honest
+
+---
+
 ### CODEX TASK 20 — Score Cap Fix: K and Outs picks clustering at 78% (COMPLETED by CW)
 
 **Status: Done — no action needed. Documented here for context.**
@@ -1706,3 +1951,205 @@ const submitHelpQ = async () => {
 - `submitHelpQ` uses `apiMutate` (already in scope) — not a raw fetch
 - Do not change any existing Section or Row components inside the help overlay
 - The chat block sits inside the `<div style={{ padding: "16px 14px" ... }}>` wrapper, as the very first child before all Section content
+
+---
+
+## HANDOFF NOTE — 2026-04-26 — Backend-First Data Architecture Brainstorm
+
+We had a product/architecture discussion after recent odds + board work. This is not an implementation task yet, but it is an important direction note for future planning.
+
+### Current state
+
+- The frontend already calls only our backend APIs, not third-party vendors directly.
+- However, many backend routes still fetch upstream data on demand when requests come in, then serve from cache.
+- Current relevant freshness behavior:
+  - `/api/odds`:
+    - frontend re-polls every 10 minutes
+    - backend cache TTL is 20 minutes in `backend/routes/odds.js`
+  - `/api/player-props/:gamePk`:
+    - fetched on demand by the app when needed
+    - backend cache TTL is 10 minutes in `backend/routes/playerProps.js`
+    - no-event / no-props responses are cached for 2 minutes
+
+### Brainstormed direction
+
+The user is interested in moving further toward a backend-first / DB-first model:
+
+- backend polls MLB / Odds / other upstream services on schedules
+- backend stores normalized snapshots in Postgres
+- frontend mostly reads backend endpoints backed by DB/cache
+- frontend should do little to no “freshness orchestration” beyond normal app reads
+
+In other words, the backend becomes the data collector and Postgres becomes the source of truth, instead of user navigation patterns driving live upstream fetches.
+
+### Why this direction is appealing
+
+- more consistent frontend speed
+- less user-triggered variability
+- fewer redundant upstream API calls from repeated page/view opens
+- better quota control
+- cleaner debugging because there is one shared data state for all users
+- easier to reason about staleness and refresh windows
+
+### Tradeoffs acknowledged
+
+- more backend complexity
+- requires a clearer polling/snapshot strategy
+- requires explicit freshness rules and fallback behavior
+- backend is now more responsible for “live enough” data quality
+
+### Suggested future migration shape
+
+Potential phased direction:
+
+1. keep frontend reading only backend endpoints
+2. move more “live fetch on request” routes toward DB-backed snapshots first
+3. use scheduled backend polling/jobs for:
+   - game odds
+   - player props
+   - live-ish MLB snapshots where practical
+4. reserve live upstream fetches for:
+   - fallback paths
+   - admin/manual refresh
+   - rare cache-miss recovery cases
+
+### Important framing
+
+This was a strategy discussion only. No architecture migration was implemented in this conversation. Current app behavior remains request-driven + cache-backed for odds and player props.
+
+### Approved phased plan (Backlog Task #28)
+
+The direction was sanity-checked and approved. A 3-phase rollout was defined:
+
+**Phase 1 — Schedule + Injuries** (lowest risk, start here)
+- Add `schedule_snapshots` and `injury_snapshots` tables
+- Polling jobs: every 30 min for each
+- Routes read DB first, fall back to upstream on miss
+- No frontend changes needed
+- Validates the DB snapshot pattern before touching quota-sensitive APIs
+
+**Phase 2 — Odds** (medium complexity, highest value)
+- Add `odds_snapshots` table keyed by `(game_pk, snapshot_date)`
+- Polling job every 15 min from 8am–midnight Honolulu time
+- `/api/odds` reads from DB; add `"lines as of HH:MM"` timestamp to response
+- Frontend removes or relaxes its 10-min re-poll
+- Biggest quota savings and eliminates per-user upstream redundancy
+
+**Phase 3 — Player Props** (highest complexity, highest quota savings)
+- Add `player_props_snapshots` table keyed by `(game_pk, snapshot_date)`
+- Polling job loops today's gamePks every 20 min during game day window
+- Stagger per-game fetches; skip finished games
+- Reserve upstream fetch for cache-miss recovery only
+
+**Keep request-driven (do not migrate):**
+- Live boxscores and live scores (real-time by nature)
+- Lineups (can change minutes before first pitch)
+- AI generation: trends, props AI, daily card regen (user-triggered, expensive)
+- Umpires (simple daily job sufficient, not urgent)
+
+**Foundation already in place:** Frontend never calls third parties directly. Postgres and Redis are live. `daily_card_snapshots` already proves the pattern. `snapshotJobs.js` exists as scaffolding.
+
+Rule: do phases in order. Each is self-contained. Do not combine phases.
+
+---
+
+## HANDOFF NOTE — 2026-04-26 — Backlog Task #28 Phase 1 Completed
+
+Phase 1 of the approved DB-first rollout is now implemented: **Schedule + Injuries DB snapshots**.
+
+### What was built
+
+#### 1. New DB snapshot tables
+
+Added the following tables to `backend/migrations/001_init.sql`:
+
+- `schedule_snapshots`
+  - `slate_date DATE PRIMARY KEY`
+  - `fetched_at TIMESTAMPTZ`
+  - `games JSONB`
+- `injury_snapshots`
+  - `snapshot_date DATE PRIMARY KEY`
+  - `fetched_at TIMESTAMPTZ`
+  - `injuries JSONB`
+
+Also added `CREATE TABLE IF NOT EXISTS` protection in the snapshot job layer so writes do not fail if migrations have not been manually run yet.
+
+#### 2. New polling jobs
+
+In `backend/jobs/snapshotJobs.js`:
+
+- added `pollSchedule(date = todayHonolulu())`
+  - builds today’s schedule payload using the same schedule transform logic as the route
+  - writes to `schedule_snapshots`
+  - uses `ON CONFLICT (slate_date) DO UPDATE`
+  - logs successful writes
+
+- added `pollInjuries(date = todayHonolulu())`
+  - builds the current injuries payload using the same transaction filtering logic as the route
+  - writes to `injury_snapshots`
+  - uses `ON CONFLICT (snapshot_date) DO UPDATE`
+  - logs successful writes
+
+Both jobs:
+- skip silently if `DATABASE_URL` is not set
+- do not crash the app when DB is unavailable
+
+#### 3. Scheduler wiring
+
+In `backend/jobs/scheduler.js`:
+
+- added `pollSchedule()` every 30 minutes
+- added `pollInjuries()` every 30 minutes
+
+These are in addition to the pre-existing job system and do not replace any existing cache or snapshot behavior.
+
+#### 4. Routes now read DB snapshots first
+
+##### `backend/routes/schedule.js`
+
+Now checks `schedule_snapshots` before upstream fetch:
+- if today’s row exists and `fetched_at` is within the last 35 minutes, it returns that row
+- otherwise it falls back to the existing upstream `/schedule` fetch path exactly as before
+
+Important:
+- existing in-memory/Redis cache behavior was left intact
+- DB is an added layer, not a replacement for current cache logic
+
+##### `backend/routes/injuries.js`
+
+Now checks `injury_snapshots` before upstream fetch:
+- if today’s row exists and `fetched_at` is within the last 35 minutes, it returns that row
+- otherwise it falls back to the existing upstream `/transactions` fetch path exactly as before
+
+Also refactored the injuries route slightly:
+- extracted the upstream injuries build logic into `buildInjuriesPayload()`
+- exported it as `buildInjuriesPayloadForJob` for the polling job to reuse
+
+### Files changed
+
+- `backend/routes/schedule.js`
+- `backend/routes/injuries.js`
+- `backend/jobs/snapshotJobs.js`
+- `backend/jobs/scheduler.js`
+- `backend/migrations/001_init.sql`
+
+### Verification run
+
+Syntax checks passed:
+
+- `node --check backend/routes/schedule.js`
+- `node --check backend/routes/injuries.js`
+- `node --check backend/jobs/snapshotJobs.js`
+- `node --check backend/jobs/scheduler.js`
+
+### Important notes for future work
+
+- No frontend changes were made.
+- No odds or player props work was touched.
+- Current API response shapes for `/api/schedule` and `/api/injuries` remain unchanged.
+- This is only **Phase 1** of Backlog Task #28.
+- Phases 2 and 3 (Odds, then Player Props) are still pending and should stay separate.
+
+### Practical next step
+
+If we want these tables created by migration rather than only on first-write protection, run the normal DB migration flow so the new entries in `backend/migrations/001_init.sql` are applied in all environments.

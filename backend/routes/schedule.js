@@ -5,6 +5,7 @@ const cache   = require("../services/cache");
 const { query, isConnected } = require("../services/db");
 
 const SCHEDULE_TTL = 60 * 60 * 1000;
+const DB_FRESH_MS = 35 * 60 * 1000;
 
 // MLB team ID → abbreviation lookup (all 30 teams)
 const TEAM_ABBR = {
@@ -138,11 +139,11 @@ router.get("/", async (req, res) => {
   if (isConnected()) {
     try {
       const row = await query(
-        "SELECT games, fetched_at FROM slate_snapshots WHERE slate_date = $1",
+        "SELECT games, fetched_at FROM schedule_snapshots WHERE slate_date = $1",
         [date]
       );
       const entry = row?.rows?.[0];
-      if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < SCHEDULE_TTL) {
+      if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < DB_FRESH_MS) {
         cache.set(cacheKey, entry.games, SCHEDULE_TTL);
         res.setHeader("X-Cache", "DB-HIT");
         return res.json(entry.games);

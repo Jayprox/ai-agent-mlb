@@ -2,12 +2,15 @@ const express = require("express");
 const router  = express.Router();
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
+const { query, isConnected } = require("../services/db");
 
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const LOOKBACK_MS  = 14 * 24 * 60 * 60 * 1000;
+const DB_FRESH_MS  = 35 * 60 * 1000;
 
 const getTxDate = (tx) => tx?.date ?? tx?.effectiveDate ?? tx?.transactionDate ?? null;
 const isoDate = (date) => date.toISOString().slice(0, 10);
+const todayHonolulu = () => new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
 
 const isRecent = (tx) => {
   const ts = Date.parse(getTxDate(tx));
@@ -34,6 +37,29 @@ const transformTransaction = (tx) => ({
   description: tx?.description ?? tx?.transactionDesc ?? tx?.note ?? "",
 });
 
+async function buildInjuriesPayload() {
+  const endDate = new Date();
+  const startDate = new Date(Date.now() - LOOKBACK_MS);
+  const { data } = await mlb.get("/transactions", {
+    params: {
+      sportId: 1,
+      limit: 100,
+      startDate: isoDate(startDate),
+      endDate: isoDate(endDate),
+    },
+  });
+
+  const injuries = (data?.transactions ?? [])
+    .filter(isIlPlacement)
+    .filter(isRecent)
+    .map(transformTransaction)
+    .filter(tx => tx.playerId && tx.date)
+    .sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
+    .filter((tx, idx, arr) => arr.findIndex(other => other.playerId === tx.playerId) === idx);
+
+  return { injuries };
+}
+
 router.get("/", async (_req, res) => {
   const cacheKey = "injuries:recent";
   const cached = cache.get(cacheKey);
@@ -43,27 +69,26 @@ router.get("/", async (_req, res) => {
     return res.json(cached);
   }
 
+  if (isConnected()) {
+    try {
+      const today = todayHonolulu();
+      const row = await query(
+        "SELECT injuries, fetched_at FROM injury_snapshots WHERE snapshot_date = $1",
+        [today]
+      );
+      const entry = row?.rows?.[0];
+      if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < DB_FRESH_MS) {
+        cache.set(cacheKey, entry.injuries, CACHE_TTL_MS);
+        res.setHeader("X-Cache", "DB-HIT");
+        return res.json(entry.injuries);
+      }
+    } catch (dbErr) {
+      console.warn(`Injuries DB lookup skipped: ${dbErr.message}`);
+    }
+  }
+
   try {
-    const endDate = new Date();
-    const startDate = new Date(Date.now() - LOOKBACK_MS);
-    const { data } = await mlb.get("/transactions", {
-      params: {
-        sportId: 1,
-        limit: 100,
-        startDate: isoDate(startDate),
-        endDate: isoDate(endDate),
-      },
-    });
-
-    const injuries = (data?.transactions ?? [])
-      .filter(isIlPlacement)
-      .filter(isRecent)
-      .map(transformTransaction)
-      .filter(tx => tx.playerId && tx.date)
-      .sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
-      .filter((tx, idx, arr) => arr.findIndex(other => other.playerId === tx.playerId) === idx);
-
-    const result = { injuries };
+    const result = await buildInjuriesPayload();
     cache.set(cacheKey, result, CACHE_TTL_MS);
     res.setHeader("X-Cache", "MISS");
     return res.json(result);
@@ -73,3 +98,4 @@ router.get("/", async (_req, res) => {
 });
 
 module.exports = router;
+module.exports.buildInjuriesPayloadForJob = buildInjuriesPayload;

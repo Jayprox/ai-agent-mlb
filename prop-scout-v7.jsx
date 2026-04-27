@@ -1376,7 +1376,7 @@ const BullpenCard = ({ label, data }) => {
 // ─────────────────────────────────────────────
 // SLATE CARD (mini, for game selector)
 // ─────────────────────────────────────────────
-const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null, liveScore = null, injuredIds = new Set() }) => {
+const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null, liveScore = null, injuredIds = new Set(), preferredBook = "DK" }) => {
   const topProp = bestBet ?? (game.props[0]?.lean ? game.props[0] : null);
   // Merge live odds if available for this game
   const liveKey       = `${game.away.name}|${game.home.name}`;
@@ -1479,6 +1479,7 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
           })() : (
             <>
               <div style={{ display: "flex", alignItems: "center", gap: 5, justifyContent: "flex-end" }}>
+                <span style={{ fontSize: 7, fontWeight: 800, color: "#38bdf8", background: "rgba(56,189,248,0.1)", border: "1px solid rgba(56,189,248,0.25)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em" }}>{preferredBook}</span>
                 <div style={{ fontSize: 11, color: "#f9fafb", fontWeight: 700 }}>O/U {total}</div>
                 {isLive && <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 4px #22c55e", flexShrink: 0 }} />}
               </div>
@@ -1539,7 +1540,7 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
 const MODEL_TIER = (score) =>
   score >= 65 ? "HIGH" : score >= 56 ? "MEDIUM" : "SPEC";
 
-function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather) {
+function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather, playerPropsMap = {}) {
   const picks = [];
 
   liveSlate.forEach(sg => {
@@ -1566,6 +1567,19 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
       const bbPer9    = parseFloat(ps.bbPer9) || 3.5;
       const avgIP     = parseFloat(ps.avgIP)  || 5.0;
       const avgK      = parseFloat(ps.avgK)   || Math.round(kPer9 * avgIP / 9 * 10) / 10;
+
+      // ── DraftKings line lookup for this pitcher ────────────────────────────────
+      const gamePropsState = playerPropsMap[String(sg.gamePk)];
+      const gameProps = (gamePropsState && gamePropsState !== "loading" && Array.isArray(gamePropsState.props))
+        ? gamePropsState.props
+        : [];
+      const findDKLine = (market) => {
+        const prop = gameProps.find(p =>
+          p.market === market &&
+          (p.player ?? "").toLowerCase().includes(lastName.toLowerCase())
+        );
+        return prop?.books?.DK?.line ?? null;
+      };
 
       // ── Lineup platoon adjustment ──────────────────────────────────────────
       let lineupAdj    = 0;
@@ -1615,25 +1629,30 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
       else if (avgIP < 5.0)  { kScore -= 3; kSigs.push(`Avg IP ${avgIP.toFixed(1)} (below average depth)`); }
 
       kScore = Math.max(38, Math.min(88, kScore));
-      const kLine = Math.max(0.5, Math.round(avgK) - 0.5);
-
-      picks.push({
-        label:          `${lastName} K O/U ${kLine}`,
-        fullName,
-        pitcherId:      pitcher.id,
-        lean:           kScore >= 50 ? "OVER" : "UNDER",
-        positive:       kScore >= 50,
-        confidence:     kScore,
-        tier:           MODEL_TIER(kScore),
-        propType:       "K",
-        market:         "pitcher_strikeouts",
-        modelLine:      kLine,
-        gamePk:         sg.gamePk,
-        game:           sgGameLabel,
-        lineupConfirmed: sgConfirmed,
-        signals:        kSigs,
-        avgIP,
-      });
+      const dkKLine = findDKLine("pitcher_strikeouts");
+      if (dkKLine != null) {
+        const projectedK = avgK;
+        const kLean = projectedK > dkKLine ? "OVER" : "UNDER";
+        picks.push({
+          label:           `${lastName} K O/U ${dkKLine}`,
+          fullName,
+          pitcherId:       pitcher.id,
+          lean:            kLean,
+          positive:        kLean === "OVER",
+          confidence:      kScore,
+          tier:            MODEL_TIER(kScore),
+          propType:        "K",
+          market:          "pitcher_strikeouts",
+          modelLine:       dkKLine,
+          projectedValue:  +projectedK.toFixed(1),
+          lineSource:      "DK",
+          gamePk:          sg.gamePk,
+          game:            sgGameLabel,
+          lineupConfirmed: sgConfirmed,
+          signals:         kSigs,
+          avgIP,
+        });
+      }
 
       // ════════════════════════════════
       // Outs prop scoring
@@ -1663,25 +1682,30 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
       else if (avgIP < 5.0)  { oScore -= 4; oSigs.push(`Avg IP ${avgIP.toFixed(1)} (below average depth)`); }
 
       oScore = Math.max(38, Math.min(88, oScore));
-      const oLine = Math.max(0.5, Math.round(avgIP * 3) + 0.5);
-
-      picks.push({
-        label:          `${lastName} Outs O/U ${oLine}`,
-        fullName,
-        pitcherId:      pitcher.id,
-        lean:           oScore >= 50 ? "OVER" : "UNDER",
-        positive:       oScore >= 50,
-        confidence:     oScore,
-        tier:           MODEL_TIER(oScore),
-        propType:       "Outs",
-        market:         "pitcher_outs",
-        modelLine:      oLine,
-        gamePk:         sg.gamePk,
-        game:           sgGameLabel,
-        lineupConfirmed: sgConfirmed,
-        signals:        oSigs,
-        avgIP,
-      });
+      const dkOutsLine = findDKLine("pitcher_outs");
+      if (dkOutsLine != null) {
+        const projectedOuts = +(avgIP * 3).toFixed(1);
+        const outsLean = projectedOuts > dkOutsLine ? "OVER" : "UNDER";
+        picks.push({
+          label:           `${lastName} Outs O/U ${dkOutsLine}`,
+          fullName,
+          pitcherId:       pitcher.id,
+          lean:            outsLean,
+          positive:        outsLean === "OVER",
+          confidence:      oScore,
+          tier:            MODEL_TIER(oScore),
+          propType:        "Outs",
+          market:          "pitcher_outs",
+          modelLine:       dkOutsLine,
+          projectedValue:  projectedOuts,
+          lineSource:      "DK",
+          gamePk:          sg.gamePk,
+          game:            sgGameLabel,
+          lineupConfirmed: sgConfirmed,
+          signals:         oSigs,
+          avgIP,
+        });
+      }
     });
   });
 
@@ -2728,8 +2752,8 @@ export default function App() {
   const [loginError,   setLoginError]   = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
 
-  const [preferredBook,    setPreferredBook]    = useState(null); // "DK"|"FD"|"CZR"|"MGM"|"BOV"|null
-  const [propsBookFilter,  setPropsBookFilter]  = useState("ALL");
+  const [preferredBook,    setPreferredBook]    = useState("DK"); // "DK"|"FD"|"CZR"|"MGM"|"BOV" — DK is app default
+  const [propsBookFilter,  setPropsBookFilter]  = useState("DK");
   const [prefSaving,       setPrefSaving]       = useState(false);
   const [prefSaveMsg,      setPrefSaveMsg]      = useState("");
 
@@ -2970,7 +2994,10 @@ export default function App() {
         boardPropsFetched.current.add(key);
         setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
         fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "", game.gamePk)
-          .then(props => setLivePlayerProps(prev => ({ ...prev, [key]: { props } })))
+          .then(result => {
+            const normalized = result?.props ? result : { props: result ?? [], reason: "ok" };
+            setLivePlayerProps(prev => ({ ...prev, [key]: normalized }));
+          })
           .catch(() => {
             boardPropsFetched.current.delete(key);
             setLivePlayerProps(prev => ({ ...prev, [key]: { props: [] } }));
@@ -3017,9 +3044,9 @@ export default function App() {
     if (!authToken) return;
     apiFetch("/api/auth/preferences")
       .then(d => {
-        const nextBook = d.preferences?.preferredBook ?? null;
+        const nextBook = d.preferences?.preferredBook ?? "DK";
         setPreferredBook(nextBook);
-        setPropsBookFilter(nextBook ?? "ALL");
+        setPropsBookFilter(nextBook);
       })
       .catch(() => {});
   }, [authToken]);
@@ -3050,9 +3077,9 @@ export default function App() {
       // Load preferences after login
       apiFetch("/api/auth/preferences")
         .then(d => {
-          const nextBook = d.preferences?.preferredBook ?? null;
+          const nextBook = d.preferences?.preferredBook ?? "DK";
           setPreferredBook(nextBook);
-          setPropsBookFilter(nextBook ?? "ALL");
+          setPropsBookFilter(nextBook);
         })
         .catch(() => {});
     } catch (err) {
@@ -3689,7 +3716,6 @@ export default function App() {
   // Delegates to module-level computeTopSlatePicks() to avoid minifier
   // variable-name collisions (TDZ) with render-body locals.
   const isAvailableAtPreferredBook = (pick) => {
-    if (!preferredBook) return true; // no preference — show everything
     const ppState = livePlayerProps[String(pick.gamePk)];
     // Odds not loaded yet — don't hide the pick prematurely
     if (!ppState || ppState === "loading" || !Array.isArray(ppState?.props)) return true;
@@ -3705,7 +3731,7 @@ export default function App() {
   };
 
   const rawSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length
-    ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather)
+    ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather, livePlayerProps)
     : [];
   const topSlatePicks = preferredBook
     ? rawSlatePicks.filter(isAvailableAtPreferredBook)
@@ -4003,10 +4029,8 @@ export default function App() {
     const books = match.books ?? {};
 
     // Build ordered list of all 5 target books that have a line posted.
-    // Preferred book floats to front of the list.
-    const bookOrder = preferredBook
-      ? [preferredBook, ...["DK","FD","CZR","MGM","BOV"].filter(b => b !== preferredBook)]
-      : ["DK","FD","CZR","MGM","BOV"];
+    // Preferred book (default: DK) always floats to front.
+    const bookOrder = [preferredBook, ...["DK","FD","CZR","MGM","BOV"].filter(b => b !== preferredBook)];
     const allBooks = bookOrder
       .map(bk => ({ book: bk, ...books[bk] }))
       .filter(b => b.line != null);
@@ -4066,7 +4090,6 @@ export default function App() {
         </div>
         {tierPicks.map((p, i) => {
           const bookLine = getBookLine(p);
-          const lineMismatch = bookLine && Math.abs(bookLine.line - p.modelLine) >= 0.5;
           const mv = (() => {
             if (!bookLine) {
               const ppState = livePlayerProps[String(p.gamePk)];
@@ -4136,6 +4159,9 @@ export default function App() {
                     {p.avgIP < 5.0 && <span style={{ fontSize: 8, color: "#ef4444", fontWeight: 700 }}>⚠ LOW IP</span>}
                   </div>
                 </div>
+                {p.lineSource && (
+                  <span style={{ fontSize: 7, fontWeight: 800, color: "#38bdf8", background: "rgba(56,189,248,0.1)", border: "1px solid rgba(56,189,248,0.25)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em", flexShrink: 0 }}>{p.lineSource}</span>
+                )}
                 <LeanBadge label={p.lean} positive={p.positive} small />
                 <div style={{ fontSize: 13, fontWeight: 800, color: tierColor, fontFamily: "monospace", minWidth: 34, textAlign: "right" }}>{p.confidence}%</div>
               </div>
@@ -4150,8 +4176,8 @@ export default function App() {
                         ⬆ SHARP {bookLine.gap > 0 ? "−" : "+"}{Math.abs(bookLine.gap)}
                       </span>
                     )}
-                    {lineMismatch && (
-                      <span style={{ fontSize: 8, fontWeight: 700, color: "#fbbf24", marginLeft: "auto" }}>model: {p.modelLine}</span>
+                    {p.projectedValue != null && (
+                      <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", marginLeft: "auto" }}>proj: {p.projectedValue}</span>
                     )}
                   </div>
                   {/* Per-book grid */}
@@ -4693,7 +4719,8 @@ export default function App() {
               <SlateCard key={g.id} game={g} selected={selectedId === g.id} onSelect={openGame} liveOddsMap={liveOddsMap}
                 bestBet={topSlatePicks.find(p => p.gamePk === (g.gamePk ?? g.id)) ?? null}
                 liveScore={liveScores[g.gamePk ?? g.id] ?? null}
-                injuredIds={injuredIds} />
+                injuredIds={injuredIds}
+                preferredBook={preferredBook} />
             ))}
           </div>
         </>)}
@@ -7403,17 +7430,26 @@ export default function App() {
             const game = (activeSlate ?? []).find(g => (g.gamePk ?? g.id) === item.gamePk);
             const status = game?.status ?? "";
             const isFinal = status === "Final" || status === "Game Over";
-            if (!isFinal) return null;
-
             const liveScore = liveScores[item.gamePk];
-            if (!liveScore) return null;
 
             if (type === "nrfi") {
-              const f1 = liveScore.firstInning;
+              const box = liveBoxscores[item.gamePk];
+              const boxF1 = box?.linescore?.innings?.[0] ?? null;
+              const f1 = liveScore?.firstInning ?? (boxF1 ? { away: boxF1.away, home: boxF1.home } : null);
+              if ((!f1 || f1.away === null || f1.home === null) && liveScore) {
+                if ((liveScore.inning ?? 0) >= 2 && (liveScore.awayScore ?? 0) === 0 && (liveScore.homeScore ?? 0) === 0) {
+                  return item.lean === "NRFI";
+                }
+                if ((liveScore.inning ?? 0) === 1 && liveScore.halfInning === "bottom" && (liveScore.awayScore ?? 0) > 0) {
+                  return item.lean !== "NRFI";
+                }
+              }
               if (!f1 || f1.away === null || f1.home === null) return null;
               const wasNrfi = f1.away === 0 && f1.home === 0;
               return item.lean === "NRFI" ? wasNrfi : !wasNrfi;
             }
+
+            if (!isFinal || !liveScore) return null;
 
             if (type === "total") {
               const line = parseFloat(item.line);
@@ -7750,6 +7786,38 @@ export default function App() {
                               );
                             })()}
                           </div>
+                          {c.propLine?.books && (
+                            <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
+                              {[preferredBook, ...["DK", "FD", "CZR", "MGM", "BOV"].filter(bk => bk !== preferredBook)]
+                                .filter((bk, idx, arr) => arr.indexOf(bk) === idx)
+                                .filter(bk => c.propLine.books?.[bk]?.line != null)
+                                .map(bk => {
+                                  const book = c.propLine.books[bk];
+                                  const bkColor = bk === "DK" ? "#38bdf8"
+                                    : bk === "FD" ? "#34d399"
+                                    : bk === "CZR" ? "#fb923c"
+                                    : bk === "MGM" ? "#a78bfa"
+                                    : "#f87171";
+                                  return (
+                                    <span
+                                      key={bk}
+                                      style={{
+                                        fontSize: 8,
+                                        fontWeight: 700,
+                                        color: bkColor,
+                                        background: `${bkColor}15`,
+                                        border: `1px solid ${bkColor}33`,
+                                        borderRadius: 4,
+                                        padding: "2px 6px",
+                                        fontFamily: "monospace",
+                                      }}
+                                  >
+                                      {bk === preferredBook ? `★ ${bk}` : bk} {book.line} {book.overOdds ?? "—"}/{book.underOdds ?? "—"}
+                                    </span>
+                                  );
+                                })}
+                            </div>
+                          )}
                         </div>
                         {/* Score badge */}
                         <div style={{ flexShrink: 0, width: 44, borderRadius: 10, background: `${sc}22`, border: `1px solid ${sc}55`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "5px 0 4px", gap: 2 }}>
@@ -7850,6 +7918,38 @@ export default function App() {
                             </span>
                           )}
                         </div>
+                        {c.propLine?.books && (
+                          <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
+                            {[preferredBook, ...["DK", "FD", "CZR", "MGM", "BOV"].filter(bk => bk !== preferredBook)]
+                              .filter((bk, idx, arr) => arr.indexOf(bk) === idx)
+                              .filter(bk => c.propLine.books?.[bk]?.line != null)
+                              .map(bk => {
+                                const book = c.propLine.books[bk];
+                                const bkColor = bk === "DK" ? "#38bdf8"
+                                  : bk === "FD" ? "#34d399"
+                                  : bk === "CZR" ? "#fb923c"
+                                  : bk === "MGM" ? "#a78bfa"
+                                  : "#f87171";
+                                return (
+                                  <span
+                                    key={bk}
+                                    style={{
+                                      fontSize: 8,
+                                      fontWeight: 700,
+                                      color: bkColor,
+                                      background: `${bkColor}15`,
+                                      border: `1px solid ${bkColor}33`,
+                                      borderRadius: 4,
+                                      padding: "2px 6px",
+                                      fontFamily: "monospace",
+                                    }}
+                                >
+                                    {bk === preferredBook ? `★ ${bk}` : bk} {book.line} {book.overOdds ?? "—"}/{book.underOdds ?? "—"}
+                                  </span>
+                                );
+                              })}
+                          </div>
+                        )}
                       </div>
 
                       {/* Score badge */}
@@ -7870,9 +7970,9 @@ export default function App() {
           const BOOKS = ["DK","FD","CZR","MGM","BOV"];
 
           const handleBookSelect = async (book) => {
-            const next = book === preferredBook ? null : book; // toggle off if same
+            const next = book === preferredBook ? "DK" : book; // toggle off resets to DK default
             setPreferredBook(next);
-            setPropsBookFilter(next ?? "ALL");
+            setPropsBookFilter(next);
             setPrefSaving(true);
             setPrefSaveMsg("");
             try {
@@ -7911,7 +8011,7 @@ export default function App() {
               <div style={{ marginBottom: 20 }}>
                 <div style={{ fontSize: 9, fontWeight: 700, color: "#4b5563", letterSpacing: "0.08em", marginBottom: 6 }}>DEFAULT SPORTSBOOK</div>
                 <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 10, lineHeight: 1.5 }}>
-                  Your preferred book appears first in prop line grids and is highlighted with a ★.
+                  Your selected book filters lines and picks app-wide. DraftKings is the default.
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {BOOKS.map(bk => {
@@ -7943,8 +8043,8 @@ export default function App() {
                     {prefSaving ? "Saving…" : prefSaveMsg}
                   </div>
                 )}
-                {!preferredBook && (
-                  <div style={{ fontSize: 9, color: "#374151", marginTop: 8, fontFamily: "monospace" }}>No preference set — books shown in default order (DK, FD, CZR, MGM, BOV)</div>
+                {preferredBook === "DK" && (
+                  <div style={{ fontSize: 9, color: "#374151", marginTop: 8, fontFamily: "monospace" }}>Using app default · tap another book to switch</div>
                 )}
               </div>
 
