@@ -1171,6 +1171,35 @@ Effect: Elite aces (ERA <3, K/9 ≥10, WHIP <1.10, avgIP ≥6) now score 81–88
 
 ---
 
+### BACKLOG TASK 30 — Skip Pre-Game Player Props Polling Until 30 Min Before First Pitch
+
+**Priority: Low**
+
+**Background:**
+`pollPlayerProps()` currently loops all active (non-Final/Postponed) games every 20 minutes starting at 8am Honolulu. On a 15-game slate, this means games scheduled for 7pm ET are being polled 10+ times before props are even meaningful. Cuts Odds API player prop calls significantly with no UX impact.
+
+**Implementation (single edit in `backend/jobs/snapshotJobs.js`):**
+
+In `pollPlayerProps()`, after filtering `active` games, add a pre-pitch window check:
+
+```js
+const active = games.filter(g => {
+  const s = g.status ?? "";
+  if (["Final", "Game Over", "Postponed", "Cancelled", "Suspended"].includes(s)) return false;
+  // Skip pre-game games until 30 minutes before first pitch
+  const gameTimeMs = Date.parse(g.gameTime);
+  if (Number.isFinite(gameTimeMs) && gameTimeMs - Date.now() > 30 * 60 * 1000) return false;
+  return true;
+});
+```
+
+**Constraints:**
+- Only skip games where `g.gameTime` is a valid ISO timestamp and game hasn't started yet
+- In-progress and recently-completed games always pass through (status check already handles post-game)
+- No changes to route handlers, TTLs, or any other files
+
+---
+
 ### BACKLOG TASK 27 — Label and Unify Algorithmic vs AI-Powered Picks
 
 **Background:**

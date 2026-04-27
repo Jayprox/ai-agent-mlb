@@ -8359,7 +8359,7 @@ export default function App() {
                       ["Umpire Card", "Shows the home plate ump with a SCORECARD LIVE badge when real UmpScorecards data is loaded. Four accuracy metrics: Accuracy (overall ball/strike %, avg ~92–93%), vs Exp (how many points above/below expected — positive is sharper), Consistency (zone reliability across the game), and Favor/Gm (run impact per game). Without live data, falls back to historical K Rate / BB Rate estimates. Badge: ACCURATE (≥+0.5% vs expected), INCONSISTENT (≤−1.0%), or PITCHER/NEUTRAL UMP from static data."],
                       ["NRFI / YRFI Card", "First inning scoring tendencies for both teams — scored % of games and avg 1st inning runs. Lean (NRFI or YRFI) with a confidence %. The NRFI badge on the slate card only shows when confidence hits 62%+."],
                       ["Bullpen Card", "Grade (A–C), fatigue level (FRESH / MODERATE / HIGH based on pitches thrown last 3 days), setup depth, and L/R balance. Expand the Relievers drawer to see each arm: ERA, WHIP, Last App, Pitches from last outing, K/9 (swing-and-miss rate — 10+ is elite), and BB/9 (walk rate — under 3 is sharp). High fatigue + thin depth = lean toward OVER on totals."],
-                      ["Odds & Line Movement", "Multi-book table (DK / FD / CZR / MGM / BOV) showing moneyline, total, O/U odds, and runline for each book. Missing books omitted. Shows PRE-GAME LINES for in-progress and final games (The Odds API removes games at first pitch). Line movement arrow on the slate card shows direction the total shifted from open. DK and FD are sharp books; CZR, MGM, and BOV are square books — a gap of 0.5+ between their lines is a meaningful edge signal (LINE INTELLIGENCE)."],
+                      ["Odds & Line Movement", "Multi-book table (DK / FD / CZR / MGM / BOV) showing moneyline, total, O/U odds, and runline for each book. Missing books omitted. Shows PRE-GAME LINES for in-progress and final games — The Odds API removes live game odds at first pitch, so the last-snapped pre-game lines are preserved and displayed. Line movement arrow on the slate card shows the direction the total shifted from its opening number. DK and FD are sharp books; CZR, MGM, and BOV are square books — a gap of 0.5+ between their lines is a meaningful edge signal (LINE INTELLIGENCE). Your preferred book's column is highlighted by default."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                         <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#38bdf8", fontFamily: "monospace", flexShrink: 0, minWidth: 60, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
@@ -8442,7 +8442,7 @@ export default function App() {
                       ["↑ WIND badge", "HR tab only. Wind is blowing out to center or right field — historically adds ~5–8% to HR rates. Combined with a power hitter and a homer-friendly park, this is a strong environmental edge."],
                       ["L5 dots", "Batter tabs only. Last 5 games: green dot = got at least 1 hit that game, dark dot = hitless. Five green dots = on a tear. Three or fewer = cold. Use this alongside the season AVG to separate a hot hitter from a paper stat."],
                       ["L3 avg K", "K Props tab only. Average strikeouts per start over the pitcher's last 3 outings. If the sportsbook line is 5.5 Ks and his L3 avg is 8.0, that's a meaningful gap in your favor. If it's 5.0 vs a 6.5 line, the over needs more work."],
-                      ["Prop line", "If sportsbook data is loaded, shows the over line and odds directly on the card. A synthetic line (~X.X) is shown when book data is unavailable, derived from the pitcher's recent stats."],
+                      ["Prop line", "Shows the DraftKings-posted over line and odds directly on the card when DK has the market available. A synthetic line (~X.X) is shown as a fallback when no sportsbook data has been posted yet, derived from the pitcher's recent stats. The DK book tag on the card confirms the line source."],
                       ["X/Y loaded", "How many players have full stats loaded vs total expected. Cards fill in as lineups post and stats fetch in the background — the board gets more accurate as the day progresses and lineups confirm."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
@@ -8460,6 +8460,31 @@ export default function App() {
                       <span style={{ color: "#f9fafb" }}>3. Cross-check with the Game tab.</span> Open the game for the full pitcher card, lineup matchups, and Intel (umpire zone, bullpen, line movement).<br />
                       <span style={{ color: "#f9fafb" }}>4. Watch for TBD umpires.</span> Umpire is one of the highest-weight factors for K Props. A TBD ump means partial credit — rescore mentally once the assignment is posted (usually ~3 hrs before first pitch).<br />
                       <span style={{ color: "#f9fafb" }}>5. Outs props need deep starters.</span> If the avg IP row on the Outs card is below 5.0 IP, the score likely came from control/ERA factors. Shorter starters are risky for outs overs even with good numbers.
+                    </div>
+                  </div>
+                </Section>
+
+                <Section title="📋 Props Tab — Sportsbook Lines &amp; Book Filter">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                    The <span style={{ color: "#38bdf8", fontWeight: 700 }}>Props</span> tab (inside a game) shows a multi-book line comparison grid for every player prop market — Strikeouts, Home Runs, Total Bases, and Hits. Each row shows the over line and juice at each available book side-by-side so you can quickly spot the best number before placing.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["Book filter chips", "A row of chips at the top of the Sportsbook Lines section lets you filter the grid to a single book: ALL · DK · FD · CZR · MGM · BOV. Your preferred book (set in Settings) is highlighted with a ★. Tap any chip to narrow the view; tap it again to return to ALL. LINE INTELLIGENCE still runs across all books regardless of which filter is active."],
+                      ["DK tag", "A small blue DK label appears in the corner of game cards and Model Pick cards to indicate that the displayed line is sourced from DraftKings. This confirms the line is live market data, not a synthetic estimate."],
+                      ["Best line highlight", "The book offering the lowest over line (most favorable for an over bet) is highlighted in the grid. When two books share the lowest line, the one with the better juice is preferred."],
+                      ["Missing books", "If a book hasn't posted a line for that market yet, its column is omitted from the grid rather than shown as blank. As the day progresses and books add markets, the grid fills in automatically."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#38bdf8", fontFamily: "monospace", flexShrink: 0, minWidth: 70, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ background: "rgba(56,189,248,0.07)", border: "1px solid rgba(56,189,248,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#7dd3fc", fontWeight: 700, marginBottom: 4 }}>💡 LINE INTELLIGENCE — Sharp vs Square Gap</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                      DK and FD are sharp books that attract professional bettors and move quickly. CZR, MGM, and BOV are square books that move slower. When DK/FD post a line of 6.5 Ks and CZR/MGM still show 7.0, the sharp side has already priced the pitcher lower — playing the 6.5 means you're playing with the smart money. An <span style={{ color: "#fbbf24", fontWeight: 700 }}>EDGE</span> badge appears automatically when this gap is ≥ 0.5.
                     </div>
                   </div>
                 </Section>
@@ -8483,7 +8508,7 @@ export default function App() {
                   <div style={{ background: "rgba(129,140,248,0.07)", border: "1px solid rgba(129,140,248,0.25)", borderRadius: 10, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: "#818cf8", fontFamily: "monospace" }}>LINES Section — Multi-Book Comparison</div>
                     <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
-                      Each Model Pick card shows a <span style={{ color: "#f9fafb" }}>LINES</span> grid when sportsbook data is available. It displays the over line and juice at each of the 5 books (DK, FD, CZR, MGM, BOV). This enables <span style={{ color: "#fbbf24", fontWeight: 600 }}>LINE INTELLIGENCE</span> — if sharp books (DK/FD) have a lower line than square books (CZR/MGM/BOV) by 0.5 or more, it signals that the market is mispriced and the lower line is the smarter number to play. The best line and book are highlighted automatically.
+                      Each Model Pick card shows a <span style={{ color: "#f9fafb" }}>LINES</span> grid when sportsbook data is available. It displays the over line and juice at each of the 5 books (DK, FD, CZR, MGM, BOV). The pick line shown on the card header is DraftKings' actual posted line — when DK has posted a number, that's the line the model is evaluating against. A synthetic line (~X.X) only appears when no book data is available yet. This enables <span style={{ color: "#fbbf24", fontWeight: 600 }}>LINE INTELLIGENCE</span> — if sharp books (DK/FD) have a lower line than square books (CZR/MGM/BOV) by 0.5 or more, it signals that the market is mispriced and the lower line is the smarter number to play. The best line and book are highlighted automatically.
                     </div>
                     <div style={{ background: "rgba(251,191,36,0.07)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 8, padding: "8px 10px" }}>
                       <div style={{ fontSize: 10, color: "#fde68a", fontWeight: 700, marginBottom: 3 }}>EDGE badge</div>
@@ -8510,7 +8535,7 @@ export default function App() {
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {[
-                      ["Preferred Sportsbook", "Sets which book's line and odds appear first throughout the app — on Model Pick LINES grids, Board prop lines, and any multi-book display. Options: DK (DraftKings), FD (FanDuel), CZR (Caesars), MGM (BetMGM), BOV (Bovada). If no preference is set, the best available line across all books is shown by default. Tap a book to select it, tap again to clear."],
+                      ["Preferred Sportsbook", "Sets which book's line and odds appear first throughout the app — on Model Pick LINES grids, Board prop lines, and any multi-book display. Options: DK (DraftKings), FD (FanDuel), CZR (Caesars), MGM (BetMGM), BOV (Bovada). DraftKings is the default. Tap a different book to switch, tap it again to reset back to DK."],
                       ["Sign Out", "Signs you out of your account and clears your session token. Your pick log and preferences are saved to your account and will be restored on next login."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
