@@ -1156,6 +1156,637 @@ In the pick card render, on the same line as the pick label and confidence %, ad
 
 ---
 
+### CODEX TASK 22 — The Scout: AI Bettor Tab with Self-Evaluation Loop
+
+**Access:** Gated to `jayprox12@gmail.com` only — backend returns 403, frontend hides tab for all other users.
+
+**Overview:**
+A new "THE SCOUT" bottom nav tab. An AI persona (sharp professional bettor) generates 6–8 daily picks for K props, Outs props, and Game Totals using all available Prop Scout data. At midnight Honolulu, a scheduler job checks if all games are final, then auto-generates an evaluation of each pick — classifying decision quality and flagging app improvement opportunities.
+
+---
+
+#### FILE 1 — `backend/routes/scout.js` (new file)
+
+**DB tables to create on startup (add to `ensurePhaseOneTables()` in snapshotJobs.js):**
+
+```sql
+CREATE TABLE IF NOT EXISTS scout_picks_snapshots (
+  slate_date DATE PRIMARY KEY,
+  picks JSONB NOT NULL,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  generations_used INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS scout_evaluations (
+  slate_date DATE PRIMARY KEY,
+  evaluations JSONB NOT NULL,
+  day_review TEXT NOT NULL,
+  improvement_flags JSONB NOT NULL DEFAULT '[]',
+  evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+**User gate (reuse in all scout routes):**
+```js
+const SCOUT_ALLOWLIST = (process.env.AI_PICKS_ALLOWLIST ?? "jayprox12@gmail.com")
+  .split(",").map(e => e.trim().toLowerCase());
+
+function requireScoutAccess(req, res, next) {
+  if (!SCOUT_ALLOWLIST.includes((req.user?.email ?? "").toLowerCase())) {
+    return res.status(403).json({ error: "Access restricted" });
+  }
+  next();
+}
+```
+Apply `requireScoutAccess` as middleware on all scout routes (after `requireAuth`).
+
+---
+
+**`GET /api/scout/picks` — Generate or serve today's picks**
+
+1. Check `scout_picks_snapshots` for today's Honolulu date. If exists AND `generations_used < 3` is not the case (i.e., already generated and not a forced regen) → serve from DB.
+
+2. If generating fresh:
+   a. Read today's games from `schedule_snapshots`. Filter to games with probable pitchers. Take the top 8 by game order.
+   b. For each probable pitcher, fetch season stats from MLB Stats API:
+      - Season stats: `GET /people/{id}?hydrate=stats(group=[pitching],type=[season],season={year})`
+        Fields: era, whip, strikeOuts, inningsPitched, baseOnBalls, battersFaced → compute K/9, BB/9, avgIP
+      - Last 3 game logs: `GET /people/{id}/stats?stats=gameLog&group=pitching&season={year}&limit=3`
+        Fields: strikeOuts, inningsPitched, earnedRuns per start → compute L3 avg K, L3 avg IP, L3 avg ER
+   c. Read DK lines from `player_props_snapshots` (today's date) for pitcher_strikeouts and pitcher_outs markets for each pitcher.
+   d. Read game odds from `odds_snapshots` (today's date) for game totals (the `total` field).
+   e. Read umpire data from `umpire_snapshots` for each gamePk — extract homePlate name + stats.K_rate_delta if available.
+   f. Fetch weather for each game via `GET https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m,wind_speed_10m,wind_direction_10m&forecast_days=1` for the game's stadium coords. Use stadium coords from a hardcoded map matching the stadium name (same STADIUMS object already in prop-scout-v7.jsx).
+   g. Serialize each game as compact text (see format below).
+   h. Call OpenAI `gpt-4o-mini` with the picks prompt (see below).
+   i. Parse response, store in `scout_picks_snapshots`, return picks.
+
+**Context serialization per game (pitcher props):**
+```
+PITCHER: {name} ({teamAbbr}) vs {oppAbbr}  {gameTime} ET
+ERA: {era} | K/9: {k9} | WHIP: {whip} | BB/9: {bb9} | avgIP: {avgIP}
+L3 avg K: {l3K} | L3 avg IP: {l3IP} | L3 avg ER: {l3ER}
+DK K line: {kLine} ({kOdds} over) | DK Outs line: {outsLine} ({outsOdds} over)
+Umpire: {umpName} | K/9 delta: {delta} ({direction})
+Weather: {temp}°F, wind {speed}mph {direction} | Stadium: {stadiumName}
+Matchup score: {score} ({edge}) | RHB: {r} LHB: {l} vs {hand}HP
+IL flags: {flags or "none"}
+```
+(Omit DK line fields if no line posted yet.)
+
+**Context serialization per game (totals):**
+```
+GAME TOTAL: {awayAbbr} @ {homeAbbr}  {gameTime} ET
+Away SP: {name} ERA {era} | WHIP {whip} | L3 avg ER {l3ER}
+Home SP: {name} ERA {era} | WHIP {whip} | L3 avg ER {l3ER}
+DK Total: {line} ({overOdds} over / {underOdds} under) | Opened: {openLine} ({moveDir})
+Weather: {temp}°F, wind {speed}mph {dir} | Park runs factor: {factor}
+```
+(Opening line is `total` from the oldest `odds_snapshots` row for that game — approximate; use current line if only one snapshot exists.)
+
+**OpenAI picks prompt:**
+
+System:
+```
+You are The Scout — a sharp professional sports bettor with 15 years of experience beating closing lines. You are data-obsessed, value-focused, and direct. You only recommend a prop when at least two independent signals point the same direction. You always cite specific numbers. You speak in first person, present tense. Each reasoning is 2–4 sentences max. Be selective — quality over quantity. Only make picks you genuinely believe in.
+```
+
+User:
+```
+Today's slate data is below. Make your best picks for K props, Outs props, and Game Totals.
+Only pick markets where DK has posted a line (skip any with no line data).
+Aim for 4–8 picks total. Confidence HIGH = multiple strong signals; MEDIUM = solid but one open question.
+Return valid JSON only — no other text.
+
+{serialized game data}
+
+Return format:
+{
+  "picks": [
+    {
+      "player": "Gerrit Cole",
+      "team": "NYY",
+      "opponent": "BOS",
+      "gameTime": "7:10 PM ET",
+      "market": "pitcher_strikeouts",
+      "marketLabel": "K",
+      "line": 7.5,
+      "lean": "OVER",
+      "odds": "-115",
+      "book": "DK",
+      "confidence": "HIGH",
+      "reasoning": "...",
+      "signals": ["K/9 11.2", "L3 avg K 8.3", "Ump K/9 +2.1", "Pitcher edge matchup"]
+    }
+  ]
+}
+
+For game totals: player = null, team = away team abbr, marketLabel = "Total", signals include both SPs' stats and weather.
+```
+
+**Response shape from `GET /api/scout/picks`:**
+```json
+{
+  "picks": [...],
+  "generatedAt": "ISO string",
+  "generationsUsedToday": 1,
+  "maxGenerationsPerDay": 3,
+  "slateDate": "2026-04-27"
+}
+```
+
+---
+
+**`POST /api/scout/regenerate` — Force fresh generation (max 3/day)**
+
+- Check `scout_picks_snapshots` for today. If `generations_used >= 3` → return 429 `{ error: "Daily limit reached", generationsUsedToday: 3 }`.
+- Otherwise delete today's row and re-run the full generation flow. Increment `generations_used`.
+- Return same shape as `GET /api/scout/picks`.
+
+---
+
+**`GET /api/scout/evaluation/:date` — Serve evaluation for a given date**
+
+- `date` param format: `YYYY-MM-DD`
+- Read `scout_evaluations` for that date. If none → return `{ evaluated: false }`.
+- Return: `{ evaluated: true, evaluations: [...], dayReview: "...", improvementFlags: [...], evaluatedAt: "..." }`.
+
+---
+
+#### FILE 2 — `backend/jobs/snapshotJobs.js` — Add `runScoutEvaluation(date)`
+
+```js
+async function runScoutEvaluation(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) { console.warn("  ⚠ runScoutEvaluation: OPENAI_API_KEY not set"); return; }
+
+  // Already evaluated today?
+  const existing = await query(
+    "SELECT slate_date FROM scout_evaluations WHERE slate_date = $1", [date]
+  );
+  if (existing?.rows?.length) {
+    console.log(`  · runScoutEvaluation: already evaluated for ${date}`);
+    return;
+  }
+
+  // Get today's picks
+  const picksRow = await query(
+    "SELECT picks FROM scout_picks_snapshots WHERE slate_date = $1", [date]
+  );
+  const picks = picksRow?.rows?.[0]?.picks;
+  if (!picks?.length) {
+    console.log(`  · runScoutEvaluation: no picks for ${date}`);
+    return;
+  }
+
+  // Check all games are final
+  const schedRow = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1", [date]
+  );
+  const games = schedRow?.rows?.[0]?.games ?? [];
+  const allFinal = games.length > 0 && games.every(g => {
+    const s = g.status ?? "";
+    return ["Final", "Game Over", "Postponed", "Cancelled", "Suspended"].includes(s);
+  });
+  if (!allFinal) {
+    console.log(`  · runScoutEvaluation: games not all final yet for ${date}`);
+    return;
+  }
+
+  // Fetch actual results per game
+  const resultsByGamePk = {};
+  for (const game of games) {
+    try {
+      const { data } = await mlb.get(`/game/${game.gamePk}/boxscore`);
+      const awayPitchers = data.teams?.away?.pitchers ?? [];
+      const homePitchers = data.teams?.home?.pitchers ?? [];
+      const allPitcherIds = [...awayPitchers, ...homePitchers];
+      const pitcherStats = {};
+      for (const pid of allPitcherIds) {
+        const p = data.teams?.away?.players?.[`ID${pid}`] ?? data.teams?.home?.players?.[`ID${pid}`];
+        if (p) {
+          const stats = p.stats?.pitching ?? {};
+          const name = p.person?.fullName ?? "";
+          const ip = parseFloat(stats.inningsPitched ?? 0);
+          const outs = Math.round(ip) * 3 + Math.round((ip % 1) * 10);
+          pitcherStats[name.toLowerCase()] = {
+            name,
+            strikeouts: stats.strikeOuts ?? 0,
+            outs,
+            ip,
+            earnedRuns: stats.earnedRuns ?? 0,
+          };
+        }
+      }
+      const linescore = data.linescore ?? {};
+      resultsByGamePk[game.gamePk] = {
+        awayScore: linescore.teams?.away?.runs ?? 0,
+        homeScore: linescore.teams?.home?.runs ?? 0,
+        totalRuns: (linescore.teams?.away?.runs ?? 0) + (linescore.teams?.home?.runs ?? 0),
+        pitchers: pitcherStats,
+      };
+    } catch (err) {
+      console.warn(`  ⚠ runScoutEvaluation: boxscore failed for ${game.gamePk}: ${err.message}`);
+    }
+  }
+
+  // Match actual results to picks
+  const picksWithResults = picks.map(pick => {
+    const game = games.find(g =>
+      (g.away?.abbr === pick.team || g.home?.abbr === pick.team) &&
+      (g.away?.abbr === pick.opponent || g.home?.abbr === pick.opponent)
+    );
+    const result = game ? resultsByGamePk[game.gamePk] : null;
+    let actualValue = null;
+    let hit = null;
+
+    if (result) {
+      if (pick.market === "pitcher_strikeouts") {
+        const pStats = Object.values(result.pitchers).find(p =>
+          p.name.toLowerCase().includes((pick.player ?? "").toLowerCase().split(" ").pop())
+        );
+        actualValue = pStats?.strikeouts ?? null;
+      } else if (pick.market === "pitcher_outs") {
+        const pStats = Object.values(result.pitchers).find(p =>
+          p.name.toLowerCase().includes((pick.player ?? "").toLowerCase().split(" ").pop())
+        );
+        actualValue = pStats?.outs ?? null;
+      } else if (pick.market === "game_total") {
+        actualValue = result.totalRuns;
+      }
+      if (actualValue != null) {
+        hit = pick.lean === "OVER" ? actualValue > pick.line : actualValue < pick.line;
+      }
+    }
+
+    return { ...pick, actualValue, hit };
+  });
+
+  // Build evaluation prompt
+  const picksText = picksWithResults.map((p, i) => {
+    const resultStr = p.hit == null ? "RESULT UNKNOWN" : p.hit ? `HIT (actual: ${p.actualValue})` : `MISS (actual: ${p.actualValue}, line was ${p.line})`;
+    return `Pick ${i + 1}: ${p.marketLabel} ${p.lean} ${p.line} — ${p.player ?? `${p.team} vs ${p.opponent}`}
+Original reasoning: "${p.reasoning}"
+Signals: ${p.signals?.join(", ")}
+Result: ${resultStr}`;
+  }).join("\n\n");
+
+  const evalMessages = [
+    {
+      role: "system",
+      content: `You are The Scout reviewing your own picks. For each pick you have the original reasoning and actual result. Evaluate decision quality honestly — not just outcome. Classify each as: SOUND_HIT (data-backed, result followed logically), LUCKY_HIT (correct result, weak or coincidental reasoning), VARIANCE_MISS (sound reasoning, bad day / acceptable variance), or ADDRESSABLE_MISS (data gap, wrong signal, app limitation — be specific). For ADDRESSABLE_MISS, identify exactly what information was missing or what the app should improve. Return valid JSON only.`,
+    },
+    {
+      role: "user",
+      content: `Today's picks and results:\n\n${picksText}\n\nReturn format:\n{\n  "evaluations": [\n    {\n      "pickIndex": 0,\n      "result": "HIT",\n      "actualValue": 8,\n      "category": "SOUND_HIT",\n      "scoutReview": "My read was right...",\n      "improvementFlag": null\n    }\n  ],\n  "dayReview": "Overall...",\n  "improvementFlags": ["flag 1"]\n}`,
+    },
+  ];
+
+  const OpenAI = require("openai");
+  const client = new OpenAI({ apiKey });
+  const response = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: evalMessages,
+    response_format: { type: "json_object" },
+    temperature: 0.4,
+  });
+
+  const evalData = JSON.parse(response.choices[0].message.content);
+
+  await query(
+    `INSERT INTO scout_evaluations (slate_date, evaluations, day_review, improvement_flags, evaluated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (slate_date) DO UPDATE
+     SET evaluations = $2, day_review = $3, improvement_flags = $4, evaluated_at = NOW()`,
+    [
+      date,
+      JSON.stringify(evalData.evaluations ?? []),
+      evalData.dayReview ?? "",
+      JSON.stringify(evalData.improvementFlags ?? []),
+    ]
+  );
+
+  console.log(`  ✓ runScoutEvaluation  date=${date}  picks=${picks.length}  flags=${(evalData.improvementFlags ?? []).length}`);
+}
+```
+
+Export `runScoutEvaluation` from `snapshotJobs.js`.
+
+---
+
+#### FILE 3 — `backend/jobs/scheduler.js` — Add midnight evaluation cron
+
+Import `runScoutEvaluation` from `snapshotJobs.js`.
+
+Add inside `startScheduler()`:
+```js
+// Midnight Honolulu — evaluate yesterday's Scout picks once all games are final
+cron.schedule("0 0 * * *", async () => {
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+  await runScoutEvaluation(yDate);
+}, { timezone: "Pacific/Honolulu" });
+```
+
+Also add a safety re-check at 1am and 2am Honolulu (in case late West Coast games aren't final at midnight):
+```js
+cron.schedule("0 1,2 * * *", async () => {
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+  await runScoutEvaluation(yDate);
+}, { timezone: "Pacific/Honolulu" });
+```
+
+---
+
+#### FILE 4 — `server.js`
+
+Mount the scout route after requireAuth:
+```js
+app.use("/api/scout", require("./routes/scout"));
+```
+
+---
+
+#### FILE 5 — `prop-scout-v7.jsx`
+
+**Step 1 — User gate constant** (top of component, near other constants):
+```js
+const SCOUT_ALLOWLIST = ["jayprox12@gmail.com"];
+const isScoutUser = SCOUT_ALLOWLIST.includes((currentUser?.email ?? "").toLowerCase());
+```
+
+**Step 2 — State** (near other tab state):
+```js
+const [scoutPicks, setScoutPicks] = useState(null);
+const [scoutEval, setScoutEval] = useState(null);
+const [scoutLoading, setScoutLoading] = useState(false);
+const [scoutEvalLoading, setScoutEvalLoading] = useState(false);
+const [scoutError, setScoutError] = useState(null);
+const [scoutExpanded, setScoutExpanded] = useState(null); // index of expanded pick
+const [scoutEvalExpanded, setScoutEvalExpanded] = useState(null);
+const [scoutGenerationsLeft, setScoutGenerationsLeft] = useState(3);
+```
+
+**Step 3 — Data load** (add inside the `useEffect` that runs when `activeTab === "scout"`; lazy-load on first tab visit):
+```js
+useEffect(() => {
+  if (activeMainTab !== "scout" || !isScoutUser || scoutPicks !== null) return;
+  setScoutLoading(true);
+  apiGet("/api/scout/picks")
+    .then(d => {
+      setScoutPicks(d.picks ?? []);
+      setScoutGenerationsLeft(d.maxGenerationsPerDay - d.generationsUsedToday);
+    })
+    .catch(e => setScoutError(e.message))
+    .finally(() => setScoutLoading(false));
+
+  // Load yesterday's evaluation
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+  setScoutEvalLoading(true);
+  apiGet(`/api/scout/evaluation/${yDate}`)
+    .then(d => { if (d.evaluated) setScoutEval(d); })
+    .catch(() => {})
+    .finally(() => setScoutEvalLoading(false));
+}, [activeMainTab, isScoutUser]);
+```
+
+**Step 4 — Regenerate handler:**
+```js
+const handleScoutRegenerate = async () => {
+  if (scoutGenerationsLeft <= 0) return;
+  setScoutLoading(true);
+  setScoutError(null);
+  try {
+    const d = await apiPost("/api/scout/regenerate", {});
+    setScoutPicks(d.picks ?? []);
+    setScoutGenerationsLeft(d.maxGenerationsPerDay - d.generationsUsedToday);
+  } catch (e) {
+    setScoutError(e.message);
+  } finally {
+    setScoutLoading(false);
+  }
+};
+```
+
+**Step 5 — Bottom nav tab** (add to bottom nav only when `isScoutUser`):
+```jsx
+{isScoutUser && (
+  <NavTab id="scout" label="Scout" icon="🎯" activeMainTab={activeMainTab} setActiveMainTab={setActiveMainTab} />
+)}
+```
+
+**Step 6 — The Scout tab render** (add as a new `activeMainTab === "scout"` block):
+
+```jsx
+{activeMainTab === "scout" && isScoutUser && (
+  <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 12 }}>
+
+    {/* Header */}
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🎯 THE SCOUT</div>
+        <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>AI-generated picks · Not financial advice</div>
+      </div>
+      <button
+        onClick={handleScoutRegenerate}
+        disabled={scoutLoading || scoutGenerationsLeft <= 0}
+        style={{
+          background: scoutGenerationsLeft > 0 ? "rgba(139,92,246,0.15)" : "rgba(255,255,255,0.04)",
+          border: `1px solid ${scoutGenerationsLeft > 0 ? "rgba(139,92,246,0.4)" : "#2d3148"}`,
+          borderRadius: 8, padding: "6px 12px", fontSize: 10, fontWeight: 700,
+          color: scoutGenerationsLeft > 0 ? "#c4b5fd" : "#4b5563",
+          cursor: scoutGenerationsLeft > 0 ? "pointer" : "not-allowed", fontFamily: "monospace"
+        }}
+      >
+        {scoutLoading ? "..." : `↺ Regenerate (${scoutGenerationsLeft} left)`}
+      </button>
+    </div>
+
+    {/* Error */}
+    {scoutError && (
+      <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+        {scoutError}
+      </div>
+    )}
+
+    {/* Loading */}
+    {scoutLoading && !scoutPicks && (
+      <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>The Scout is reviewing today's slate...</div>
+    )}
+
+    {/* Today's Picks */}
+    {scoutPicks && scoutPicks.length > 0 && (
+      <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.1em", marginBottom: 6 }}>
+          TODAY'S PICKS — {scoutPicks.length} total
+        </div>
+        {scoutPicks.map((pick, idx) => {
+          const expanded = scoutExpanded === idx;
+          const confColor = pick.confidence === "HIGH" ? "#22c55e" : "#fbbf24";
+          const mktColor = pick.market === "pitcher_strikeouts" ? "#818cf8" : pick.market === "pitcher_outs" ? "#38bdf8" : "#fb923c";
+          return (
+            <div key={idx}
+              onClick={() => setScoutExpanded(expanded ? null : idx)}
+              style={{
+                background: expanded ? "#1a1c2e" : "#161827",
+                border: `1px solid ${expanded ? "#2d3148" : "#1f2437"}`,
+                borderRadius: 10, padding: "12px 14px", cursor: "pointer",
+                transition: "background 0.15s"
+              }}
+            >
+              {/* Collapsed row */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ background: `rgba(${mktColor === "#818cf8" ? "129,140,248" : mktColor === "#38bdf8" ? "56,189,248" : "251,146,60"},0.15)`, border: `1px solid ${mktColor}40`, borderRadius: 5, padding: "2px 7px", fontSize: 9, fontWeight: 700, color: mktColor, fontFamily: "monospace" }}>
+                    {pick.marketLabel}
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>
+                    {pick.lean} {pick.line}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#6b7280" }}>
+                    {pick.player ?? `${pick.team} @ ${pick.opponent}`}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, color: confColor, fontFamily: "monospace" }}>{pick.confidence}</div>
+                  <div style={{ fontSize: 9, color: "#4b5563" }}>{pick.odds}</div>
+                  <div style={{ fontSize: 8, color: "#38bdf8", fontWeight: 700, fontFamily: "monospace" }}>DK</div>
+                  <div style={{ fontSize: 10, color: "#4b5563" }}>{expanded ? "▲" : "▼"}</div>
+                </div>
+              </div>
+
+              {/* Expanded */}
+              {expanded && (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {pick.player && (
+                    <div style={{ fontSize: 10, color: "#9ca3af" }}>{pick.team} vs {pick.opponent} · {pick.gameTime}</div>
+                  )}
+                  <div style={{ fontSize: 11, color: "#d1d5db", lineHeight: 1.6, fontStyle: "italic", borderLeft: "2px solid #2d3148", paddingLeft: 10 }}>
+                    "{pick.reasoning}"
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {(pick.signals ?? []).map((s, i) => (
+                      <div key={i} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 4, padding: "2px 6px", fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>{s}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    )}
+
+    {scoutPicks && scoutPicks.length === 0 && (
+      <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>
+        No picks generated yet — DK lines may not be posted. Try regenerating closer to game time.
+      </div>
+    )}
+
+    {/* Yesterday's Evaluation */}
+    {(scoutEval || scoutEvalLoading) && (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+        <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.1em" }}>
+          YESTERDAY'S REVIEW
+        </div>
+
+        {scoutEvalLoading && <div style={{ fontSize: 11, color: "#6b7280" }}>Loading review...</div>}
+
+        {scoutEval && (
+          <>
+            {/* Day summary */}
+            <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                {["SOUND_HIT","LUCKY_HIT","VARIANCE_MISS","ADDRESSABLE_MISS"].map(cat => {
+                  const count = scoutEval.evaluations.filter(e => e.category === cat).length;
+                  if (!count) return null;
+                  const color = cat === "SOUND_HIT" ? "#22c55e" : cat === "LUCKY_HIT" ? "#fbbf24" : cat === "VARIANCE_MISS" ? "#6b7280" : "#ef4444";
+                  const label = cat === "SOUND_HIT" ? "✅ Sound" : cat === "LUCKY_HIT" ? "⚠ Lucky" : cat === "VARIANCE_MISS" ? "🎲 Variance" : "🔧 Fix";
+                  return (
+                    <div key={cat} style={{ background: `${color}15`, border: `1px solid ${color}40`, borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color, fontFamily: "monospace" }}>
+                      {count} {label}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6, fontStyle: "italic" }}>
+                "{scoutEval.dayReview}"
+              </div>
+            </div>
+
+            {/* Improvement flags */}
+            {scoutEval.improvementFlags?.length > 0 && (
+              <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "10px 14px" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#fca5a5", fontFamily: "monospace", marginBottom: 6 }}>🔧 IMPROVEMENTS FLAGGED</div>
+                {scoutEval.improvementFlags.map((flag, i) => (
+                  <div key={i} style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5, marginBottom: 4 }}>· {flag}</div>
+                ))}
+              </div>
+            )}
+
+            {/* Per-pick evaluations */}
+            {scoutEval.evaluations.map((ev, idx) => {
+              const expanded = scoutEvalExpanded === idx;
+              const catColor = ev.category === "SOUND_HIT" ? "#22c55e" : ev.category === "LUCKY_HIT" ? "#fbbf24" : ev.category === "VARIANCE_MISS" ? "#6b7280" : "#ef4444";
+              return (
+                <div key={idx}
+                  onClick={() => setScoutEvalExpanded(expanded ? null : idx)}
+                  style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 8, padding: "10px 12px", cursor: "pointer" }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ fontSize: 11, color: "#d1d5db" }}>Pick {ev.pickIndex + 1} · Actual: {ev.actualValue ?? "?"}</div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <div style={{ fontSize: 9, fontWeight: 700, color: catColor, fontFamily: "monospace" }}>{ev.category.replace(/_/g," ")}</div>
+                      <div style={{ fontSize: 10, color: "#4b5563" }}>{expanded ? "▲" : "▼"}</div>
+                    </div>
+                  </div>
+                  {expanded && (
+                    <div style={{ marginTop: 8, fontSize: 11, color: "#9ca3af", lineHeight: 1.6, fontStyle: "italic", borderLeft: "2px solid #2d3148", paddingLeft: 10 }}>
+                      "{ev.scoutReview}"
+                      {ev.improvementFlag && (
+                        <div style={{ marginTop: 6, color: "#fca5a5", fontStyle: "normal", fontSize: 10 }}>🔧 {ev.improvementFlag}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
+      </div>
+    )}
+
+  </div>
+)}
+```
+
+---
+
+#### ENV variable to add to `.env` / Railway config:
+
+```
+AI_PICKS_ALLOWLIST=jayprox12@gmail.com
+```
+
+---
+
+#### Constraints:
+- Do not modify any existing route, scoring function, or DB table outside of `ensurePhaseOneTables`.
+- `requireAuth` must be applied before `requireScoutAccess` on all scout routes.
+- The OpenAI client in `scout.js` uses `process.env.OPENAI_API_KEY` — the same key already used by other routes.
+- All MLB API calls in the scout route use the existing `mlb` axios instance from `../services/mlbApi`.
+- The `apiPost` helper used in the frontend already exists — do not redefine it.
+- The NavTab component already exists in the frontend — use the same pattern as existing bottom nav tabs.
+- `activeMainTab` is the state variable for the bottom nav — use it consistently.
+
+---
+
 ### CODEX TASK 20 — Score Cap Fix: K and Outs picks clustering at 78% (COMPLETED by CW)
 
 **Status: Done — no action needed. Documented here for context.**
