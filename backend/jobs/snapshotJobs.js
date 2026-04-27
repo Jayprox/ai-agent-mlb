@@ -38,6 +38,15 @@ async function ensurePhaseOneTables() {
       injuries      JSONB NOT NULL
     )
   `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS odds_snapshots (
+      game_key   TEXT NOT NULL,
+      slate_date DATE NOT NULL,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      odds       JSONB NOT NULL,
+      PRIMARY KEY (game_key, slate_date)
+    )
+  `);
 }
 
 function formatGameTime(iso) {
@@ -220,6 +229,7 @@ async function snapshotOdds(date = todayHonolulu()) {
   if (!key) { console.warn("  ⚠ snapshotOdds: ODDS_API_KEY not set"); return; }
   console.log(`  → Job: snapshotOdds  date=${date}`);
   try {
+    await ensurePhaseOneTables();
     const res = await axios.get("https://api.the-odds-api.com/v4/sports/baseball_mlb/odds", {
       params: { apiKey: key, regions: "us", markets: "h2h,totals,spreads", oddsFormat: "american" },
       timeout: 12000,

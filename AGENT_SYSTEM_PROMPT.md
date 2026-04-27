@@ -2153,3 +2153,112 @@ Syntax checks passed:
 ### Practical next step
 
 If we want these tables created by migration rather than only on first-write protection, run the normal DB migration flow so the new entries in `backend/migrations/001_init.sql` are applied in all environments.
+
+---
+
+## HANDOFF NOTE — 2026-04-27 — Backlog Task #28 Phase 2 Completed
+
+Phase 2 of the approved DB-first rollout is now implemented: **Odds DB snapshots**.
+
+### What was already in place before this task
+
+- `snapshotOdds()` already existed in `backend/jobs/snapshotJobs.js`
+- the `*/15 * * * *` scheduler wiring already existed in `backend/jobs/scheduler.js`
+- Odds were already being polled upstream and written into `odds_snapshots` when DB was available
+
+What was missing — and is now done — was:
+- ensuring the `odds_snapshots` table exists in the startup/create-table path
+- making `/api/odds` read from DB before going upstream
+- returning a backend snapshot timestamp in the response
+- relaxing the frontend re-poll interval
+
+### What was built
+
+#### 1. `odds_snapshots` table creation is now covered in the snapshot job layer
+
+In `backend/jobs/snapshotJobs.js`:
+
+- `ensurePhaseOneTables()` was expanded to also create:
+
+```sql
+CREATE TABLE IF NOT EXISTS odds_snapshots (
+  game_key   TEXT NOT NULL,
+  slate_date DATE NOT NULL,
+  fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  odds       JSONB NOT NULL,
+  PRIMARY KEY (game_key, slate_date)
+)
+```
+
+- `snapshotOdds()` now calls `ensurePhaseOneTables()` before doing inserts
+
+This means the odds snapshot path has the same safety behavior as Phase 1:
+- if DB is disabled, it skips silently
+- if DB is enabled but the table was not migrated yet, the job can still create it before writing
+
+#### 2. `/api/odds` now reads from DB snapshots first
+
+In `backend/routes/odds.js`:
+
+- after the existing in-memory cache check, the route now queries:
+  - `odds_snapshots`
+  - filtered by `slate_date = todayHonolulu()`
+  - ordered by `fetched_at DESC`
+
+- if rows exist and the freshest row is within the backend 20-minute freshness window:
+  - the route reconstructs the existing normalized response shape from those DB rows
+  - rebuilds:
+    - `map`
+    - `eventIdMap`
+  - returns the same top-level structure as before
+  - now includes `fetchedAt` as an ISO timestamp from the freshest DB snapshot row
+
+- if no fresh DB rows exist:
+  - the route falls back to the existing upstream Odds API fetch path exactly as before
+
+#### 3. Added DB-hit route logging
+
+`backend/routes/odds.js` now logs successful DB reads in this style:
+
+- `✓ odds DB-HIT  games=N  age=Xs`
+
+This makes it easy to confirm in Railway logs whether `/api/odds` is serving from DB snapshots or falling back upstream.
+
+#### 4. Frontend polling was relaxed
+
+In `prop-scout-v7.jsx`:
+
+- the `/api/odds` background re-poll interval was increased from:
+  - `10 minutes`
+  - to `20 minutes`
+
+Reason:
+- backend odds are now refreshed every 15 minutes via the snapshot job
+- frontend no longer needs to request them as aggressively
+- this reduces redundant app-side traffic while keeping freshness reasonable
+
+### Files changed
+
+- `backend/jobs/snapshotJobs.js`
+- `backend/routes/odds.js`
+- `prop-scout-v7.jsx`
+
+### Verification run
+
+Passed:
+
+- `node --check backend/jobs/snapshotJobs.js`
+- `node --check backend/routes/odds.js`
+- `npm run build`
+
+### Important behavior notes
+
+- No changes were made to player props in this phase.
+- No changes were made to schedule or injuries in this phase.
+- The normalized `map` object returned by `/api/odds` was preserved.
+- The only response-shape addition is the optional top-level `fetchedAt`.
+- If `DATABASE_URL` is not set, `snapshotOdds()` still skips silently and the route still behaves like the older cache/upstream version.
+
+### What remains next
+
+Phase 3 (Player Props DB snapshots) is still pending and should remain separate.

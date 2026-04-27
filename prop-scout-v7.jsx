@@ -3188,7 +3188,7 @@ export default function App() {
     const id = setInterval(async () => {
       const result = await fetchOdds(true);
       if (result?.data) setLiveOddsMap(result.data);
-    }, 10 * 60 * 1000);
+    }, 20 * 60 * 1000);
     return () => clearInterval(id);
   }, [liveSlate]);
 

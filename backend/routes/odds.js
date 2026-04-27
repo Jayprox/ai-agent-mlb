@@ -2,6 +2,7 @@ const express = require("express");
 const router  = express.Router();
 const axios   = require("axios");
 const cache   = require("../services/cache");
+const { query, isConnected } = require("../services/db");
 
 const TTL_MS = 20 * 60 * 1000; // 20-minute shared server cache
 
@@ -13,6 +14,7 @@ const TARGET_BOOKS = [
 ];
 
 const fmtPrice = (p) => (p == null ? null : p > 0 ? `+${p}` : String(p));
+const todayHonolulu = () => new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
 
 const extractBook = (bk, awayTeam) => {
   let awayML = null, homeML = null, total = null, overOdds = null, underOdds = null,
@@ -51,6 +53,38 @@ const extractBook = (bk, awayTeam) => {
   return { awayML, homeML, total, overOdds, underOdds, f5Total, awaySpread, awaySpreadOdds, homeSpread, homeSpreadOdds };
 };
 
+const buildOddsPayload = (games, meta = {}) => {
+  const map        = {};
+  const eventIdMap = {};
+
+  games.forEach(g => {
+    const key = `${g.away_team}|${g.home_team}`;
+    eventIdMap[key] = g.id;
+
+    const books = {};
+    TARGET_BOOKS.forEach(({ key: bKey, label }) => {
+      const bk = g.bookmakers?.find(b => b.key === bKey);
+      if (bk) books[label] = extractBook(bk, g.away_team);
+    });
+
+    const primaryBk = TARGET_BOOKS.map(t => g.bookmakers?.find(b => b.key === t.key)).find(Boolean)
+                      ?? g.bookmakers?.[0];
+    if (!primaryBk) return;
+
+    const primary      = extractBook(primaryBk, g.away_team);
+    const primaryLabel = TARGET_BOOKS.find(t => t.key === primaryBk.key)?.label ?? primaryBk.title;
+    map[key] = { ...primary, book: primaryLabel, books };
+  });
+
+  return {
+    map,
+    eventIdMap,
+    remaining: meta.remaining ?? null,
+    used: meta.used ?? null,
+    fetchedAt: meta.fetchedAt ?? null,
+  };
+};
+
 // ── GET /api/odds ─────────────────────────────────────────────────────────
 // Returns h2h + totals + spreads for all today's MLB games.
 // Shared server-side cache (20 min) — all users share one fetch.
@@ -61,6 +95,36 @@ router.get("/", async (req, res) => {
   if (cached) {
     res.setHeader("X-Cache", "HIT");
     return res.json(cached);
+  }
+
+  if (isConnected()) {
+    try {
+      const today = todayHonolulu();
+      const row = await query(
+        `SELECT game_key, fetched_at, odds
+         FROM odds_snapshots
+         WHERE slate_date = $1
+         ORDER BY fetched_at DESC`,
+        [today]
+      );
+      const rows = row?.rows ?? [];
+      if (rows.length) {
+        const freshestMs = Math.max(...rows.map(r => new Date(r.fetched_at).getTime()));
+        const ageMs = Date.now() - freshestMs;
+        if (ageMs < TTL_MS) {
+          const games = rows.map(r => r.odds).filter(Boolean);
+          const result = buildOddsPayload(games, {
+            fetchedAt: new Date(freshestMs).toISOString(),
+          });
+          cache.set(cacheKey, result, TTL_MS);
+          res.setHeader("X-Cache", "DB-HIT");
+          console.log(`  ✓ odds DB-HIT  games=${games.length}  age=${Math.round(ageMs / 1000)}s`);
+          return res.json(result);
+        }
+      }
+    } catch (dbErr) {
+      console.warn(`Odds DB lookup skipped: ${dbErr.message}`);
+    }
   }
 
   const apiKey = process.env.ODDS_API_KEY;
@@ -79,35 +143,11 @@ router.get("/", async (req, res) => {
     const used      = response.headers["x-requests-used"]      ?? null;
     const games     = response.data;
 
-    const map        = {};
-    const eventIdMap = {};
-
-    games.forEach(g => {
-      const key = `${g.away_team}|${g.home_team}`;
-      eventIdMap[key] = g.id;
-
-      const books = {};
-      TARGET_BOOKS.forEach(({ key: bKey, label }) => {
-        const bk = g.bookmakers.find(b => b.key === bKey);
-        if (bk) books[label] = extractBook(bk, g.away_team);
-      });
-
-      const primaryBk = TARGET_BOOKS.map(t => g.bookmakers.find(b => b.key === t.key)).find(Boolean)
-                        ?? g.bookmakers[0];
-      if (!primaryBk) return;
-
-      const primary      = extractBook(primaryBk, g.away_team);
-      const primaryLabel = TARGET_BOOKS.find(t => t.key === primaryBk.key)?.label ?? primaryBk.title;
-      map[key] = { ...primary, book: primaryLabel, books };
-    });
-
-    const result = {
-      map,
-      eventIdMap,
+    const result = buildOddsPayload(games, {
       remaining,
       used,
-      fetchedAt: new Date().toLocaleTimeString(),
-    };
+      fetchedAt: new Date().toISOString(),
+    });
 
     cache.set(cacheKey, result, TTL_MS);
     res.setHeader("X-Cache", "MISS");
