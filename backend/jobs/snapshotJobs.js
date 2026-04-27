@@ -47,6 +47,16 @@ async function ensurePhaseOneTables() {
       PRIMARY KEY (game_key, slate_date)
     )
   `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS player_props_snapshots (
+      game_pk       INTEGER NOT NULL,
+      snapshot_date DATE NOT NULL,
+      fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      props         JSONB NOT NULL,
+      reason        TEXT NOT NULL DEFAULT 'ok',
+      PRIMARY KEY (game_pk, snapshot_date)
+    )
+  `);
 }
 
 function formatGameTime(iso) {
@@ -319,4 +329,36 @@ async function snapshotUmpires(gamePk) {
   }
 }
 
-module.exports = { snapshotSlate, snapshotOdds, snapshotBullpen, snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, todayHonolulu };
+async function pollPlayerProps(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: pollPlayerProps  date=${date}`);
+  await ensurePhaseOneTables();
+  const result = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const games = result?.rows?.[0]?.games ?? [];
+  const active = games.filter(g => {
+    const s = g.status ?? "";
+    return !["Final", "Game Over", "Postponed", "Cancelled", "Suspended"].includes(s);
+  });
+  console.log(`  · pollPlayerProps  active=${active.length}/${games.length}`);
+  for (const game of active) {
+    try {
+      const { buildPlayerPropsPayloadForJob } = require("../routes/playerProps");
+      const { props, reason } = await buildPlayerPropsPayloadForJob(game.gamePk);
+      await query(
+        `INSERT INTO player_props_snapshots (game_pk, snapshot_date, fetched_at, props, reason)
+         VALUES ($1, $2, NOW(), $3, $4)
+         ON CONFLICT (game_pk, snapshot_date) DO UPDATE SET fetched_at = NOW(), props = $3, reason = $4`,
+        [game.gamePk, date, JSON.stringify(props), reason]
+      );
+      console.log(`  ✓ pollPlayerProps  gamePk=${game.gamePk}  count=${props.length}  reason=${reason}`);
+    } catch (err) {
+      console.error(`  ✗ pollPlayerProps ${game.gamePk} failed: ${err.message}`);
+    }
+    await new Promise(r => setTimeout(r, 800));
+  }
+}
+
+module.exports = { snapshotSlate, snapshotOdds, snapshotBullpen, snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, todayHonolulu };

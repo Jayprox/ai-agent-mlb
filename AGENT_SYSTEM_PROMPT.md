@@ -2262,3 +2262,180 @@ Passed:
 ### What remains next
 
 Phase 3 (Player Props DB snapshots) is still pending and should remain separate.
+
+---
+
+## HANDOFF NOTE — 2026-04-27 — Backlog Task #28 Phase 3 Completed
+
+Phase 3 of the approved DB-first rollout is now implemented: **Player Props DB snapshots**.
+
+### What was built
+
+#### 1. `player_props_snapshots` table support
+
+In `backend/jobs/snapshotJobs.js`, `ensurePhaseOneTables()` now also creates:
+
+```sql
+CREATE TABLE IF NOT EXISTS player_props_snapshots (
+  game_pk       INTEGER NOT NULL,
+  snapshot_date DATE NOT NULL,
+  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  props         JSONB NOT NULL,
+  reason        TEXT NOT NULL DEFAULT 'ok',
+  PRIMARY KEY (game_pk, snapshot_date)
+)
+```
+
+This keeps Phase 3 aligned with the prior phases:
+- table is created automatically if DB is enabled
+- no crash if `DATABASE_URL` is absent
+
+#### 2. `playerProps` route refactor into reusable builder
+
+In `backend/routes/playerProps.js`:
+
+- extracted the upstream fetch/transform logic into:
+
+```js
+async function buildPlayerPropsPayload(gamePk, eventIdHint = null)
+```
+
+This builder now handles all former route-internal steps:
+- resolve team names from MLB schedule
+- resolve Odds API event ID
+- fetch all player prop markets
+- flatten and normalize them into the app’s existing `props` structure
+- return:
+
+```js
+{ props, reason }
+```
+
+Exported as:
+
+```js
+module.exports.buildPlayerPropsPayloadForJob = buildPlayerPropsPayload;
+```
+
+Important:
+- `eventIdHint` support remains intact
+- route response shape remains unchanged
+
+#### 3. `/api/player-props/:gamePk` now reads DB first
+
+Still in `backend/routes/playerProps.js`:
+
+- after the in-memory cache check, the route now queries:
+  - `player_props_snapshots`
+  - by `game_pk + today's Honolulu date`
+
+- if a row exists and is fresh enough, it returns the DB snapshot
+
+Freshness rules:
+- `reason === "ok"` → fresh for `15 minutes`
+- `reason !== "ok"` (`no_event` / `no_props`) → fresh for only `2 minutes`
+
+This preserves the old retry behavior for empty/no-event states so the app does not get “stuck” on stale missing-prop snapshots.
+
+On DB-hit:
+- response stays:
+
+```js
+{ gamePk, props, reason }
+```
+
+- `X-Cache: DB-HIT`
+- route logs:
+
+```txt
+✓ player-props DB-HIT  gamePk=N  count=N
+```
+
+If DB is unavailable or stale:
+- route falls back to the upstream fetch path exactly as before
+
+#### 4. New polling job: `pollPlayerProps()`
+
+In `backend/jobs/snapshotJobs.js`:
+
+- added:
+
+```js
+async function pollPlayerProps(date = todayHonolulu())
+```
+
+Behavior:
+- skips silently if DB is not connected
+- calls `ensurePhaseOneTables()`
+- reads today’s games from `schedule_snapshots`
+- filters out games with status:
+  - `Final`
+  - `Game Over`
+  - `Postponed`
+  - `Cancelled`
+  - `Suspended`
+- logs how many active games remain
+- for each active game:
+  - calls `buildPlayerPropsPayloadForJob(game.gamePk)`
+  - writes `{ props, reason }` to `player_props_snapshots`
+  - uses:
+
+```sql
+ON CONFLICT (game_pk, snapshot_date)
+DO UPDATE SET fetched_at = NOW(), props = $3, reason = $4
+```
+
+- waits `800ms` between games to avoid hammering the Odds API
+
+Logs per game:
+
+```txt
+✓ pollPlayerProps  gamePk=...  count=...  reason=...
+```
+
+#### 5. Scheduler wiring
+
+In `backend/jobs/scheduler.js`:
+
+added:
+
+```js
+cron.schedule("*/20 8-23 * * *", () => pollPlayerProps(), { timezone: "Pacific/Honolulu" })
+```
+
+This runs every 20 minutes from 8:00 AM through 11:40 PM Honolulu time.
+
+### Files changed
+
+- `backend/routes/playerProps.js`
+- `backend/jobs/snapshotJobs.js`
+- `backend/jobs/scheduler.js`
+
+### Verification run
+
+Passed:
+
+- `node --check backend/routes/playerProps.js`
+- `node --check backend/jobs/snapshotJobs.js`
+- `node --check backend/jobs/scheduler.js`
+
+### Important behavior notes
+
+- No frontend changes were made in Phase 3.
+- No changes were made to odds, schedule, or injuries routes during this task.
+- The route response shape remains:
+
+```js
+{ gamePk, props, reason }
+```
+
+- `eventIdHint` support still works
+- short retry behavior for `no_event` / `no_props` was preserved intentionally
+
+### Status of Backlog Task #28 after this work
+
+All three approved phases are now implemented:
+
+- Phase 1 — Schedule + Injuries snapshots
+- Phase 2 — Odds snapshots
+- Phase 3 — Player Props snapshots
