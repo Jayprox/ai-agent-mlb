@@ -274,7 +274,13 @@ function buildMatchupSummary(lineups, pitcherHand) {
 }
 
 function getIlFlags(injuries, teamAbbr) {
-  return (injuries ?? [])
+  const normalized = Array.isArray(injuries)
+    ? injuries
+    : Array.isArray(injuries?.injuries)
+      ? injuries.injuries
+      : [];
+
+  return normalized
     .filter((entry) => String(entry.team ?? "").includes(teamAbbr))
     .slice(0, 3)
     .map((entry) => entry.playerName ?? entry.player ?? "")
@@ -416,7 +422,9 @@ async function generateScoutPicks(date, generationsUsed) {
     propsByGamePk = new Map((propsRows?.rows ?? []).map((row) => [Number(row.game_pk), { props: row.props ?? [], reason: row.reason ?? "ok" }]));
     oddsByGameKey = new Map((oddsRows?.rows ?? []).map((row) => [row.game_key, row.odds]));
     umpByGamePk   = new Map((umpRows?.rows ?? []).map((row) => [Number(row.game_pk), row.data]));
-    injuries = injuriesRow?.rows?.[0]?.injuries ?? [];
+    injuries = injuriesRow?.rows?.[0]?.injuries?.injuries
+      ?? injuriesRow?.rows?.[0]?.injuries
+      ?? [];
   }
 
   const profileCache = new Map();
