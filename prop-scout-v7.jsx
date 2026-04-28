@@ -387,7 +387,10 @@ const apiFetch = async (path) => {
     window.dispatchEvent(new Event("propscout:unauthorized"));
     throw new Error("Unauthorized");
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? body.error ?? `HTTP ${res.status}`);
+  }
   return res.json();
 };
 
@@ -3679,7 +3682,7 @@ export default function App() {
   // gamelog, H2H, and RBI context for ALL batters on BOTH sides so the Lineup
   // tab loads instantly without any per-batter spinner.
   useEffect(() => {
-    if (IS_STATS_SANDBOX || !selectedId) return;
+    if (IS_STATS_SANDBOX || view !== "game" || !selectedId) return;
     const awayBatters = game.lineups?.away ?? [];
     const homeBatters = game.lineups?.home ?? [];
     const allBatters  = [...awayBatters, ...homeBatters];
@@ -3715,7 +3718,7 @@ export default function App() {
           .catch(() => {});
       }
     });
-  }, [selectedId, game.lineups]);
+  }, [view, selectedId, game.lineups]);
 
   // ── Prop Engine ─────────────────────────────────────────────────────────────
   // Kept at module scope to avoid production minifier TDZ collisions in App().
@@ -4463,17 +4466,19 @@ export default function App() {
     );
   }
 
+  const isNarrowPhone = windowWidth <= 430;
+
   return (
     <>
       <style>{`* { box-sizing: border-box; margin: 0; padding: 0; } body { background: #0e0f1a; } ::-webkit-scrollbar { width: 4px; height: 4px; } ::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }`}</style>
-      <div style={{ background: "#0e0f1a", minHeight: "100vh", color: "#e5e7eb", fontFamily: "monospace", maxWidth: 960, margin: "0 auto", padding: windowWidth > 640 ? "20px 24px 64px" : "16px 14px 48px" }}>
+      <div style={{ background: "#0e0f1a", minHeight: "100vh", color: "#e5e7eb", fontFamily: "monospace", maxWidth: 960, margin: "0 auto", padding: windowWidth > 640 ? "20px 24px 64px" : isNarrowPhone ? "14px 12px 44px" : "16px 14px 48px" }}>
 
         {/* ── APP HEADER ── */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ display: "flex", flexDirection: isNarrowPhone ? "column" : "row", justifyContent: "space-between", alignItems: isNarrowPhone ? "flex-start" : "center", gap: isNarrowPhone ? 10 : 0, marginBottom: 16 }}>
           <div>
-            <div style={{ fontSize: 11, color: "#6b7280", letterSpacing: "0.1em" }}>MLB RESEARCH</div>
+            <div style={{ fontSize: isNarrowPhone ? 10 : 11, color: "#6b7280", letterSpacing: "0.1em" }}>MLB RESEARCH</div>
             <div
-              style={{ fontSize: 20, fontWeight: 800, color: "#f9fafb", cursor: "default", userSelect: "none" }}
+              style={{ fontSize: isNarrowPhone ? 18 : 20, lineHeight: 1.05, fontWeight: 800, color: "#f9fafb", cursor: "default", userSelect: "none" }}
               onClick={() => {
                 const next = logoClicks + 1;
                 setLogoClicks(next);
@@ -4484,21 +4489,21 @@ export default function App() {
               }}
             >⚾ Prop Scout</div>
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button onClick={() => setView("slate")} style={{ background: view === "slate" ? "#22c55e" : "#161827", border: `1px solid ${view === "slate" ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "slate" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Slate</button>
-            <button onClick={() => setView("game")}  style={{ background: view === "game"  ? "#22c55e" : "#161827", border: `1px solid ${view === "game"  ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "game"  ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Game</button>
-            <button onClick={() => setView("picks")} style={{ position: "relative", background: view === "picks" ? "#a78bfa" : "#161827", border: `1px solid ${view === "picks" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "picks" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, width: isNarrowPhone ? "100%" : "auto" }}>
+            <button onClick={() => setView("slate")} style={{ background: view === "slate" ? "#22c55e" : "#161827", border: `1px solid ${view === "slate" ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "slate" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Slate</button>
+            <button onClick={() => setView("game")}  style={{ background: view === "game"  ? "#22c55e" : "#161827", border: `1px solid ${view === "game"  ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "game"  ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Game</button>
+            <button onClick={() => setView("picks")} style={{ position: "relative", background: view === "picks" ? "#a78bfa" : "#161827", border: `1px solid ${view === "picks" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "picks" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
               Picks
               {propLog.length > 0 && <span style={{ position: "absolute", top: -5, right: -5, background: "#a78bfa", color: "#000", fontSize: 8, fontWeight: 800, borderRadius: "50%", width: 14, height: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>{propLog.length > 99 ? "99" : propLog.length}</span>}
             </button>
-            <button onClick={() => setView("model")} style={{ background: view === "model" ? "#fbbf24" : "#161827", border: `1px solid ${view === "model" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "model" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Model</button>
+            <button onClick={() => setView("model")} style={{ background: view === "model" ? "#fbbf24" : "#161827", border: `1px solid ${view === "model" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "model" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Model</button>
             {isScoutUser && (
-              <button onClick={() => setView("scout")} style={{ background: view === "scout" ? "#38bdf8" : "#161827", border: `1px solid ${view === "scout" ? "#38bdf8" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "scout" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Scout</button>
+              <button onClick={() => setView("scout")} style={{ background: view === "scout" ? "#38bdf8" : "#161827", border: `1px solid ${view === "scout" ? "#38bdf8" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "scout" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Scout</button>
             )}
             {isChatUser && (
-              <button onClick={() => setView("chat")} style={{ background: view === "chat" ? "#a78bfa" : "#161827", border: `1px solid ${view === "chat" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>💬 Chat</button>
+              <button onClick={() => setView("chat")} style={{ background: view === "chat" ? "#a78bfa" : "#161827", border: `1px solid ${view === "chat" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>💬 Chat</button>
             )}
-            <button onClick={() => setView("board")} style={{ background: view === "board" ? "#fbbf24" : "#161827", border: `1px solid ${view === "board" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "board" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Board</button>
+            <button onClick={() => setView("board")} style={{ background: view === "board" ? "#fbbf24" : "#161827", border: `1px solid ${view === "board" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "board" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Board</button>
           </div>
         </div>
 
