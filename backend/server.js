@@ -48,6 +48,7 @@ app.use("/api/picks",     picksRouter);
 app.use("/api/notes",     notesRouter);
 app.use("/api/digest",    digestRouter);
 app.use("/api/daily-card", dailyCardRouter); // Full-slate AI card
+app.use("/api/scout", require("./routes/scout"));
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {

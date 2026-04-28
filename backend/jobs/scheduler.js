@@ -2,7 +2,7 @@ const cron = require("node-cron");
 const { query, isConnected } = require("../services/db");
 const {
   snapshotSlate, snapshotOdds, snapshotBullpen,
-  snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, todayHonolulu,
+  snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, runScoutEvaluation, todayHonolulu,
 } = require("./snapshotJobs");
 const { warmCache } = require("./warmCache");
 const { regenerateDailyCard } = require("../routes/dailyCard");
@@ -93,6 +93,20 @@ function startScheduler() {
     } catch (err) {
       console.warn(`Daily Card pregame run failed: ${err.message}`);
     }
+  }, { timezone: "Pacific/Honolulu" });
+
+  cron.schedule("0 0 * * *", async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    await runScoutEvaluation(yDate);
+  }, { timezone: "Pacific/Honolulu" });
+
+  cron.schedule("0 1,2 * * *", async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    await runScoutEvaluation(yDate);
   }, { timezone: "Pacific/Honolulu" });
 
   // Pre-warm in-memory cache every 2 hours from 9 AM – 11 PM ET

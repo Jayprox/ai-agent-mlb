@@ -22,6 +22,16 @@ function todayHonolulu() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
 }
 
+function normalizeName(name = "") {
+  return String(name)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9 ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 async function ensurePhaseOneTables() {
   if (!isConnected()) return;
   await query(`
@@ -55,6 +65,23 @@ async function ensurePhaseOneTables() {
       props         JSONB NOT NULL,
       reason        TEXT NOT NULL DEFAULT 'ok',
       PRIMARY KEY (game_pk, snapshot_date)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS scout_picks_snapshots (
+      slate_date DATE PRIMARY KEY,
+      picks JSONB NOT NULL,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      generations_used INTEGER NOT NULL DEFAULT 1
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS scout_evaluations (
+      slate_date DATE PRIMARY KEY,
+      evaluations JSONB NOT NULL,
+      day_review TEXT NOT NULL,
+      improvement_flags JSONB NOT NULL DEFAULT '[]',
+      evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
 }
@@ -361,4 +388,183 @@ async function pollPlayerProps(date = todayHonolulu()) {
   }
 }
 
-module.exports = { snapshotSlate, snapshotOdds, snapshotBullpen, snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, todayHonolulu };
+function ipStringToOuts(ipValue) {
+  if (ipValue == null) return 0;
+  const [wholeStr, fracStr = "0"] = String(ipValue).split(".");
+  const whole = parseInt(wholeStr, 10) || 0;
+  const frac = parseInt(fracStr, 10) || 0;
+  return (whole * 3) + frac;
+}
+
+async function runScoutEvaluation(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) { console.warn("  ⚠ runScoutEvaluation: OPENAI_API_KEY not set"); return; }
+
+  const existing = await query(
+    "SELECT slate_date FROM scout_evaluations WHERE slate_date = $1",
+    [date]
+  );
+  if (existing?.rows?.length) {
+    console.log(`  · runScoutEvaluation: already evaluated for ${date}`);
+    return;
+  }
+
+  const picksRow = await query(
+    "SELECT picks FROM scout_picks_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const picks = picksRow?.rows?.[0]?.picks;
+  if (!picks?.length) {
+    console.log(`  · runScoutEvaluation: no picks for ${date}`);
+    return;
+  }
+
+  const schedRow = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const games = schedRow?.rows?.[0]?.games ?? [];
+  const allFinal = games.length > 0 && games.every((game) => {
+    const status = game.status ?? "";
+    return ["Final", "Game Over", "Postponed", "Cancelled", "Suspended"].includes(status);
+  });
+  if (!allFinal) {
+    console.log(`  · runScoutEvaluation: games not all final yet for ${date}`);
+    return;
+  }
+
+  const resultsByGamePk = {};
+  for (const game of games) {
+    try {
+      const { data } = await mlb.get(`/game/${game.gamePk}/boxscore`);
+      const awayPitchers = data.teams?.away?.pitchers ?? [];
+      const homePitchers = data.teams?.home?.pitchers ?? [];
+      const allPitcherIds = [...awayPitchers, ...homePitchers];
+      const pitcherStats = {};
+
+      for (const pitcherId of allPitcherIds) {
+        const player = data.teams?.away?.players?.[`ID${pitcherId}`] ?? data.teams?.home?.players?.[`ID${pitcherId}`];
+        if (!player) continue;
+        const stats = player.stats?.pitching ?? {};
+        const name = player.person?.fullName ?? "";
+        pitcherStats[name.toLowerCase()] = {
+          name,
+          strikeouts: Number(stats.strikeOuts ?? 0),
+          outs: ipStringToOuts(stats.inningsPitched ?? 0),
+          ip: Number(stats.inningsPitched ?? 0),
+          earnedRuns: Number(stats.earnedRuns ?? 0),
+        };
+      }
+
+      const awayScore = Number(data.teams?.away?.teamStats?.batting?.runs ?? data.teams?.away?.teamStats?.pitching?.runs ?? 0);
+      const homeScore = Number(data.teams?.home?.teamStats?.batting?.runs ?? data.teams?.home?.teamStats?.pitching?.runs ?? 0);
+
+      resultsByGamePk[game.gamePk] = {
+        awayScore,
+        homeScore,
+        totalRuns: awayScore + homeScore,
+        pitchers: pitcherStats,
+      };
+    } catch (err) {
+      console.warn(`  ⚠ runScoutEvaluation: boxscore failed for ${game.gamePk}: ${err.message}`);
+    }
+  }
+
+  const picksWithResults = picks.map((pick) => {
+    const game = games.find((g) =>
+      Number(g.gamePk) === Number(pick.gamePk) ||
+      (
+        [g.away?.abbr, g.home?.abbr].includes(pick.team) &&
+        [g.away?.abbr, g.home?.abbr].includes(pick.opponent)
+      )
+    );
+    const result = game ? resultsByGamePk[game.gamePk] : null;
+    let actualValue = null;
+    let hit = null;
+
+    if (result) {
+      if (pick.market === "pitcher_strikeouts") {
+        const pitcherStats = Object.values(result.pitchers).find((entry) =>
+          normalizeName(entry.name).includes(normalizeName(pick.player ?? ""))
+        );
+        actualValue = pitcherStats?.strikeouts ?? null;
+      } else if (pick.market === "pitcher_outs") {
+        const pitcherStats = Object.values(result.pitchers).find((entry) =>
+          normalizeName(entry.name).includes(normalizeName(pick.player ?? ""))
+        );
+        actualValue = pitcherStats?.outs ?? null;
+      } else if (pick.market === "game_total") {
+        actualValue = result.totalRuns;
+      }
+
+      if (actualValue != null) {
+        hit = pick.lean === "OVER" ? actualValue > pick.line : actualValue < pick.line;
+      }
+    }
+
+    return { ...pick, actualValue, hit };
+  });
+
+  const picksText = picksWithResults.map((pick, idx) => {
+    const resultStr = pick.hit == null
+      ? "RESULT UNKNOWN"
+      : pick.hit
+        ? `HIT (actual: ${pick.actualValue})`
+        : `MISS (actual: ${pick.actualValue}, line was ${pick.line})`;
+    return `Pick ${idx + 1}: ${pick.marketLabel} ${pick.lean} ${pick.line} — ${pick.player ?? `${pick.team} vs ${pick.opponent}`}
+Original reasoning: "${pick.reasoning}"
+Signals: ${pick.signals?.join(", ")}
+Result: ${resultStr}`;
+  }).join("\n\n");
+
+  const evalMessages = [
+    {
+      role: "system",
+      content: `You are The Scout reviewing your own picks. For each pick you have the original reasoning and actual result. Evaluate decision quality honestly — not just outcome. Classify each as: SOUND_HIT (data-backed, result followed logically), LUCKY_HIT (correct result, weak or coincidental reasoning), VARIANCE_MISS (sound reasoning, bad day / acceptable variance), or ADDRESSABLE_MISS (data gap, wrong signal, app limitation — be specific). For ADDRESSABLE_MISS, identify exactly what information was missing or what the app should improve. Return valid JSON only.`,
+    },
+    {
+      role: "user",
+      content: `Today's picks and results:\n\n${picksText}\n\nReturn format:\n{\n  "evaluations": [\n    {\n      "pickIndex": 0,\n      "result": "HIT",\n      "actualValue": 8,\n      "category": "SOUND_HIT",\n      "scoutReview": "My read was right...",\n      "improvementFlag": null\n    }\n  ],\n  "dayReview": "Overall...",\n  "improvementFlags": ["flag 1"]\n}`,
+    },
+  ];
+
+  const OpenAI = require("openai");
+  const client = new OpenAI({ apiKey });
+  const response = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: evalMessages,
+    response_format: { type: "json_object" },
+    temperature: 0.4,
+  });
+
+  const evalData = JSON.parse(response.choices?.[0]?.message?.content ?? "{}");
+
+  await query(
+    `INSERT INTO scout_evaluations (slate_date, evaluations, day_review, improvement_flags, evaluated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (slate_date) DO UPDATE
+     SET evaluations = $2, day_review = $3, improvement_flags = $4, evaluated_at = NOW()`,
+    [
+      date,
+      JSON.stringify(evalData.evaluations ?? []),
+      evalData.dayReview ?? "",
+      JSON.stringify(evalData.improvementFlags ?? []),
+    ]
+  );
+
+  console.log(`  ✓ runScoutEvaluation  date=${date}  picks=${picks.length}  flags=${(evalData.improvementFlags ?? []).length}`);
+}
+
+module.exports = {
+  snapshotSlate,
+  snapshotOdds,
+  snapshotBullpen,
+  snapshotLinescore,
+  snapshotUmpires,
+  pollSchedule,
+  pollInjuries,
+  pollPlayerProps,
+  runScoutEvaluation,
+  todayHonolulu,
+};

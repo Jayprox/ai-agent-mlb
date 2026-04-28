@@ -2744,7 +2744,7 @@ export default function App() {
       const t = localStorage.getItem("propscout_token");
       if (!t) return null;
       const payload = JSON.parse(atob(t.split(".")[1]));
-      return { userId: payload.userId, username: payload.username };
+      return { userId: payload.userId, username: payload.username, email: payload.email ?? null };
     } catch { return null; }
   });
   const [loginUser,    setLoginUser]    = useState("");
@@ -2758,7 +2758,7 @@ export default function App() {
   const [prefSaveMsg,      setPrefSaveMsg]      = useState("");
 
   const [selectedId, setSelectedId] = useState(1);
-  const [view, setView] = useState("slate"); // "slate" | "game" | "picks" | "model" | "board" | "settings"
+  const [view, setView] = useState("slate"); // "slate" | "game" | "picks" | "model" | "board" | "scout" | "settings"
   const [showHelp, setShowHelp] = useState(false);
   const [whyModal, setWhyModal] = useState(null); // { c, type: boardTab, rank }
   const [picksFilter, setPicksFilter] = useState("all"); // "all" | "pending" | "hit" | "miss"
@@ -2772,6 +2772,14 @@ export default function App() {
   const [liveDigest, setLiveDigest] = useState(null);   // { period, total, hits, misses, pct, bestHit, worstMiss, byType }
   const [digestLoading, setDigestLoading] = useState(false);
   const [showDigest, setShowDigest] = useState(true);   // collapse/expand 7-day digest card
+  const [scoutPicks, setScoutPicks] = useState(null);
+  const [scoutEval, setScoutEval] = useState(null);
+  const [scoutLoading, setScoutLoading] = useState(false);
+  const [scoutEvalLoading, setScoutEvalLoading] = useState(false);
+  const [scoutError, setScoutError] = useState(null);
+  const [scoutExpanded, setScoutExpanded] = useState(null);
+  const [scoutEvalExpanded, setScoutEvalExpanded] = useState(null);
+  const [scoutGenerationsLeft, setScoutGenerationsLeft] = useState(3);
   // Prop result tracker — persisted to localStorage
   const [propLog, setPropLog] = useState(() => {
     try { return JSON.parse(localStorage.getItem("propscout_log") || "[]"); }
@@ -3072,7 +3080,7 @@ export default function App() {
       _authToken = data.token;
       localStorage.setItem("propscout_token", data.token);
       setAuthToken(data.token);
-      setCurrentUser({ userId: data.userId, username: data.username });
+      setCurrentUser({ userId: data.userId, username: data.username, email: data.email ?? null });
       setLoginPass("");
       // Load preferences after login
       apiFetch("/api/auth/preferences")
@@ -3099,6 +3107,10 @@ export default function App() {
     setPropsBookFilter("ALL");
     setPropLog([]);
     setLiveDigest(null);
+    setScoutPicks(null);
+    setScoutEval(null);
+    setScoutError(null);
+    setScoutGenerationsLeft(3);
     setView("slate");
   };
 
@@ -3113,6 +3125,29 @@ export default function App() {
       .catch(() => {})
       .finally(() => setDigestLoading(false));
   }, [view]);
+
+  useEffect(() => {
+    if (view !== "scout" || !currentUser || scoutPicks !== null || scoutLoading) return;
+
+    setScoutLoading(true);
+    setScoutError(null);
+    apiFetch("/api/scout/picks")
+      .then((data) => {
+        setScoutPicks(data.picks ?? []);
+        setScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
+      })
+      .catch((err) => setScoutError(err.message))
+      .finally(() => setScoutLoading(false));
+
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    setScoutEvalLoading(true);
+    apiFetch(`/api/scout/evaluation/${yDate}`)
+      .then((data) => { if (data.evaluated) setScoutEval(data); })
+      .catch(() => {})
+      .finally(() => setScoutEvalLoading(false));
+  }, [view, currentUser, scoutPicks, scoutLoading]);
 
   // Background prefetch: home + away pitcher stats + lineups for ALL slate games
   // so the cross-slate Best Bets card and Games board can compute and update reactively.
@@ -3742,7 +3777,27 @@ export default function App() {
   const mediumPicks = topSlatePicks.filter(p => p.tier === "MEDIUM");
   const specPicks   = topSlatePicks.filter(p => p.tier === "SPEC");
 
+  const SCOUT_ALLOWLIST = ["leadoffkaiba"];
+  const scoutIdentity = (currentUser?.username ?? currentUser?.email ?? "").toLowerCase();
+  const isScoutUser = !!currentUser && SCOUT_ALLOWLIST.includes(scoutIdentity);
+
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); };
+
+  const handleScoutRegenerate = async () => {
+    if (scoutGenerationsLeft <= 0) return;
+    setScoutLoading(true);
+    setScoutError(null);
+    try {
+      const data = await apiMutate("/api/scout/regenerate", "POST", {});
+      setScoutPicks(data.picks ?? []);
+      setScoutExpanded(null);
+      setScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
+    } catch (err) {
+      setScoutError(err.message);
+    } finally {
+      setScoutLoading(false);
+    }
+  };
 
   // ── Pick tracker helpers ──────────────────────────────────────────────────
   const logPick = (prop) => {
@@ -4380,6 +4435,9 @@ export default function App() {
               {propLog.length > 0 && <span style={{ position: "absolute", top: -5, right: -5, background: "#a78bfa", color: "#000", fontSize: 8, fontWeight: 800, borderRadius: "50%", width: 14, height: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>{propLog.length > 99 ? "99" : propLog.length}</span>}
             </button>
             <button onClick={() => setView("model")} style={{ background: view === "model" ? "#fbbf24" : "#161827", border: `1px solid ${view === "model" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "model" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Model</button>
+            {isScoutUser && (
+              <button onClick={() => setView("scout")} style={{ background: view === "scout" ? "#38bdf8" : "#161827", border: `1px solid ${view === "scout" ? "#38bdf8" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "scout" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Scout</button>
+            )}
             <button onClick={() => setView("board")} style={{ background: view === "board" ? "#fbbf24" : "#161827", border: `1px solid ${view === "board" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "board" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Board</button>
           </div>
         </div>
@@ -4776,6 +4834,196 @@ export default function App() {
             </Card>
           )}
         </>)}
+
+        {view === "scout" && isScoutUser && (
+          <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🎯 THE SCOUT</div>
+                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>AI-generated picks · Not financial advice</div>
+              </div>
+              <button
+                onClick={handleScoutRegenerate}
+                disabled={scoutLoading || scoutGenerationsLeft <= 0}
+                style={{
+                  background: scoutGenerationsLeft > 0 ? "rgba(56,189,248,0.15)" : "rgba(255,255,255,0.04)",
+                  border: `1px solid ${scoutGenerationsLeft > 0 ? "rgba(56,189,248,0.4)" : "#2d3148"}`,
+                  borderRadius: 8,
+                  padding: "6px 12px",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: scoutGenerationsLeft > 0 ? "#7dd3fc" : "#4b5563",
+                  cursor: scoutGenerationsLeft > 0 ? "pointer" : "not-allowed",
+                  fontFamily: "monospace",
+                }}
+              >
+                {scoutLoading ? "..." : `↺ Regenerate (${scoutGenerationsLeft} left)`}
+              </button>
+            </div>
+
+            {scoutError && (
+              <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+                {scoutError}
+              </div>
+            )}
+
+            {scoutLoading && !scoutPicks && (
+              <Card>
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>The Scout is reviewing today's slate...</div>
+              </Card>
+            )}
+
+            {scoutPicks && scoutPicks.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.1em" }}>
+                  TODAY'S PICKS — {scoutPicks.length} total
+                </div>
+                {scoutPicks.map((pick, idx) => {
+                  const expanded = scoutExpanded === idx;
+                  const confColor = pick.confidence === "HIGH" ? "#22c55e" : "#fbbf24";
+                  const marketColor = pick.market === "pitcher_strikeouts" ? "#818cf8" : pick.market === "pitcher_outs" ? "#38bdf8" : "#fb923c";
+                  return (
+                    <div
+                      key={`${pick.market}-${pick.player ?? pick.team}-${idx}`}
+                      onClick={() => setScoutExpanded(expanded ? null : idx)}
+                      style={{
+                        background: expanded ? "#1a1c2e" : "#161827",
+                        border: `1px solid ${expanded ? "#2d3148" : "#1f2437"}`,
+                        borderRadius: 10,
+                        padding: "12px 14px",
+                        cursor: "pointer",
+                        transition: "background 0.15s",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
+                          <div style={{ background: `${marketColor}18`, border: `1px solid ${marketColor}40`, borderRadius: 5, padding: "2px 7px", fontSize: 9, fontWeight: 700, color: marketColor, fontFamily: "monospace" }}>
+                            {pick.marketLabel}
+                          </div>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>
+                            {pick.lean} {pick.line}
+                          </div>
+                          <div
+                            style={{ fontSize: 10, color: pick.gamePk ? "#7dd3fc" : "#6b7280", textDecoration: pick.gamePk ? "underline" : "none", textUnderlineOffset: 2 }}
+                            onClick={(e) => {
+                              if (!pick.gamePk) return;
+                              e.stopPropagation();
+                              openGame(pick.gamePk);
+                            }}
+                          >
+                            {pick.player ?? `${pick.team} @ ${pick.opponent}`}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: confColor, fontFamily: "monospace" }}>{pick.confidence}</div>
+                          <div style={{ fontSize: 9, color: "#4b5563" }}>{pick.odds}</div>
+                          <div style={{ fontSize: 8, color: "#38bdf8", fontWeight: 700, fontFamily: "monospace" }}>{pick.book ?? "DK"}</div>
+                          <div style={{ fontSize: 10, color: "#4b5563" }}>{expanded ? "▲" : "▼"}</div>
+                        </div>
+                      </div>
+
+                      {expanded && (
+                        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                          <div style={{ fontSize: 10, color: "#9ca3af" }}>
+                            {pick.team} vs {pick.opponent} · {pick.gameTime}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#d1d5db", lineHeight: 1.6, fontStyle: "italic", borderLeft: "2px solid #2d3148", paddingLeft: 10 }}>
+                            "{pick.reasoning}"
+                          </div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                            {(pick.signals ?? []).map((signal, signalIdx) => (
+                              <div key={signalIdx} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 4, padding: "2px 6px", fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>
+                                {signal}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {scoutPicks && scoutPicks.length === 0 && (
+              <Card>
+                <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>
+                  No picks generated yet — DK lines may not be posted. Try regenerating closer to game time.
+                </div>
+              </Card>
+            )}
+
+            {(scoutEval || scoutEvalLoading) && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+                <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.1em" }}>
+                  YESTERDAY'S REVIEW
+                </div>
+
+                {scoutEvalLoading && <div style={{ fontSize: 11, color: "#6b7280" }}>Loading review...</div>}
+
+                {scoutEval && (
+                  <>
+                    <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "12px 14px" }}>
+                      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                        {["SOUND_HIT", "LUCKY_HIT", "VARIANCE_MISS", "ADDRESSABLE_MISS"].map((cat) => {
+                          const count = (scoutEval.evaluations ?? []).filter((entry) => entry.category === cat).length;
+                          if (!count) return null;
+                          const color = cat === "SOUND_HIT" ? "#22c55e" : cat === "LUCKY_HIT" ? "#fbbf24" : cat === "VARIANCE_MISS" ? "#94a3b8" : "#ef4444";
+                          const label = cat === "SOUND_HIT" ? "✅ Sound" : cat === "LUCKY_HIT" ? "⚠ Lucky" : cat === "VARIANCE_MISS" ? "🎲 Variance" : "🔧 Fix";
+                          return (
+                            <div key={cat} style={{ background: `${color}15`, border: `1px solid ${color}40`, borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color, fontFamily: "monospace" }}>
+                              {count} {label}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6, fontStyle: "italic" }}>
+                        "{scoutEval.dayReview}"
+                      </div>
+                    </div>
+
+                    {scoutEval.improvementFlags?.length > 0 && (
+                      <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "10px 14px" }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#fca5a5", fontFamily: "monospace", marginBottom: 6 }}>🔧 IMPROVEMENTS FLAGGED</div>
+                        {scoutEval.improvementFlags.map((flag, flagIdx) => (
+                          <div key={flagIdx} style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5, marginBottom: 4 }}>· {flag}</div>
+                        ))}
+                      </div>
+                    )}
+
+                    {(scoutEval.evaluations ?? []).map((entry, idx) => {
+                      const expanded = scoutEvalExpanded === idx;
+                      const catColor = entry.category === "SOUND_HIT" ? "#22c55e" : entry.category === "LUCKY_HIT" ? "#fbbf24" : entry.category === "VARIANCE_MISS" ? "#94a3b8" : "#ef4444";
+                      return (
+                        <div
+                          key={`${entry.pickIndex}-${idx}`}
+                          onClick={() => setScoutEvalExpanded(expanded ? null : idx)}
+                          style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 8, padding: "10px 12px", cursor: "pointer" }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                            <div style={{ fontSize: 11, color: "#d1d5db" }}>Pick {entry.pickIndex + 1} · Actual: {entry.actualValue ?? "?"}</div>
+                            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: catColor, fontFamily: "monospace" }}>{String(entry.category ?? "").replace(/_/g, " ")}</div>
+                              <div style={{ fontSize: 10, color: "#4b5563" }}>{expanded ? "▲" : "▼"}</div>
+                            </div>
+                          </div>
+                          {expanded && (
+                            <div style={{ marginTop: 8, fontSize: 11, color: "#9ca3af", lineHeight: 1.6, fontStyle: "italic", borderLeft: "2px solid #2d3148", paddingLeft: 10 }}>
+                              "{entry.scoutReview}"
+                              {entry.improvementFlag && (
+                                <div style={{ marginTop: 6, color: "#fca5a5", fontStyle: "normal", fontSize: 10 }}>🔧 {entry.improvementFlag}</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ════════════════════════════════════
             GAME VIEW
