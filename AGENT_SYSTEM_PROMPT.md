@@ -1156,6 +1156,479 @@ In the pick card render, on the same line as the pick label and confidence %, ad
 
 ---
 
+### CODEX TASK 23 — Chat Research Assistant Tab
+
+**Access:** Gated to `leadoffkaiba` — same allowlist mechanism as The Scout (`AI_PICKS_ALLOWLIST` env var, checked against `req.user.username`). Returns 403 for all other users. Frontend hides tab entirely for non-allowlisted users.
+
+**Overview:**
+A dedicated `Chat` view in the bottom nav. A sharp MLB research analyst persona that answers prop questions using today's Prop Scout data. Builds context intelligently based on message intent — no data dumps. Supports session-level conversation memory (last 10 turns). Web search fires automatically on news/injury keywords. Confidence score returned on prop-specific answers.
+
+---
+
+#### FILE 1 — `backend/routes/chat.js` (new file)
+
+**Daily usage counter (in-memory, same pattern as dailyCard.js):**
+```js
+const usageMap = {}; // key: `${userId}:${date}`
+const DAILY_LIMIT = 30;
+
+function todayHonolulu() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+}
+
+function getUsage(userId) {
+  const key = `${userId}:${todayHonolulu()}`;
+  return usageMap[key] ?? 0;
+}
+function incrementUsage(userId) {
+  const key = `${userId}:${todayHonolulu()}`;
+  usageMap[key] = (usageMap[key] ?? 0) + 1;
+  return usageMap[key];
+}
+```
+
+**User gate (identical pattern to scout.js):**
+```js
+const CHAT_ALLOWLIST = (process.env.AI_PICKS_ALLOWLIST ?? "leadoffkaiba")
+  .split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+
+function requireChatAccess(req, res, next) {
+  const identity = (req.user?.username ?? req.user?.email ?? "").toLowerCase();
+  if (!CHAT_ALLOWLIST.includes(identity)) {
+    return res.status(403).json({ error: "Access restricted" });
+  }
+  return next();
+}
+```
+
+**`POST /api/chat`**
+
+Request body: `{ message: string, history: [{ role: "user"|"assistant", content: string }][] }`
+
+Steps:
+
+**1. Check daily limit:**
+```js
+const userId = req.user?.id ?? req.user?.username ?? "unknown";
+if (getUsage(userId) >= DAILY_LIMIT) {
+  return res.status(429).json({ error: "Daily message limit reached", messagesUsedToday: DAILY_LIMIT, maxMessagesPerDay: DAILY_LIMIT });
+}
+```
+
+**2. Detect intent from message:**
+```js
+const msg = (body.message ?? "").toLowerCase();
+
+const WEB_KEYWORDS = ["news", "injury", "il ", " il,", "hurt", "scratch", "lineup change", "trade", "recent", "latest", "update", "report"];
+const SLATE_KEYWORDS = ["best play", "best prop", "top pick", "today", "slate", "recommend", "suggest", "should i", "what do you like", "who do you like"];
+const needsWebSearch = WEB_KEYWORDS.some(kw => msg.includes(kw));
+const isSlateQuestion = SLATE_KEYWORDS.some(kw => msg.includes(kw));
+```
+
+**3. Load base context (always):**
+
+Read today's schedule from `schedule_snapshots`:
+```js
+const schedRow = await query("SELECT games FROM schedule_snapshots WHERE slate_date = $1", [today]);
+const games = schedRow?.rows?.[0]?.games ?? [];
+```
+
+Read today's injuries from `injury_snapshots`:
+```js
+const injRow = await query("SELECT injuries FROM injury_snapshots WHERE snapshot_date = $1", [today]);
+const injuries = injRow?.rows?.[0]?.injuries?.injuries ?? [];
+```
+
+Serialize base context:
+```
+TODAY'S SLATE ({date}):
+{games.map(g => `${g.away.abbr} @ ${g.home.abbr} ${g.time} — ${g.probablePitchers.away?.name ?? "TBD"} vs ${g.probablePitchers.home?.name ?? "TBD"}`).join("\n")}
+
+RECENT INJURIES/IL:
+{injuries.slice(0,10).map(i => `${i.playerName} (${i.team}) — ${i.status} since ${i.date}`).join("\n") || "None reported"}
+```
+
+**4. Pitcher enrichment (when a pitcher name from today's slate is mentioned):**
+
+Build a map of probable pitcher last names → pitcher IDs from the schedule. For each pitcher whose last name appears in the message, fetch:
+
+Season stats:
+```js
+const { data } = await mlb.get(`/people/${pitcherId}?hydrate=stats(group=[pitching],type=[season],season=${SEASON})`);
+```
+Extract: era, whip, strikeOuts, inningsPitched, baseOnBalls → compute K/9 = (SO / IP) * 9, BB/9 = (BB / IP) * 9, avgIP.
+
+Last 3 game logs:
+```js
+const { data: logs } = await mlb.get(`/people/${pitcherId}/stats?stats=gameLog&group=pitching&season=${SEASON}&limit=3`);
+```
+Extract per-start: strikeOuts, inningsPitched, earnedRuns → compute L3 averages.
+
+Read DK lines from `player_props_snapshots` for that game.
+Read umpire from `umpire_snapshots` for that gamePk.
+Read odds from `odds_snapshots` for that game.
+
+Append to context:
+```
+PITCHER DETAIL: {name} ({team}) vs {opp} tonight
+Season: ERA {era} | K/9 {k9} | WHIP {whip} | BB/9 {bb9} | Avg IP {avgIP}
+Last 3 starts: avg K {l3K} | avg IP {l3IP} | avg ER {l3ER}
+DK K line: {kLine} ({kOdds} over) | DK Outs line: {outsLine} ({outsOdds} over)
+Umpire: {umpName} | K/9 delta: {delta}
+Weather: {temp}°F, wind {speed}mph {dir}
+```
+
+**5. Game/team enrichment (when a team abbreviation or city is mentioned):**
+
+Check if the message contains any team abbreviation (NYY, BOS, LAD, etc.) or common city name. For the matched game, read:
+- Full game data from schedule_snapshots (both pitchers)
+- Odds from odds_snapshots (ML, total, spread, over/under odds)
+
+Append to context:
+```
+GAME DETAIL: {away} @ {home} {time}
+Away SP: {name} — ERA {era} | WHIP {whip} | L3 avg ER {l3ER}
+Home SP: {name} — ERA {era} | WHIP {whip} | L3 avg ER {l3ER}
+DK: ML {awayML}/{homeML} | Total {total} ({overOdds}/{underOdds}) | RL {awaySpread}({awaySpreadOdds})
+```
+
+**6. General slate enrichment (when `isSlateQuestion`):**
+
+Read top entries from `player_props_snapshots` for today — collect all props with a `reason === "ok"`, pick the 6 with the most books and highest-confidence lines. Include as a compact list:
+```
+TOP PROP LINES AVAILABLE TODAY:
+{player} — K OVER {line} @ DK {odds}
+{player} — Outs OVER {line} @ DK {odds}
+...
+```
+
+**7. Web search (when `needsWebSearch`):**
+
+Build a focused query from the message — extract any mentioned player/team + append "MLB 2026". Call Tavily:
+```js
+const searchQuery = extractSearchQuery(msg); // e.g. "Gerrit Cole injury MLB 2026"
+const tavRes = await axios.post("https://api.tavily.com/search", {
+  api_key: process.env.TAVILY_API_KEY,
+  query: searchQuery,
+  max_results: 2,
+  search_depth: "basic",
+  include_answer: true,
+}, { timeout: 8000 });
+
+const webContext = (tavRes.data.results ?? [])
+  .map(r => `[${r.title}]: ${(r.content ?? "").slice(0, 400)}`)
+  .join("\n\n");
+```
+
+Append to context:
+```
+WEB SEARCH — "{searchQuery}":
+{webContext}
+```
+
+**8. Build messages array and call OpenAI:**
+
+System prompt:
+```
+You are a sharp MLB prop research analyst with access to today's Prop Scout data — pitcher stats, sportsbook lines, umpire tendencies, weather, park factors, lineup data, and injury reports.
+
+When answering prop or game-specific questions:
+- Cite specific numbers that support your analysis
+- Return a confidence score (0–100) and explain the key signals driving it
+- Be direct and actionable — don't hedge unless the data is genuinely mixed
+- Keep responses focused and concise
+
+When answering general, conceptual, or conversational questions:
+- Answer directly without a confidence score
+
+Confidence guide:
+- 75+: Multiple independent signals aligned. Strong edge.
+- 60–74: Solid setup with one open question.
+- 50–59: Speculative. Some factors favorable but incomplete.
+- Below 50: Mixed or insufficient data.
+
+Always return valid JSON:
+{
+  "response": "Your full answer here",
+  "confidence": 76,
+  "confidenceLabel": "HIGH",
+  "signals": ["K/9 11.2", "L3 avg K 8.3", "Ump +2.1"]
+}
+
+Set confidence and confidenceLabel to null, signals to [] when a confidence score is not applicable.
+confidenceLabel: "HIGH" (75+), "MEDIUM" (60–74), "SPEC" (50–59), "LOW" (<50), null if N/A.
+```
+
+Messages array:
+```js
+const messages = [
+  { role: "system", content: systemPrompt + "\n\nDATA CONTEXT:\n" + fullContext },
+  ...(history.slice(-10)), // last 10 turns from client
+  { role: "user", content: body.message }
+];
+```
+
+OpenAI call:
+```js
+const completion = await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages,
+  response_format: { type: "json_object" },
+  temperature: 0.5,
+  max_tokens: 600,
+});
+const parsed = JSON.parse(completion.choices[0].message.content);
+```
+
+**9. Increment usage and respond:**
+```js
+const used = incrementUsage(userId);
+res.json({
+  response: parsed.response ?? "",
+  confidence: parsed.confidence ?? null,
+  confidenceLabel: parsed.confidenceLabel ?? null,
+  signals: parsed.signals ?? [],
+  webSearched: needsWebSearch && !!webContext,
+  messagesUsedToday: used,
+  maxMessagesPerDay: DAILY_LIMIT,
+});
+```
+
+---
+
+#### FILE 2 — `server.js`
+
+Mount after requireAuth:
+```js
+app.use("/api/chat", require("./routes/chat"));
+```
+
+---
+
+#### FILE 3 — `prop-scout-v7.jsx`
+
+**Step 1 — Constants (top of component, near SCOUT_ALLOWLIST):**
+```js
+const CHAT_ALLOWLIST = ["leadoffkaiba"];
+const isChatUser = !!currentUser && CHAT_ALLOWLIST.includes((currentUser?.username ?? currentUser?.email ?? "").toLowerCase());
+
+const QUICK_CHIPS = [
+  "Best plays today",
+  "Top K props",
+  "Biggest line moves",
+  "NRFI leans",
+  "Any injury alerts?",
+];
+```
+
+**Step 2 — State (near other tab state):**
+```js
+const [chatHistory, setChatHistory] = useState([]); // [{ role, content, confidence, confidenceLabel, signals, webSearched }]
+const [chatInput, setChatInput] = useState("");
+const [chatLoading, setChatLoading] = useState(false);
+const [chatError, setChatError] = useState(null);
+const [chatMessagesLeft, setChatMessagesLeft] = useState(30);
+const chatBottomRef = useRef(null);
+```
+
+**Step 3 — Send message handler:**
+```js
+const handleChatSend = async (messageOverride) => {
+  const message = messageOverride ?? chatInput.trim();
+  if (!message || chatLoading || chatMessagesLeft <= 0) return;
+
+  const userMsg = { role: "user", content: message };
+  const newHistory = [...chatHistory, userMsg];
+  setChatHistory(newHistory);
+  setChatInput("");
+  setChatLoading(true);
+  setChatError(null);
+
+  // Build history payload — only role + content (no UI fields)
+  const historyPayload = newHistory.slice(-10).map(m => ({ role: m.role, content: m.content }));
+
+  try {
+    const data = await apiMutate("/api/chat", "POST", { message, history: historyPayload.slice(0, -1) });
+    const assistantMsg = {
+      role: "assistant",
+      content: data.response,
+      confidence: data.confidence,
+      confidenceLabel: data.confidenceLabel,
+      signals: data.signals ?? [],
+      webSearched: data.webSearched ?? false,
+    };
+    setChatHistory(prev => [...prev, assistantMsg]);
+    setChatMessagesLeft(Math.max(0, (data.maxMessagesPerDay ?? 30) - (data.messagesUsedToday ?? 0)));
+  } catch (err) {
+    setChatError(err.message ?? "Something went wrong");
+    setChatHistory(prev => prev.slice(0, -1)); // remove optimistic user message on error
+  } finally {
+    setChatLoading(false);
+  }
+};
+```
+
+**Step 4 — Auto-scroll useEffect:**
+```js
+useEffect(() => {
+  if (chatBottomRef.current) {
+    chatBottomRef.current.scrollIntoView({ behavior: "smooth" });
+  }
+}, [chatHistory]);
+```
+
+**Step 5 — Nav tab (alongside Scout tab, only when `isChatUser`):**
+```jsx
+{isChatUser && (
+  <button onClick={() => setView("chat")}
+    style={{ background: view === "chat" ? "#38bdf8" : "#161827", border: `1px solid ${view === "chat" ? "#38bdf8" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
+    💬 Chat
+  </button>
+)}
+```
+
+**Step 6 — Chat view render (`view === "chat" && isChatUser`):**
+
+```jsx
+{view === "chat" && isChatUser && (
+  <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 120px)", gap: 0 }}>
+
+    {/* Header */}
+    <div style={{ padding: "12px 14px 8px", flexShrink: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>💬 CHAT</div>
+          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>Research assistant · {chatMessagesLeft} messages left today</div>
+        </div>
+        {chatHistory.length > 0 && (
+          <button onClick={() => { setChatHistory([]); setChatError(null); }}
+            style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 10px", fontSize: 9, color: "#6b7280", cursor: "pointer", fontFamily: "monospace" }}>
+            Clear
+          </button>
+        )}
+      </div>
+    </div>
+
+    {/* Quick chips — only when no history */}
+    {chatHistory.length === 0 && (
+      <div style={{ padding: "4px 14px 10px", display: "flex", gap: 6, flexWrap: "wrap", flexShrink: 0 }}>
+        {QUICK_CHIPS.map(chip => (
+          <button key={chip} onClick={() => handleChatSend(chip)}
+            style={{ background: "rgba(56,189,248,0.08)", border: "1px solid rgba(56,189,248,0.25)", borderRadius: 16, padding: "5px 12px", fontSize: 10, color: "#7dd3fc", cursor: "pointer", fontFamily: "monospace", fontWeight: 600 }}>
+            {chip}
+          </button>
+        ))}
+      </div>
+    )}
+
+    {/* Error */}
+    {chatError && (
+      <div style={{ margin: "0 14px 8px", background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "8px 12px", fontSize: 11, color: "#fca5a5", flexShrink: 0 }}>
+        {chatError}
+      </div>
+    )}
+
+    {/* Messages scroll area */}
+    <div style={{ flex: 1, overflowY: "auto", padding: "0 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+      {chatHistory.length === 0 && (
+        <div style={{ textAlign: "center", padding: "40px 20px", color: "#4b5563", fontSize: 11 }}>
+          Ask anything about today's slate — props, players, trends, line moves.
+        </div>
+      )}
+
+      {chatHistory.map((msg, idx) => (
+        <div key={idx} style={{
+          display: "flex",
+          justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+        }}>
+          {msg.role === "user" ? (
+            <div style={{ background: "rgba(139,92,246,0.2)", border: "1px solid rgba(139,92,246,0.35)", borderRadius: "12px 12px 4px 12px", padding: "10px 14px", maxWidth: "80%", fontSize: 12, color: "#e9d5ff", lineHeight: 1.5 }}>
+              {msg.content}
+            </div>
+          ) : (
+            <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: "4px 12px 12px 12px", padding: "12px 14px", maxWidth: "90%", display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 12, color: "#d1d5db", lineHeight: 1.6 }}>{msg.content}</div>
+
+              {msg.confidence != null && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{
+                    background: msg.confidence >= 75 ? "rgba(34,197,94,0.15)" : msg.confidence >= 60 ? "rgba(251,191,36,0.15)" : "rgba(107,114,128,0.15)",
+                    border: `1px solid ${msg.confidence >= 75 ? "rgba(34,197,94,0.4)" : msg.confidence >= 60 ? "rgba(251,191,36,0.4)" : "rgba(107,114,128,0.3)"}`,
+                    borderRadius: 6, padding: "3px 9px", fontSize: 10, fontWeight: 700,
+                    color: msg.confidence >= 75 ? "#86efac" : msg.confidence >= 60 ? "#fde68a" : "#9ca3af",
+                    fontFamily: "monospace",
+                  }}>
+                    {msg.confidence} · {msg.confidenceLabel}
+                  </div>
+                  {(msg.signals ?? []).map((s, i) => (
+                    <div key={i} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 4, padding: "2px 7px", fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{s}</div>
+                  ))}
+                </div>
+              )}
+
+              {msg.webSearched && (
+                <div style={{ fontSize: 9, color: "#38bdf8", fontFamily: "monospace" }}>🌐 Web searched</div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+
+      {chatLoading && (
+        <div style={{ display: "flex", justifyContent: "flex-start" }}>
+          <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: "4px 12px 12px 12px", padding: "12px 16px" }}>
+            <div style={{ fontSize: 11, color: "#4b5563", fontFamily: "monospace" }}>Analyzing...</div>
+          </div>
+        </div>
+      )}
+
+      <div ref={chatBottomRef} />
+    </div>
+
+    {/* Input bar — sticky at bottom */}
+    <div style={{ padding: "10px 14px", borderTop: "1px solid #1f2437", flexShrink: 0, display: "flex", gap: 8, alignItems: "center" }}>
+      <input
+        value={chatInput}
+        onChange={e => setChatInput(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChatSend(); } }}
+        placeholder={chatMessagesLeft > 0 ? "Ask anything about today's slate..." : "Daily limit reached"}
+        disabled={chatLoading || chatMessagesLeft <= 0}
+        style={{
+          flex: 1, background: "#161827", border: "1px solid #2d3148", borderRadius: 10,
+          padding: "10px 14px", fontSize: 12, color: "#f9fafb", outline: "none",
+          fontFamily: "inherit", opacity: chatMessagesLeft <= 0 ? 0.5 : 1,
+        }}
+      />
+      <button
+        onClick={() => handleChatSend()}
+        disabled={!chatInput.trim() || chatLoading || chatMessagesLeft <= 0}
+        style={{
+          background: chatInput.trim() && !chatLoading ? "rgba(56,189,248,0.2)" : "rgba(255,255,255,0.04)",
+          border: `1px solid ${chatInput.trim() && !chatLoading ? "rgba(56,189,248,0.4)" : "#2d3148"}`,
+          borderRadius: 10, padding: "10px 16px", fontSize: 14,
+          color: chatInput.trim() && !chatLoading ? "#38bdf8" : "#4b5563",
+          cursor: chatInput.trim() && !chatLoading ? "pointer" : "not-allowed",
+        }}
+      >→</button>
+    </div>
+  </div>
+)}
+```
+
+---
+
+#### Constraints:
+- Do not modify any existing routes, scoring logic, or DB tables.
+- `requireAuth` must be applied before `requireChatAccess` on the chat route.
+- The `apiMutate` helper already exists in the frontend — do not redefine it.
+- `chatBottomRef` is a `useRef` — declare it alongside other refs, not inside any IIFE or render function.
+- All state variables (`chatHistory`, `chatInput`, etc.) must be declared at component level.
+- The `history` sent to the backend must strip UI-only fields (`confidence`, `signals`, `webSearched`) — only send `{ role, content }` pairs.
+- If `TAVILY_API_KEY` is not set, skip web search silently and set `webSearched: false`.
+- If pitcher stat fetches fail, log a warning and continue — partial context is better than a failed response.
+
+---
+
 ### CODEX TASK 22 — The Scout: AI Bettor Tab with Self-Evaluation Loop
 
 **Access:** Gated to `jayprox12@gmail.com` only — backend returns 403, frontend hides tab for all other users.
@@ -3334,3 +3807,136 @@ If you want **strict** email-only gating later, the next cleanup would be:
 1. add `email` to `users.json`
 2. include `email` in JWT payload + `/api/auth/me`
 3. remove the username fallback from Scout access
+
+## HANDOFF NOTE — 2026-04-27 — Chat Research Assistant Completed
+
+Codex completed the new Chat Research Assistant tab and backend route described in CODEX TASK 23.
+
+### What was built
+
+#### 1. New backend route: `backend/routes/chat.js`
+
+Added a new authenticated, allowlisted chat route:
+
+- `POST /api/chat`
+
+Key behavior:
+
+- protected by `requireAuth`
+- second gate via `AI_PICKS_ALLOWLIST` (defaults to `leadoffkaiba`)
+- per-user daily usage limit:
+  - in-memory counter
+  - `30` messages/day
+  - resets by Honolulu date
+- lazy OpenAI client initialization
+- additive context enrichment:
+  - base slate context always
+  - pitcher context when a probable pitcher is mentioned
+  - game/team context when a team or city is mentioned
+  - broader slate context for general slate questions
+  - silent-fail Tavily web search for injury/news style prompts when `TAVILY_API_KEY` exists
+
+Backend implementation details:
+
+- history received from the frontend is expected to be stripped down to:
+  - `{ role, content }`
+- only the last `10` history messages are forwarded to the model
+- OpenAI call uses:
+  - `gpt-4o-mini`
+  - JSON output mode
+- response returned to frontend:
+  - `response`
+  - `confidence`
+  - `confidenceLabel`
+  - `signals`
+  - `webSearched`
+  - `messagesUsedToday`
+  - `maxMessagesPerDay`
+
+Data sources used by the context builder:
+
+- `schedule_snapshots`
+- `injury_snapshots`
+- `player_props_snapshots`
+- `odds_snapshots`
+- `umpire_snapshots`
+- direct MLB Stats API pitcher season/game-log fetches for mentioned pitchers
+
+Important access note:
+
+- chat access currently uses:
+  - `req.user.username`
+  - fallback to `req.user.email` if available later
+- this mirrors the current local auth reality where username is guaranteed but email may not exist
+
+#### 2. Server mount
+
+In `backend/server.js`, Codex mounted:
+
+```js
+app.use("/api/chat", require("./routes/chat"));
+```
+
+#### 3. Frontend Chat tab in `prop-scout-v7.jsx`
+
+Added:
+
+- Chat state:
+  - `chatHistory`
+  - `chatInput`
+  - `chatLoading`
+  - `chatError`
+  - `chatMessagesLeft`
+- `chatBottomRef`
+- `CHAT_ALLOWLIST`
+- `isChatUser`
+- `QUICK_CHIPS`
+- `handleChatSend(...)`
+- auto-scroll effect on chat updates
+- logout cleanup for all chat state
+- top-nav `💬 Chat` button
+- full `view === "chat"` render block
+
+UI behavior:
+
+- hidden unless the current user is in the allowlist
+- full-height flex-column layout with sticky bottom input bar
+- quick prompt chips when the thread is empty
+- user/assistant bubble layout
+- assistant messages show:
+  - confidence badge
+  - signal pills
+  - optional `WEB` badge when Tavily was used
+- clear button wipes local chat history only
+- message send uses existing `apiMutate(...)`
+
+Important frontend behavior:
+
+- history sent to backend is stripped to only:
+  - `{ role, content }`
+- UI-only fields such as:
+  - `confidence`
+  - `confidenceLabel`
+  - `signals`
+  - `webSearched`
+  are retained only in local frontend state, not sent back upstream
+
+### Files changed
+
+- `backend/routes/chat.js` (new)
+- `backend/server.js`
+- `prop-scout-v7.jsx`
+
+### Verification run
+
+Passed:
+
+- `node --check backend/routes/chat.js`
+- `node --check backend/server.js`
+- `npm run build`
+
+### Notes for Cowork
+
+- Tavily search is optional and silent-fail if `TAVILY_API_KEY` is absent
+- Chat allowlist currently mirrors the Scout-style username-compatible gating, not strict email-only gating
+- No frontend direct third-party API calls were added — chat still goes frontend → backend only

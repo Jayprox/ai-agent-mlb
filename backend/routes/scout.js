@@ -287,16 +287,91 @@ function safeJsonParse(text) {
   return JSON.parse(trimmed.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, ""));
 }
 
+async function ensureScoutTables() {
+  if (!isConnected()) return;
+  await query(`
+    CREATE TABLE IF NOT EXISTS scout_picks_snapshots (
+      slate_date DATE PRIMARY KEY,
+      picks JSONB NOT NULL,
+      generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      generations_used INTEGER NOT NULL DEFAULT 1
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS scout_evaluations (
+      slate_date DATE PRIMARY KEY,
+      evaluations JSONB NOT NULL,
+      day_review TEXT NOT NULL,
+      improvement_flags JSONB NOT NULL DEFAULT '[]',
+      evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+function transformTeamLineup(teamData = {}) {
+  const battingOrder = teamData.battingOrder ?? [];
+  return battingOrder.map((playerId) => {
+    const player = teamData.players?.[`ID${playerId}`];
+    if (!player) return null;
+    return {
+      id: playerId,
+      name: player.person?.fullName ?? "",
+      hand: player.batSide?.code ?? "?",
+    };
+  }).filter(Boolean);
+}
+
+async function fetchLineupsForScout(gamePk) {
+  try {
+    const { data } = await mlb.get(`/game/${gamePk}/boxscore?hydrate=person`);
+    return {
+      confirmed: true,
+      away: transformTeamLineup(data?.teams?.away),
+      home: transformTeamLineup(data?.teams?.home),
+    };
+  } catch {
+    return { confirmed: false, away: [], home: [] };
+  }
+}
+
 async function generateScoutPicks(date, generationsUsed) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY not configured");
-  if (!isConnected()) throw new Error("DATABASE_URL not configured");
+  // DB unavailable (local dev) — skip snapshot reads/writes, generate live
+  if (isConnected()) await ensureScoutTables();
 
-  const scheduleRes = await query(
-    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
-    [date]
-  );
-  const allGames = scheduleRes?.rows?.[0]?.games ?? [];
+  // Load schedule — DB first, fall back to MLB API directly
+  let allGames = [];
+  if (isConnected()) {
+    const scheduleRes = await query(
+      "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+      [date]
+    );
+    allGames = scheduleRes?.rows?.[0]?.games ?? [];
+  }
+  if (!allGames.length) {
+    try {
+      const { data } = await mlb.get("/schedule", {
+        params: { sportId: 1, date, hydrate: "probablePitcher,team,venue" },
+      });
+      const raw = data?.dates?.[0]?.games ?? [];
+      allGames = raw.map((g) => ({
+        gamePk: g.gamePk,
+        gameTime: g.gameDate,
+        stadium: g.venue?.name ?? "",
+        status: g.status?.detailedState ?? "",
+        away: { id: g.teams.away.team.id, name: g.teams.away.team.name, abbr: g.teams.away.team.abbreviation },
+        home: { id: g.teams.home.team.id, name: g.teams.home.team.name, abbr: g.teams.home.team.abbreviation },
+        probablePitchers: {
+          away: g.teams.away.probablePitcher ? { id: g.teams.away.probablePitcher.id, name: g.teams.away.probablePitcher.fullName } : null,
+          home: g.teams.home.probablePitcher ? { id: g.teams.home.probablePitcher.id, name: g.teams.home.probablePitcher.fullName } : null,
+        },
+      }));
+    } catch (e) {
+      console.warn("  ⚠ scout: MLB schedule fallback failed:", e.message);
+    }
+  }
+
   const games = allGames
     .filter((game) => game?.probablePitchers?.away?.id && game?.probablePitchers?.home?.id)
     .slice(0, 8);
@@ -314,29 +389,35 @@ async function generateScoutPicks(date, generationsUsed) {
   const gamePks = games.map((game) => Number(game.gamePk));
   const gameKeys = games.map((game) => `${game.away?.name}|${game.home?.name}`);
 
-  const [propsRows, oddsRows, umpRows, injuriesRow] = await Promise.all([
-    query(
-      "SELECT game_pk, props, reason FROM player_props_snapshots WHERE snapshot_date = $1 AND game_pk = ANY($2)",
-      [date, gamePks]
-    ),
-    query(
-      "SELECT game_key, odds FROM odds_snapshots WHERE slate_date = $1 AND game_key = ANY($2)",
-      [date, gameKeys]
-    ),
-    query(
-      "SELECT game_pk, data FROM umpire_snapshots WHERE game_pk = ANY($1)",
-      [gamePks]
-    ),
-    query(
-      "SELECT injuries FROM injury_snapshots WHERE snapshot_date = $1",
-      [date]
-    ),
-  ]);
+  let propsByGamePk = new Map();
+  let oddsByGameKey = new Map();
+  let umpByGamePk = new Map();
+  let injuries = [];
 
-  const propsByGamePk = new Map((propsRows?.rows ?? []).map((row) => [Number(row.game_pk), { props: row.props ?? [], reason: row.reason ?? "ok" }]));
-  const oddsByGameKey = new Map((oddsRows?.rows ?? []).map((row) => [row.game_key, row.odds]));
-  const umpByGamePk = new Map((umpRows?.rows ?? []).map((row) => [Number(row.game_pk), row.data]));
-  const injuries = injuriesRow?.rows?.[0]?.injuries ?? [];
+  if (isConnected()) {
+    const [propsRows, oddsRows, umpRows, injuriesRow] = await Promise.all([
+      query(
+        "SELECT game_pk, props, reason FROM player_props_snapshots WHERE snapshot_date = $1 AND game_pk = ANY($2)",
+        [date, gamePks]
+      ),
+      query(
+        "SELECT game_key, odds FROM odds_snapshots WHERE slate_date = $1 AND game_key = ANY($2)",
+        [date, gameKeys]
+      ),
+      query(
+        "SELECT game_pk, data FROM umpire_snapshots WHERE game_pk = ANY($1)",
+        [gamePks]
+      ),
+      query(
+        "SELECT injuries FROM injury_snapshots WHERE snapshot_date = $1",
+        [date]
+      ),
+    ]);
+    propsByGamePk = new Map((propsRows?.rows ?? []).map((row) => [Number(row.game_pk), { props: row.props ?? [], reason: row.reason ?? "ok" }]));
+    oddsByGameKey = new Map((oddsRows?.rows ?? []).map((row) => [row.game_key, row.odds]));
+    umpByGamePk   = new Map((umpRows?.rows ?? []).map((row) => [Number(row.game_pk), row.data]));
+    injuries = injuriesRow?.rows?.[0]?.injuries ?? [];
+  }
 
   const profileCache = new Map();
   const lineupCache = new Map();
@@ -350,12 +431,7 @@ async function generateScoutPicks(date, generationsUsed) {
 
   async function getLineups(gamePk) {
     if (!lineupCache.has(gamePk)) {
-      lineupCache.set(
-        gamePk,
-        axios.get(`http://localhost:${process.env.PORT ?? 3001}/api/lineups/${gamePk}`, { timeout: 10000 })
-          .then((res) => res.data)
-          .catch(() => ({ confirmed: false, away: [], home: [] }))
-      );
+      lineupCache.set(gamePk, fetchLineupsForScout(gamePk));
     }
     return lineupCache.get(gamePk);
   }
@@ -481,13 +557,15 @@ For game totals: player = null, team = away team abbr, marketLabel = "Total", si
     };
   });
 
-  await query(
-    `INSERT INTO scout_picks_snapshots (slate_date, picks, generated_at, generations_used)
-     VALUES ($1, $2, NOW(), $3)
-     ON CONFLICT (slate_date) DO UPDATE
-     SET picks = $2, generated_at = NOW(), generations_used = $3`,
-    [date, JSON.stringify(enriched), generationsUsed]
-  );
+  if (isConnected()) {
+    await query(
+      `INSERT INTO scout_picks_snapshots (slate_date, picks, generated_at, generations_used)
+       VALUES ($1, $2, NOW(), $3)
+       ON CONFLICT (slate_date) DO UPDATE
+       SET picks = $2, generated_at = NOW(), generations_used = $3`,
+      [date, JSON.stringify(enriched), generationsUsed]
+    );
+  }
 
   console.log(`  ✓ scout picks generated  date=${date}  picks=${enriched.length}  gen=${generationsUsed}/${MAX_GENERATIONS_PER_DAY}`);
 
@@ -505,6 +583,7 @@ router.get("/picks", async (_req, res) => {
 
   try {
     if (isConnected()) {
+      await ensureScoutTables();
       const existing = await query(
         `SELECT picks, generated_at, generations_used
          FROM scout_picks_snapshots
@@ -537,6 +616,7 @@ router.post("/regenerate", async (_req, res) => {
   try {
     let generationsUsed = 0;
     if (isConnected()) {
+      await ensureScoutTables();
       const existing = await query(
         `SELECT generations_used
          FROM scout_picks_snapshots
@@ -563,6 +643,7 @@ router.get("/evaluation/:date", async (req, res) => {
 
   try {
     if (!isConnected()) return res.json({ evaluated: false });
+    await ensureScoutTables();
 
     const result = await query(
       `SELECT evaluations, day_review, improvement_flags, evaluated_at

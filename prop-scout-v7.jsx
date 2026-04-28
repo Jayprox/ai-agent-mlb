@@ -2758,7 +2758,7 @@ export default function App() {
   const [prefSaveMsg,      setPrefSaveMsg]      = useState("");
 
   const [selectedId, setSelectedId] = useState(1);
-  const [view, setView] = useState("slate"); // "slate" | "game" | "picks" | "model" | "board" | "scout" | "settings"
+  const [view, setView] = useState("slate"); // "slate" | "game" | "picks" | "model" | "board" | "scout" | "chat" | "settings"
   const [showHelp, setShowHelp] = useState(false);
   const [whyModal, setWhyModal] = useState(null); // { c, type: boardTab, rank }
   const [picksFilter, setPicksFilter] = useState("all"); // "all" | "pending" | "hit" | "miss"
@@ -2780,6 +2780,11 @@ export default function App() {
   const [scoutExpanded, setScoutExpanded] = useState(null);
   const [scoutEvalExpanded, setScoutEvalExpanded] = useState(null);
   const [scoutGenerationsLeft, setScoutGenerationsLeft] = useState(3);
+  const [chatHistory, setChatHistory] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState(null);
+  const [chatMessagesLeft, setChatMessagesLeft] = useState(30);
   // Prop result tracker — persisted to localStorage
   const [propLog, setPropLog] = useState(() => {
     try { return JSON.parse(localStorage.getItem("propscout_log") || "[]"); }
@@ -2843,6 +2848,7 @@ export default function App() {
   const gradedGames     = useRef(new Set());                  // idempotency: gamePks already auto-graded
   const [liveBoardResults, setLiveBoardResults] = useState({}); // playerId → { h, hr, ab, live }
   const boardBoxFetched = useRef(new Set());                  // gamePks already fetched for Board results
+  const chatBottomRef = useRef(null);
 
   // Fetch weather when a game card is opened
   useEffect(() => {
@@ -3111,6 +3117,11 @@ export default function App() {
     setScoutEval(null);
     setScoutError(null);
     setScoutGenerationsLeft(3);
+    setChatHistory([]);
+    setChatInput("");
+    setChatLoading(false);
+    setChatError(null);
+    setChatMessagesLeft(30);
     setView("slate");
   };
 
@@ -3127,7 +3138,7 @@ export default function App() {
   }, [view]);
 
   useEffect(() => {
-    if (view !== "scout" || !currentUser || scoutPicks !== null || scoutLoading) return;
+    if (view !== "scout" || !currentUser || scoutPicks !== null || scoutLoading || scoutError) return;
 
     setScoutLoading(true);
     setScoutError(null);
@@ -3148,6 +3159,10 @@ export default function App() {
       .catch(() => {})
       .finally(() => setScoutEvalLoading(false));
   }, [view, currentUser, scoutPicks, scoutLoading]);
+
+  useEffect(() => {
+    chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [chatHistory, chatLoading]);
 
   // Background prefetch: home + away pitcher stats + lineups for ALL slate games
   // so the cross-slate Best Bets card and Games board can compute and update reactively.
@@ -3780,6 +3795,15 @@ export default function App() {
   const SCOUT_ALLOWLIST = ["leadoffkaiba"];
   const scoutIdentity = (currentUser?.username ?? currentUser?.email ?? "").toLowerCase();
   const isScoutUser = !!currentUser && SCOUT_ALLOWLIST.includes(scoutIdentity);
+  const CHAT_ALLOWLIST = ["leadoffkaiba"];
+  const isChatUser = !!currentUser && CHAT_ALLOWLIST.includes((currentUser?.username ?? currentUser?.email ?? "").toLowerCase());
+  const QUICK_CHIPS = [
+    "Best plays today",
+    "Top K props",
+    "Biggest line moves",
+    "NRFI leans",
+    "Any injury alerts?",
+  ];
 
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); };
 
@@ -3796,6 +3820,39 @@ export default function App() {
       setScoutError(err.message);
     } finally {
       setScoutLoading(false);
+    }
+  };
+
+  const handleChatSend = async (messageOverride) => {
+    const message = messageOverride ?? chatInput.trim();
+    if (!message || chatLoading || chatMessagesLeft <= 0) return;
+
+    const userMsg = { role: "user", content: message };
+    const newHistory = [...chatHistory, userMsg];
+    setChatHistory(newHistory);
+    setChatInput("");
+    setChatLoading(true);
+    setChatError(null);
+
+    const historyPayload = newHistory.slice(-10).map((entry) => ({ role: entry.role, content: entry.content }));
+
+    try {
+      const data = await apiMutate("/api/chat", "POST", { message, history: historyPayload.slice(0, -1) });
+      const assistantMsg = {
+        role: "assistant",
+        content: data.response,
+        confidence: data.confidence,
+        confidenceLabel: data.confidenceLabel,
+        signals: data.signals ?? [],
+        webSearched: data.webSearched ?? false,
+      };
+      setChatHistory((prev) => [...prev, assistantMsg]);
+      setChatMessagesLeft(Math.max(0, (data.maxMessagesPerDay ?? 30) - (data.messagesUsedToday ?? 0)));
+    } catch (err) {
+      setChatError(err.message ?? "Something went wrong");
+      setChatHistory((prev) => prev.slice(0, -1));
+    } finally {
+      setChatLoading(false);
     }
   };
 
@@ -4438,6 +4495,9 @@ export default function App() {
             {isScoutUser && (
               <button onClick={() => setView("scout")} style={{ background: view === "scout" ? "#38bdf8" : "#161827", border: `1px solid ${view === "scout" ? "#38bdf8" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "scout" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Scout</button>
             )}
+            {isChatUser && (
+              <button onClick={() => setView("chat")} style={{ background: view === "chat" ? "#a78bfa" : "#161827", border: `1px solid ${view === "chat" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>💬 Chat</button>
+            )}
             <button onClick={() => setView("board")} style={{ background: view === "board" ? "#fbbf24" : "#161827", border: `1px solid ${view === "board" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: "6px 12px", fontSize: 10, color: view === "board" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Board</button>
           </div>
         </div>
@@ -4834,6 +4894,127 @@ export default function App() {
             </Card>
           )}
         </>)}
+
+        {view === "chat" && isChatUser && (
+          <div style={{ height: "calc(100vh - 120px)", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>💬 CHAT RESEARCH</div>
+                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>Smart slate assistant with injury, odds, props, and optional web context</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
+                  {chatMessagesLeft} left today
+                </div>
+                <button
+                  onClick={() => { setChatHistory([]); setChatError(null); }}
+                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 8, padding: "6px 10px", fontSize: 9, color: "#9ca3af", fontFamily: "monospace", cursor: "pointer" }}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            {chatHistory.length === 0 && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {QUICK_CHIPS.map((chip) => (
+                  <button
+                    key={chip}
+                    onClick={() => handleChatSend(chip)}
+                    disabled={chatLoading || chatMessagesLeft <= 0}
+                    style={{ background: "rgba(167,139,250,0.10)", border: "1px solid rgba(167,139,250,0.28)", borderRadius: 999, padding: "7px 10px", fontSize: 9, color: "#c4b5fd", fontFamily: "monospace", fontWeight: 700, cursor: chatLoading || chatMessagesLeft <= 0 ? "default" : "pointer" }}
+                  >
+                    {chip}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {chatError && (
+              <div style={{ background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.30)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+                {chatError}
+              </div>
+            )}
+
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "#101220", border: "1px solid #1f2437", borderRadius: 14, padding: "12px", display: "flex", flexDirection: "column", gap: 10 }}>
+              {chatHistory.length === 0 ? (
+                <div style={{ margin: "auto 0", textAlign: "center", color: "#6b7280", fontSize: 11, lineHeight: 1.7 }}>
+                  Ask about today's slate, top K props, line movement, injury impact, or a specific pitcher/game.
+                </div>
+              ) : (
+                chatHistory.map((msg, idx) => (
+                  <div key={`${msg.role}-${idx}`} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
+                    <div style={{
+                      maxWidth: "85%",
+                      background: msg.role === "user" ? "rgba(167,139,250,0.18)" : "#171a2b",
+                      border: `1px solid ${msg.role === "user" ? "rgba(167,139,250,0.35)" : "#232840"}`,
+                      borderRadius: 12,
+                      padding: "10px 12px",
+                    }}>
+                      <div style={{ fontSize: 11, color: "#f3f4f6", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{msg.content}</div>
+                      {msg.role === "assistant" && (
+                        <>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                            {msg.confidenceLabel && (
+                              <span style={{ background: "rgba(34,197,94,0.10)", border: "1px solid rgba(34,197,94,0.28)", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#86efac", fontFamily: "monospace", fontWeight: 800 }}>
+                                {msg.confidenceLabel}{typeof msg.confidence === "number" ? ` ${msg.confidence}%` : ""}
+                              </span>
+                            )}
+                            {msg.webSearched && (
+                              <span style={{ background: "rgba(56,189,248,0.10)", border: "1px solid rgba(56,189,248,0.28)", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#7dd3fc", fontFamily: "monospace", fontWeight: 800 }}>
+                                WEB
+                              </span>
+                            )}
+                          </div>
+                          {msg.signals?.length > 0 && (
+                            <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 8 }}>
+                              {msg.signals.map((signal, signalIdx) => (
+                                <span key={signalIdx} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                  {signal}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+              {chatLoading && (
+                <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                  <div style={{ background: "#171a2b", border: "1px solid #232840", borderRadius: 12, padding: "10px 12px", fontSize: 10, color: "#6b7280" }}>
+                    Researching…
+                  </div>
+                </div>
+              )}
+              <div ref={chatBottomRef} />
+            </div>
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center", background: "#161827", border: "1px solid #1f2437", borderRadius: 14, padding: "10px" }}>
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleChatSend();
+                  }
+                }}
+                placeholder={chatMessagesLeft > 0 ? "Ask Prop Scout about today's slate..." : "Daily chat limit reached"}
+                disabled={chatLoading || chatMessagesLeft <= 0}
+                style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#f9fafb", fontSize: 12, fontFamily: "monospace" }}
+              />
+              <button
+                onClick={() => handleChatSend()}
+                disabled={chatLoading || !chatInput.trim() || chatMessagesLeft <= 0}
+                style={{ background: chatLoading || !chatInput.trim() || chatMessagesLeft <= 0 ? "#1f2437" : "#a78bfa", border: "1px solid transparent", borderRadius: 10, padding: "8px 12px", color: chatLoading || !chatInput.trim() || chatMessagesLeft <= 0 ? "#4b5563" : "#000", fontSize: 10, fontFamily: "monospace", fontWeight: 800, cursor: chatLoading || !chatInput.trim() || chatMessagesLeft <= 0 ? "default" : "pointer" }}
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        )}
 
         {view === "scout" && isScoutUser && (
           <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
