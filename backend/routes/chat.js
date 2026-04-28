@@ -298,6 +298,35 @@ router.post("/", async (req, res) => {
     injuries = injRow?.rows?.[0]?.injuries?.injuries ?? injRow?.rows?.[0]?.injuries ?? [];
   }
 
+  // MLB API fallback when DB unavailable (local dev) or snapshot not yet populated
+  if (!games.length) {
+    try {
+      const { data } = await mlb.get("/schedule", {
+        params: { sportId: 1, date: today, hydrate: "probablePitcher,team,venue" },
+      });
+      const raw = data?.dates?.[0]?.games ?? [];
+      games = raw.map((g) => ({
+        gamePk: g.gamePk,
+        gameTime: g.gameDate,
+        time: new Date(g.gameDate).toLocaleTimeString("en-US", {
+          hour: "numeric",
+          minute: "2-digit",
+          timeZone: "America/New_York",
+        }) + " ET",
+        stadium: g.venue?.name ?? "",
+        status: g.status?.detailedState ?? "",
+        away: { id: g.teams.away.team.id, name: g.teams.away.team.name, abbr: g.teams.away.team.abbreviation },
+        home: { id: g.teams.home.team.id, name: g.teams.home.team.name, abbr: g.teams.home.team.abbreviation },
+        probablePitchers: {
+          away: g.teams.away.probablePitcher ? { id: g.teams.away.probablePitcher.id, name: g.teams.away.probablePitcher.fullName } : null,
+          home: g.teams.home.probablePitcher ? { id: g.teams.home.probablePitcher.id, name: g.teams.home.probablePitcher.fullName } : null,
+        },
+      }));
+    } catch (e) {
+      console.warn("  ⚠ chat: MLB schedule fallback failed:", e.message);
+    }
+  }
+
   const baseContext = todayGameBaseContext(today, games, injuries);
   const contextParts = [baseContext];
 
@@ -421,7 +450,7 @@ confidenceLabel: "HIGH" (75+), "MEDIUM" (60–74), "SPEC" (50–59), "LOW" (<50)
 
   try {
     const completion = await getClient().chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       messages,
       response_format: { type: "json_object" },
       temperature: 0.5,

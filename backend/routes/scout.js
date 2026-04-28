@@ -535,7 +535,7 @@ Return format:
 For game totals: player = null, team = away team abbr, marketLabel = "Total", signals include both SPs' stats and weather.`;
 
   const completion = await getClient().chat.completions.create({
-    model: "gpt-4o-mini",
+    model: "gpt-4o",
     response_format: { type: "json_object" },
     temperature: 0.4,
     messages: [
