@@ -2,6 +2,8 @@ const express = require("express");
 const router  = express.Router();
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
+const { fetchBatterPowerProfile } = require("./batterPower");
+const { fetchBatterRecentForm } = require("./batterGamelog");
 
 // Transform a team's boxscore data into a batting-order array.
 // Returns [] if the lineup hasn't been posted yet.
@@ -42,11 +44,32 @@ router.get("/:gamePk", async (req, res) => {
     const homeLineup = transformTeam(data.teams.home);
     const confirmed  = awayLineup.length > 0 && homeLineup.length > 0;
 
+    // Enrich batters with power profiles when lineups are confirmed.
+    // Fetch in parallel, max 3 at a time to avoid Savant throttling.
+    if (confirmed) {
+      const allBatters = [...awayLineup, ...homeLineup];
+      const chunkSize = 3;
+
+      for (let i = 0; i < allBatters.length; i += chunkSize) {
+        const chunk = allBatters.slice(i, i + chunkSize);
+
+        const [profiles, forms] = await Promise.all([
+          Promise.all(chunk.map(b => fetchBatterPowerProfile(b.id))),
+          Promise.all(chunk.map(b => fetchBatterRecentForm(b.id))),
+        ]);
+
+        chunk.forEach((b, idx) => {
+          b.powerProfile = profiles[idx] ?? null;
+          b.recentForm = forms[idx] ?? null;
+        });
+      }
+    }
+
     const result = {
-      gamePk:    parseInt(gamePk),
+      gamePk: parseInt(gamePk),
       confirmed,
-      away:      awayLineup,
-      home:      homeLineup,
+      away: awayLineup,
+      home: homeLineup,
     };
 
     // If lineups are posted: cache 5 min (they can still change).

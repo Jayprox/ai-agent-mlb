@@ -13,7 +13,7 @@ async function getTodayGames() {
   if (!isConnected()) return [];
   const date = todayHonolulu();
   try {
-    const result = await query("SELECT games FROM slate_snapshots WHERE slate_date = $1", [date]);
+    const result = await query("SELECT games FROM schedule_snapshots WHERE slate_date = $1", [date]);
     return result?.rows?.[0]?.games ?? [];
   } catch (err) {
     console.warn(`Scheduler slate lookup skipped: ${err.message}`);
@@ -30,7 +30,7 @@ async function getInProgressGamePks() {
   if (!isConnected()) return [];
   const date = todayHonolulu();
   try {
-    const result = await query("SELECT games FROM slate_snapshots WHERE slate_date = $1", [date]);
+    const result = await query("SELECT games FROM schedule_snapshots WHERE slate_date = $1", [date]);
     const games = result?.rows?.[0]?.games ?? [];
     return games.filter((g) => {
       const state = g.status?.detailedState ?? g.status;

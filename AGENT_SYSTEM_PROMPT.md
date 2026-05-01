@@ -3940,3 +3940,4313 @@ Passed:
 - Tavily search is optional and silent-fail if `TAVILY_API_KEY` is absent
 - Chat allowlist currently mirrors the Scout-style username-compatible gating, not strict email-only gating
 - No frontend direct third-party API calls were added — chat still goes frontend → backend only
+
+---
+
+## HANDOFF NOTE — 2026-04-28 — Chat DB Fallback Fix
+
+`backend/routes/chat.js` was missing the same MLB API schedule fallback that `scout.js` already had. When the DB is unavailable (local dev), `games` stayed `[]` and the AI responded "no games today" despite a full slate.
+
+**Fix applied:** After the `isConnected()` schedule query block, added a fallback:
+```js
+if (!games.length) {
+  // MLB API live fetch — same transform as scout.js
+  const { data } = await mlb.get("/schedule", { params: { sportId: 1, date: today, hydrate: "probablePitcher,team,venue" } });
+  games = raw.map(g => ({ gamePk, gameTime, time (ET formatted), stadium, status, away, home, probablePitchers }));
+}
+```
+This mirrors the exact pattern in `scout.js`. Props/odds/umpire data still requires the DB — only the schedule has a live fallback. Chat now sees all games locally.
+
+---
+
+## BACKLOG TASK 33 — Statcast Contact Quality Metrics (Parent Task)
+
+**Status: COMPLETED ✅ (all children done — confirmed in code 2026-04-30)**
+
+All child metrics complete: SwStr% (#34 ✅), O-Swing% (#34 ✅), F-Strike% (#37 ✅), Barrel% allowed ✅, HH% allowed ✅ — all computed in `arsenal.js` and wired into `kBoardScore` / `outsBoardScore` in `prop-scout-v7.jsx`.
+
+---
+
+## CODEX TASK 24 — Add SwStr%, O-Swing%, and F-Strike% to Arsenal + K Scoring Model (Tasks #34, #37)
+
+**Priority: Medium**
+
+### Background
+
+`backend/routes/arsenal.js` already fetches a full individual-pitch-level CSV from Baseball Savant for each pitcher (one row per pitch, all pitches for the season). The `buildArsenalFromRows(rows)` function aggregates those rows into per-pitch-type stats. The raw rows already contain everything needed to compute three additional pitcher-level aggregate metrics — they just aren't being calculated today.
+
+These three metrics are among the strongest predictors of strikeout rate:
+- **SwStr%** (swinging strike rate) — whiffs / total pitches. The single best K predictor. Elite is 14%+.
+- **O-Swing%** (chase rate) — swings on pitches outside the strike zone / total pitches outside the zone. Zones 11–14 in Savant are outside. High chase rate (32%+) = hitters expanding, more Ks.
+- **F-Strike%** (first-pitch strike rate) — first pitches (pitch_number == 1) that result in a called/swinging strike / total first pitches. Strong command indicator. 65%+ is elite.
+
+### What to build
+
+#### Step 1 — Compute aggregate metrics in `backend/routes/arsenal.js`
+
+In `buildArsenalFromRows(rows)`, add pitcher-level aggregate computation alongside the existing per-type loop:
+
+```js
+// Pitcher-level aggregates (across all pitch types)
+let totalPitchesAll = 0, totalWhiffsAll = 0;
+let outsidePitches = 0, outsideSwings = 0;
+let firstPitches = 0, firstStrikes = 0;
+
+rows.forEach(r => {
+  if ((r.pitch_type || "").trim().toUpperCase() === "PO") return;
+  totalPitchesAll++;
+
+  const desc = (r.description || "").toLowerCase();
+  const isWhiff = ["swinging_strike","swinging_strike_blocked","missed_bunt"].some(d => desc.includes(d));
+  const isSwing = ["swinging_strike","swinging_strike_blocked","foul","foul_bunt","missed_bunt","hit_into_play","foul_tip"].some(d => desc.includes(d));
+  const isStrike = isWhiff || ["called_strike","foul","foul_bunt","foul_tip"].some(d => desc.includes(d));
+
+  if (isWhiff) totalWhiffsAll++;
+
+  const zone = parseInt(r.zone, 10);
+  const isOutside = [11,12,13,14].includes(zone);
+  if (isOutside) {
+    outsidePitches++;
+    if (isSwing) outsideSwings++;
+  }
+
+  const pitchNum = parseInt(r.pitch_number, 10);
+  if (pitchNum === 1) {
+    firstPitches++;
+    if (isStrike) firstStrikes++;
+  }
+});
+
+const pitcherStats = {
+  swStrPct:  totalPitchesAll > 0 ? Math.round((totalWhiffsAll / totalPitchesAll) * 1000) / 10 : null,
+  oSwingPct: outsidePitches  > 0 ? Math.round((outsideSwings  / outsidePitches)  * 1000) / 10 : null,
+  fStrikePct: firstPitches   > 0 ? Math.round((firstStrikes   / firstPitches)    * 1000) / 10 : null,
+};
+```
+
+Add `pitcherStats` to the returned result object alongside `arsenal`:
+```js
+const result = { pitcherId: parseInt(pitcherId), season: resolvedYear, source, arsenal, pitcherStats };
+```
+
+If `zone` or `pitch_number` columns are absent from the CSV rows (check `Object.keys(rows[0])`), set the corresponding stat to `null` gracefully — do not throw.
+
+#### Step 2 — Use in K scoring model in `prop-scout-v7.jsx`
+
+Find the `computePickScore` function (or equivalent K scoring logic). The frontend already fetches `/api/arsenal/:pitcherId` and uses `whiffPct` per pitch type. After fetching arsenal, the `pitcherStats` object is now available on the response.
+
+Add scoring adjustments:
+
+```js
+// SwStr% signal
+const swStr = arsenalData?.pitcherStats?.swStrPct ?? null;
+if (swStr !== null) {
+  if      (swStr >= 14) { score += 5; projK += 0.4; kR.push(`SwStr% ${swStr}% (elite)`); }
+  else if (swStr >= 12) { score += 3; projK += 0.2; kR.push(`SwStr% ${swStr}% (above avg)`); }
+  else if (swStr <= 8)  { score -= 3; projK -= 0.2; kR.push(`SwStr% ${swStr}% (below avg)`); }
+}
+
+// O-Swing% (chase rate) signal
+const oSwing = arsenalData?.pitcherStats?.oSwingPct ?? null;
+if (oSwing !== null) {
+  if      (oSwing >= 33) { score += 3; projK += 0.2; kR.push(`Chase rate ${oSwing}% (high)`); }
+  else if (oSwing <= 26) { score -= 2; kR.push(`Chase rate ${oSwing}% (low)`); }
+}
+
+// F-Strike% signal (command indicator)
+const fStrike = arsenalData?.pitcherStats?.fStrikePct ?? null;
+if (fStrike !== null) {
+  if      (fStrike >= 65) { score += 2; kR.push(`F-Strike% ${fStrike}% (elite command)`); }
+  else if (fStrike <= 57) { score -= 2; kR.push(`F-Strike% ${fStrike}% (poor command)`); }
+}
+```
+
+Also add these signals to the Scout context builder in `backend/routes/scout.js` — in the `serializedGames` block where pitcher stats are formatted, append:
+```
+SwStr%: X% | O-Swing%: X% | F-Strike%: X%
+```
+Read these from `propsByGamePk` or pass them through the pitcher enrichment fetch (same `fetchPitcherDetail` style call can be added, or they can be fetched via the `/api/arsenal` route during context building).
+
+#### Step 3 — Show in pitcher card UI (Overview tab)
+
+In `prop-scout-v7.jsx`, find the pitcher card render for the Overview tab (where ERA, WHIP, K/9, etc. are shown). Add a new stat row:
+
+```
+SwStr%: X%   Chase: X%   F-Str%: X%
+```
+
+Only show if at least one value is non-null. Style consistent with the existing stat pills.
+
+### Constraints
+
+- No new API calls — all data comes from the existing Savant CSV already fetched by `arsenal.js`
+- Do not change the `arsenal` array shape — `pitcherStats` is a new top-level key on the response
+- Graceful null handling throughout — if Savant returns no `zone`/`pitch_number` columns, stats are `null` and scoring blocks are skipped
+- No changes to any other route files
+- Run `node --check backend/routes/arsenal.js` and `npm run build` to verify
+
+### Files to touch
+
+- `backend/routes/arsenal.js` — add aggregate computation + `pitcherStats` to response
+- `prop-scout-v7.jsx` — consume `pitcherStats`, add K scoring signals, add UI stat row
+- `backend/routes/scout.js` — add SwStr%/O-Swing%/F-Strike% to pitcher context block
+
+---
+
+## ✅ BACKLOG TASK 34 — Whiff Rate (SwStr%) + Chase Rate (O-Swing%) — COMPLETED
+
+See CODEX TASK 24 completion notes.
+
+---
+
+## ✅ BACKLOG TASK 37 — First-Pitch Strike Rate F-Strike% — COMPLETED
+
+See CODEX TASK 24 completion notes.
+
+---
+
+## HANDOFF NOTE — 2026-04-28 — CODEX TASK 24 Completed (SwStr%, O-Swing%, F-Strike%)
+
+Codex added three pitcher-level Statcast aggregate metrics to the arsenal pipeline and K scoring model.
+
+### What was built
+
+**`backend/routes/arsenal.js`:**
+- `buildArsenalFromRows(rows)` now computes a `pitcherStats` object alongside the existing per-pitch-type `arsenal` array
+- `pitcherStats` contains: `swStrPct`, `oSwingPct`, `fStrikePct` (all as percentages with 1 decimal, or `null` if data unavailable)
+- Graceful column-presence checks: `hasZoneColumn` and `hasPitchNumberColumn` guard O-Swing% and F-Strike% computation — no throws if Savant CSV lacks those columns
+- `buildArsenalFromRows` now returns `{ arsenal, pitcherStats }` instead of just `arsenal`
+- Route logic refactored into `buildArsenalPayload(pitcherId, year)` helper function
+- Exports `buildArsenalPayloadForJob` for use by scout.js without going through the HTTP route
+
+**`backend/routes/scout.js`:**
+- Imports `buildArsenalPayloadForJob` from `./arsenal`
+- `fetchPitcherProfile()` now calls `buildArsenalPayloadForJob` and attaches `pitcherStats` to the returned profile object
+- Each pitcher block in `serializedGames` now includes: `SwStr%: X% | O-Swing%: X% | F-Strike%: X%` (using `fmtPctMetric()` helper — renders `—` for null)
+
+**`prop-scout-v7.jsx`:**
+- K scoring model reads `pitcher.pitcherStats?.swStrPct/oSwingPct/fStrikePct`
+- Scoring thresholds:
+  - SwStr% ≥14: +5 score, +0.4 projK | ≥12: +3, +0.2 | ≤8: -3, -0.2
+  - O-Swing% ≥33: +3, +0.2 | ≤26: -2
+  - F-Strike% ≥65: +2 | ≤57: -2
+- Arsenal fetch now stores `pitcherStats` alongside `arsenal` in `pitcherArsenal` state
+- `pitcherStats` overlaid onto game object in the same pattern as arsenal (live data over base)
+- Overview pitcher card shows new stat row: `SwStr% · Chase · F-Str%` — only renders if at least one value is non-null; styled monospace, consistent with existing stat pills
+
+### Files changed
+- `backend/routes/arsenal.js`
+- `backend/routes/scout.js`
+- `prop-scout-v7.jsx`
+
+### Verification
+- `node --check backend/routes/arsenal.js` ✓
+- `node --check backend/routes/scout.js` ✓
+- `npm run build` ✓ (rollup native module error in sandbox is a platform artifact, not a code issue)
+
+---
+
+## BACKLOG TASK 35 — Opposing Team K% in K Scoring Model
+
+**Priority: Medium | LOE: Medium**
+
+Fetch season team batting stats for the opposing lineup from MLB Stats API. Use team strikeout rate (K%) as a multiplier on K prop confidence.
+
+**Implementation:**
+
+New call: `GET https://statsapi.mlb.com/api/v1/teams/{teamId}/stats?stats=season&group=hitting&season={SEASON}`
+
+Response field: `strikeoutRate` or compute as `strikeOuts / plateAppearances`.
+
+Thresholds:
+- K% > 24%: high-strikeout lineup → `score += 3`, signal: `Opp K% {val}% (high-K lineup)`
+- K% 20–24%: neutral
+- K% < 18%: contact lineup → `score -= 3`, signal: `Opp K% {val}% (contact lineup)`
+
+Cache per teamId per day (same TTL as schedule snapshot). Can be fetched alongside existing pitcher stats calls.
+
+---
+
+## BACKLOG TASK 38 — Pitch Count + Workload Tracking for Outs Model
+
+**Priority: Medium | LOE: Low-Medium**
+
+The game log fetch (`/api/players/:pitcherId/gamelog`) already returns recent starts. The `pitchesThrown` field is available per start. Use it to flag workload risk on Outs lines.
+
+If most recent start was within 4 days AND pitchesThrown >= 100: flag as high-workload — penalize Outs OVER.
+
+Thresholds:
+- Last start ≤ 4 days ago + 100+ pitches: `score -= 4`, signal: `High workload (${pitches}p, ${days}d rest)`
+- Last start ≤ 4 days ago + 85–99 pitches: `score -= 2`, signal: `Moderate workload`
+
+---
+
+## ✅ CODEX TASK 26 — Bullpen Quality Factor in Game Totals + Model Picks Odds Re-rank (Tasks #39, #22) — COMPLETED
+
+### Completion notes
+
+**Part A — Bullpen Quality factor (`prop-scout-v7.jsx`, `computeGameBoard` total block):**
+Added inside `type === "total"` only, after Market Total factor and before score clamp. Reads `game.bullpen?.away.grade` and `game.bullpen?.home.grade` (already in `activeSlate` via `liveBullpen` overlay). Maps grade letters to ERA estimates via `gradeToEra`, averages both teams, scores ±4–8 pts. Fatigue overlay: +4 if either team HIGH, -3 if both LOW. Pushes to `factors[]` with grade display (`Away / Home` format). Guarded by `if (awayBp?.grade || homeBp?.grade)` — silently skipped if bullpen data not yet fetched. `computeGameBoard` signature unchanged.
+
+**Part B — Odds re-rank (`prop-scout-v7.jsx`, near `topSlatePicks`):**
+Added `parseOddsInt` and `getPreferredOdds` helpers inline near usage (not module-level). `topSlatePicks` now chains `.filter(isAvailableAtPreferredBook).sort(...)` — primary sort by confidence descending, secondary tiebreaker by odds favorability at `preferredBook` (more positive = better value). Falsy `preferredBook` still returns `rawSlatePicks` unchanged. All downstream consumers (`highPicks`, `mediumPicks`, `specPicks`, `modelBoardResolved`, slate summary) unchanged.
+
+### Files changed
+- `prop-scout-v7.jsx` only
+
+**Priority: Medium | All changes in `prop-scout-v7.jsx` only — no new files, no backend changes**
+
+---
+
+### Part A — Task #39: Add Bullpen Quality as a Factor in Game Totals Scoring
+
+**Background:**
+`computeGameBoard` (around line 2025) scores every game on `nrfi | total | spread | ml`. The `total` branch currently has five factors: Away SP ERA, Home SP ERA, Combined WHIP, Park Factor, Weather, and Market Total. Bullpen quality is missing entirely.
+
+Each game in `activeSlate` already has `game.bullpen.away` and `game.bullpen.home` populated (shape: `{ grade, fatigueLevel, relievers, ... }`). This is merged in via the `activeSlate` transform using `liveBullpen` — no new API call or parameter needed.
+
+**Implementation:**
+
+Inside the `} else if (type === "total") {` block in `computeGameBoard`, after the existing Market Total factor block and before the `score = Math.round(...)` clamp line, add:
+
+```js
+// Bullpen Quality — weak pen = more late-inning runs (OVER); strong fresh pen = UNDER
+const awayBp = game.bullpen?.away;
+const homeBp = game.bullpen?.home;
+if (awayBp?.grade || homeBp?.grade) {
+  const gradeToEra = { "A": 2.8, "B+": 3.25, "B": 3.75, "B-": 4.25, "C+": 4.75, "C": 5.5 };
+  const awayBpEra = gradeToEra[awayBp?.grade] ?? 4.25;
+  const homeBpEra = gradeToEra[homeBp?.grade] ?? 4.25;
+  const avgBpEra  = (awayBpEra + homeBpEra) / 2;
+
+  // ERA-based pts (±8 max)
+  const bpPts = avgBpEra > 4.75 ? 8 : avgBpEra > 4.25 ? 4 : avgBpEra < 3.25 ? -8 : avgBpEra < 3.75 ? -4 : 0;
+
+  // Fatigue overlay — tired arms give up more runs
+  const eitherHigh = awayBp?.fatigueLevel === "HIGH" || homeBp?.fatigueLevel === "HIGH";
+  const bothLow    = awayBp?.fatigueLevel === "LOW"  && homeBp?.fatigueLevel === "LOW";
+  const fatiguePts = eitherHigh ? 4 : bothLow ? -3 : 0;
+
+  const totalBpPts = bpPts + fatiguePts;
+  score += totalBpPts;
+
+  const bpDetail = avgBpEra > 4.5
+    ? `Weak bullpens (avg ~${avgBpEra.toFixed(1)} ERA) — late-inning scoring risk`
+    : avgBpEra < 3.5
+    ? `Strong bullpens (avg ~${avgBpEra.toFixed(1)} ERA) — hold leads late`
+    : "Average bullpen strength";
+  const fatigueNote = eitherHigh ? " · fatigue risk" : bothLow ? " · fresh arms" : "";
+
+  factors.push({
+    label:  "Bullpen Quality",
+    pts:    totalBpPts,
+    max:    8,
+    value:  `${awayBp?.grade ?? "?"} / ${homeBp?.grade ?? "?"} (Away / Home)${eitherHigh ? " — HIGH fatigue" : ""}`,
+    detail: bpDetail + fatigueNote,
+  });
+}
+```
+
+**Constraints:**
+- Only adds to the `type === "total"` block — NRFI, Spread, and ML blocks are untouched
+- Graceful if `game.bullpen` is undefined (data not yet fetched for that game) — the outer `if` guard handles this
+- No changes to `computeGameBoard`'s function signature
+- No new API calls
+
+---
+
+### Part B — Task #22: Re-rank Model Picks by Preferred Book Odds (Personalization Level 2)
+
+**Background:**
+Level 1 (already done) filters `topSlatePicks` to only show picks where `preferredBook` has a posted line. Level 2 adds a secondary sort: within picks that survive the filter, rank by how favorable the odds are at the preferred book. A pick at `+100` is better value than one at `-140` even at the same line.
+
+**Where this lives:** Around line 3854–3859 in `prop-scout-v7.jsx`, the `topSlatePicks` computation:
+
+```js
+const rawSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length
+  ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather, livePlayerProps)
+  : [];
+const topSlatePicks = preferredBook
+  ? rawSlatePicks.filter(isAvailableAtPreferredBook)
+  : rawSlatePicks;
+```
+
+**Implementation:**
+
+Add a helper just above this block:
+
+```js
+const parseOddsInt = (str) => {
+  if (!str) return -115;
+  const n = parseInt(String(str).replace("+", ""), 10);
+  return Number.isFinite(n) ? n : -115;
+};
+
+const getPreferredOdds = (pick) => {
+  const props = livePlayerProps[String(pick.gamePk)]?.props ?? [];
+  const lastName = (pick.fullName ?? "").split(" ").pop().toLowerCase();
+  const match = props.find(p =>
+    p.market === pick.market &&
+    (p.player ?? "").toLowerCase().includes(lastName)
+  );
+  const book = match?.books?.[preferredBook];
+  const oddsStr = pick.lean === "OVER" ? book?.overOdds : book?.underOdds;
+  return parseOddsInt(oddsStr);
+};
+```
+
+Then update the `topSlatePicks` assignment:
+
+```js
+const topSlatePicks = preferredBook
+  ? rawSlatePicks
+      .filter(isAvailableAtPreferredBook)
+      .sort((a, b) => {
+        // Primary: confidence (higher = better)
+        if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+        // Secondary: odds value at preferred book (more positive = better value)
+        return getPreferredOdds(b) - getPreferredOdds(a);
+      })
+  : rawSlatePicks;
+```
+
+**Constraints:**
+- `parseOddsInt` and `getPreferredOdds` are small helpers scoped near the usage — do not add them as module-level constants
+- `livePlayerProps` is already in scope at the render site — no prop threading needed
+- When `preferredBook` is falsy (not set), behavior is unchanged — returns `rawSlatePicks` as before
+- No changes to `computeTopSlatePicks`, `isAvailableAtPreferredBook`, or any tier grouping logic
+- `highPicks`, `mediumPicks`, `specPicks` downstream consume `topSlatePicks` unchanged — they just benefit from the new sort order
+
+---
+
+### Verification
+
+Run:
+- `npm run build` — must pass (rollup sandbox artifact is expected, not a code error)
+- Confirm `computeGameBoard` still accepts the same parameters — no signature change
+- Confirm `topSlatePicks` variable is still consumed the same way downstream
+
+---
+
+## BACKLOG TASK 40 — Line Movement Tracking
+
+**Status: COMPLETED ✅ (CODEX TASK 32 — 2026-04-29)**
+
+`opening_total` column added to `odds_snapshots` with COALESCE guard. `buildOddsPayload` computes `openTotal`, `totalDelta`, `totalMoveDir`, `movementText`. SlateCard and game detail Overview wired to real movement data. Scout's `getGameTotalLine` uses real opening lines.
+
+---
+
+## ~~BACKLOG TASK 41 — Betslip Analyzer~~ — DROPPED
+
+Decided not to pursue. Removed from backlog.
+
+---
+
+## BACKLOG TASK 36 — xFIP / xERA Pitcher Quality Assessment
+
+**Status: COMPLETED ✅ (CODEX TASK 31 — confirmed in code 2026-04-30)**
+
+`xwOBAAllowed` computed in `arsenal.js` from Savant CSV (`woba_denom` + `estimated_woba_using_speedangle`). Wired into K scoring, Outs scoring, and Overview pitcher stats display in `prop-scout-v7.jsx`.
+
+---
+
+## BACKLOG TASK 29 — Consolidate slate_snapshots and schedule_snapshots
+
+**Status: COMPLETED ✅ (CODEX TASK 39 — 2026-04-30)**
+**Priority: Low | LOE: XS | Codex-ready**
+
+Two separate DB tables hold overlapping schedule data. `slate_snapshots` is the legacy table; `schedule_snapshots` is the newer one. All routes already read from `schedule_snapshots`. The only remaining work is in `snapshotJobs.js` and `scheduler.js` — see CODEX TASK 39 below.
+
+---
+
+## BACKLOG TASK 22 — Personalization Level 2: Re-rank Model Picks by Preferred Book Line Difficulty
+
+See CODEX TASK 26 Part B.
+
+---
+
+## ✅ CODEX TASK 25 — Skip Pre-Game Props Polling + Opposing Team K% + Pitch Count Workload (Tasks #30, #35, #38) — COMPLETED
+
+### Completion notes
+
+**Part A — `backend/jobs/snapshotJobs.js`:**
+`pollPlayerProps` active filter now skips games where `Date.parse(g.gameTime) - Date.now() > 30 * 60 * 1000`. Uses `Number.isFinite()` guard so missing/unparseable game times pass through safely. Single combined filter condition.
+
+**Part B — `backend/routes/teamStats.js` (new) + `backend/server.js`:**
+New route `GET /api/team-stats/:teamId` fetches MLB Stats API season hitting stats, computes `kPct = strikeOuts / plateAppearances * 100` (1 decimal), caches 6 hours. Mounted in server.js. Handles both `strikeOuts` and `strikeouts` field name variants from the MLB API.
+
+**`prop-scout-v7.jsx`:**
+- `liveTeamStats` state added (keyed by team abbr)
+- Both teams fetched on game open via `/api/team-stats/:id`
+- `kBoardScore` accepts `oppTeamStats` as 5th param; adjusts ±2–4 pts based on opp K% thresholds (24%+, 21%+, ≤19%, ≤17%)
+- `computePitcherBoard` accepts `liveTeamStats` as 7th param; passes `liveTeamStats[facingTeam]` to `kBoardScore`
+- Both `computePitcherBoard` call sites updated to pass `liveTeamStats`
+- Opp K% signal added to candidates array for high/low K lineups
+
+**Part C — `outsBoardScore` + `computePitcherBoard`:**
+- `outsBoardScore` reads `gamelog.games[0].pc` and `.date`, computes `daysSince`, applies -6 (100+ pitches ≤4 days) or -3 (85-99 pitches ≤4 days) penalty
+- Workload signal (`"${pitches}p last start (${days}d rest)"`) pushed to signals array in `computePitcherBoard` for Outs picks when threshold is breached
+
+### Files changed
+- `backend/jobs/snapshotJobs.js`
+- `backend/routes/teamStats.js` (new)
+- `backend/server.js`
+- `prop-scout-v7.jsx`
+
+**Priority: Medium | Three focused changes across three files**
+
+---
+
+### Part A — Task #30: Skip Pre-Game Player Props Polling Until 30 Min Before First Pitch
+
+**File: `backend/jobs/snapshotJobs.js`**
+
+In `pollPlayerProps()` (around line 368), the active game filter currently only excludes finished games. Add a second condition to skip games that haven't started and are more than 30 minutes away:
+
+```js
+const active = games.filter(g => {
+  const s = g.status ?? "";
+  if (["Final", "Game Over", "Postponed", "Cancelled", "Suspended"].includes(s)) return false;
+  // Skip pre-game games that are more than 30 minutes from first pitch
+  const gameTimeMs = Date.parse(g.gameTime);
+  if (Number.isFinite(gameTimeMs) && gameTimeMs - Date.now() > 30 * 60 * 1000) return false;
+  return true;
+});
+```
+
+**Constraints:**
+- Only this one filter block changes — no other logic in `pollPlayerProps` changes
+- In-progress and final games always pass through (the status check handles those)
+- If `g.gameTime` is missing or unparseable, `Date.parse` returns `NaN`, `Number.isFinite(NaN)` is false, so the game passes through safely (no silent skipping)
+- No changes to any other file
+
+---
+
+### Part B — Task #35: Add Opposing Team K% to K Scoring Model
+
+**Goal:** Fetch season batting K% for the opposing team and use it as a signal in `kBoardScore`. High-K lineups favor K overs; contact lineups suppress them.
+
+#### Step 1 — New backend route: `backend/routes/teamStats.js`
+
+Create a new file with a single route: `GET /api/team-stats/:teamId`
+
+```js
+const express = require("express");
+const router = express.Router();
+const mlb = require("../services/mlbApi");
+const cache = require("../services/cache");
+
+const SEASON = new Date().getFullYear();
+const TTL = 6 * 60 * 60 * 1000; // 6 hours
+
+router.get("/:teamId", async (req, res) => {
+  const { teamId } = req.params;
+  const cacheKey = `team-stats:${teamId}:${SEASON}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return res.setHeader("X-Cache", "HIT") && res.json(cached);
+
+  try {
+    const { data } = await mlb.get(`/teams/${teamId}/stats`, {
+      params: { stats: "season", group: "hitting", season: SEASON, sportId: 1 },
+    });
+    const stat = data?.stats?.[0]?.splits?.[0]?.stat ?? {};
+    const ab = Number(stat.atBats ?? 0);
+    const pa = Number(stat.plateAppearances ?? ab);
+    const so = Number(stat.strikeOuts ?? 0);
+    const kPct = pa > 0 ? Math.round((so / pa) * 1000) / 10 : null;
+
+    const result = { teamId: Number(teamId), season: SEASON, kPct };
+    cache.set(cacheKey, result, TTL);
+    res.setHeader("X-Cache", "MISS");
+    res.json(result);
+  } catch (err) {
+    console.error(`  ✗ team-stats ${teamId}: ${err.message}`);
+    res.status(502).json({ error: "MLB API unavailable", teamId });
+  }
+});
+
+module.exports = router;
+```
+
+#### Step 2 — Mount in `backend/server.js`
+
+```js
+app.use("/api/team-stats", require("./routes/teamStats"));
+```
+
+#### Step 3 — Frontend: fetch opposing team stats in `prop-scout-v7.jsx`
+
+Add a new state: `const [liveTeamStats, setLiveTeamStats] = useState({});` — keyed by team abbreviation.
+
+In the game-open `useEffect` (where arsenal, splits, umpires are fetched), add fetches for both opposing teams using their team IDs. Both home and away teams need to be fetched so each pitcher has their opponent's stats available:
+
+```js
+// Fetch team batting stats for both teams
+[
+  { id: game.away?.id, abbr: game.away?.abbr },
+  { id: game.home?.id, abbr: game.home?.abbr },
+].forEach(({ id, abbr }) => {
+  if (id && abbr && !liveTeamStats[abbr]) {
+    apiFetch(`/api/team-stats/${id}`)
+      .then(data => { if (data?.kPct != null) setLiveTeamStats(prev => ({ ...prev, [abbr]: data })); })
+      .catch(() => {});
+  }
+});
+```
+
+#### Step 4 — Pass team stats into scoring in `prop-scout-v7.jsx`
+
+Update `kBoardScore(pStats, gamelog, pf, umpire)` signature to `kBoardScore(pStats, gamelog, pf, umpire, oppTeamStats)` and add after the WHIP block:
+
+```js
+// Opposing team K% signal
+const oppKPct = oppTeamStats?.kPct ?? null;
+if (oppKPct !== null) {
+  if      (oppKPct >= 24) { s += 4; }   // high-K lineup
+  else if (oppKPct >= 21) { s += 2; }   // above avg
+  else if (oppKPct <= 17) { s -= 4; }   // contact lineup
+  else if (oppKPct <= 19) { s -= 2; }   // below avg
+}
+```
+
+Update `computePitcherBoard` to pass `liveTeamStats` as a new parameter and forward it:
+
+```js
+const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats) => {
+  ...
+  const score = type === "k"
+    ? kBoardScore(merged, gamelog, pf, umpire, liveTeamStats?.[facingTeam])
+    : outsBoardScore(merged, gamelog, pf);
+```
+
+Update all call sites of `computePitcherBoard` to pass `liveTeamStats` as the final argument.
+
+Also add `oppKPct` to the signal array in the pick object (the `signals` or `reasons` array pushed to `candidates`) so it appears in the Board card tooltip:
+- if `oppKPct >= 24`: push `"Opp K% ${oppKPct}% (high-K lineup)"`
+- if `oppKPct <= 17`: push `"Opp K% ${oppKPct}% (low-K lineup)"`
+
+---
+
+### Part C — Task #38: Pitch Count + Workload Tracking for Outs Model
+
+**File: `prop-scout-v7.jsx`**
+
+The game log already returns `pc` (numberOfPitches) per start and a date string. The most recent start is `gamelog.games[0]`.
+
+Update `outsBoardScore(pStats, gamelog, pf)` to read the most recent start's pitch count and date:
+
+```js
+// Workload / pitch count signal — penalize Outs OVER if high-pitch outing within 4 days
+const lastStart = gamelog?.games?.[0] ?? null;
+if (lastStart) {
+  const pitches = lastStart.pc ?? null;
+  const startDateStr = lastStart.date ?? null; // format: "MM/DD" or ISO — check actual shape
+  if (pitches != null && startDateStr) {
+    const today = new Date();
+    // Parse the date — gamelog returns date as "YYYY-MM-DD" or similar
+    const lastDate = new Date(startDateStr);
+    const daysSince = Number.isFinite(lastDate.getTime())
+      ? Math.round((today - lastDate) / (1000 * 60 * 60 * 24))
+      : 99;
+
+    if (daysSince <= 4 && pitches >= 100) {
+      s -= 6; // high workload, compressed rest
+    } else if (daysSince <= 4 && pitches >= 85) {
+      s -= 3; // moderate workload
+    }
+  }
+}
+```
+
+**Important:** Check the actual `date` field format in `gamelog.games[0]` by looking at how `players.js` returns it (it's the `g.date` field in the game log transform, likely a string like `"2026-04-25"`). Use whatever format is actually returned — don't assume ISO.
+
+Also add to the signal/reason array in `computePitcherBoard` for Outs picks:
+- if penalized by workload: push `"${pitches}p last start (${daysSince}d rest)"`
+
+**No new API calls, no new state** — `liveGameLog` already contains this data.
+
+---
+
+### Verification
+
+Run after all changes:
+- `node --check backend/routes/teamStats.js`
+- `node --check backend/server.js`
+- `npm run build`
+
+All must pass clean.
+
+---
+
+## HANDOFF NOTE — 2026-04-28 — CODEX TASK 25 COMPLETED
+
+Codex completed all three parts of Task 25.
+
+### Files changed
+
+- `backend/routes/teamStats.js` — new route
+- `backend/server.js`
+- `backend/jobs/snapshotJobs.js`
+- `prop-scout-v7.jsx`
+
+### What was implemented
+
+#### Part A — Player props polling efficiency
+
+In `backend/jobs/snapshotJobs.js`, `pollPlayerProps()` now skips games that are still more than 30 minutes from first pitch.
+
+Implementation details:
+- It computes `Date.parse(g.gameTime) - Date.now()`
+- It uses `Number.isFinite(...)` so missing or malformed `gameTime` values do **not** block the game from polling
+- Finished/postponed/cancelled/suspended filtering remains intact
+
+This reduces unnecessary Odds API load earlier in the day without changing any route behavior.
+
+#### Part B — Opposing team K%
+
+Added `backend/routes/teamStats.js`:
+- `GET /api/team-stats/:teamId`
+- Calls MLB Stats API `/teams/:teamId/stats?stats=season&group=hitting`
+- Computes `kPct = strikeOuts / plateAppearances * 100`
+- Caches for 6 hours
+- Returns:
+
+```json
+{ "teamId": 147, "season": 2026, "kPct": 22.4 }
+```
+
+Mounted in `backend/server.js`:
+
+```js
+app.use("/api/team-stats", require("./routes/teamStats"));
+```
+
+Frontend changes in `prop-scout-v7.jsx`:
+- Added `liveTeamStats` state keyed by team abbreviation
+- In the existing game-open effect, the app now fetches both teams’ season K% when a game is opened
+- `kBoardScore(...)` now accepts `oppTeamStats` and adjusts score by the thresholds from the task:
+  - `>= 24` → `+4`
+  - `>= 21` → `+2`
+  - `<= 19` → `-2`
+  - `<= 17` → `-4`
+- `computePitcherBoard(...)` now accepts and forwards `liveTeamStats`
+- All board call sites were updated to pass `liveTeamStats`
+- K board candidates now add signal text when applicable:
+  - `Opp K% X% (high-K lineup)`
+  - `Opp K% X% (low-K lineup)`
+
+#### Part C — Pitch count / workload for Outs model
+
+Frontend-only change in `prop-scout-v7.jsx`:
+- `outsBoardScore(...)` now reads the most recent start from `liveGameLog`
+- If the pitcher threw:
+  - `100+` pitches within `4` days → `-6`
+  - `85–99` pitches within `4` days → `-3`
+- Outs board candidates now add a workload signal when penalized:
+  - `"98p last start (3d rest)"`
+
+No new API calls were added for this workload logic — it uses existing `liveGameLog` data only.
+
+### Verification run
+
+Passed:
+- `node --check backend/routes/teamStats.js`
+- `node --check backend/server.js`
+- `npm run build`
+
+### Notes for Cowork
+
+- The opposing team K% enrichment is currently loaded through the existing game-open fetch path, which matches the Task 25 spec.
+- That means the board gets smarter once those team snapshots have been fetched at least once during a session.
+- No other routes, TTLs, or cache keys were changed beyond the new `team-stats` route.
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — CODEX TASK 26 COMPLETED
+
+Codex completed both parts of Task 26 in `prop-scout-v7.jsx` only.
+
+### Files changed
+
+- `prop-scout-v7.jsx`
+
+### What was implemented
+
+#### Part A — Bullpen Quality factor in game totals scoring
+
+Inside the `type === "total"` branch of `computeGameBoard(...)`, Codex added a new `Bullpen Quality` factor immediately after the existing `Market Total` block and before the final score clamp.
+
+Implementation details:
+- Reads:
+  - `game.bullpen?.away.grade`
+  - `game.bullpen?.home.grade`
+  - `game.bullpen?.away.fatigueLevel`
+  - `game.bullpen?.home.fatigueLevel`
+- Guarded with:
+
+```js
+if (awayBp?.grade || homeBp?.grade) { ... }
+```
+
+- Uses the exact grade → ERA approximation from the task:
+
+```js
+{ "A": 2.8, "B+": 3.25, "B": 3.75, "B-": 4.25, "C+": 4.75, "C": 5.5 }
+```
+
+- Applies ERA-based total impact:
+  - weak bullpens → positive points → more OVER pressure
+  - strong bullpens → negative points → more UNDER pressure
+- Applies fatigue overlay:
+  - `+4` if either bullpen is `HIGH`
+  - `-3` if both bullpens are `LOW`
+- Pushes a `Bullpen Quality` factor into the `factors` array so it shows in the Games board `WHY?` modal
+
+This did **not** change:
+- `computeGameBoard` function signature
+- NRFI / Run Line / Moneyline branches
+- any API calls or backend behavior
+
+#### Part B — Preferred book odds re-rank for Model Picks
+
+Near the existing `rawSlatePicks` / `topSlatePicks` logic, Codex added two small inline helpers:
+
+```js
+const parseOddsInt = (str) => { ... }
+const getPreferredOdds = (pick) => { ... }
+```
+
+These are intentionally scoped near usage, not module-level.
+
+Then `topSlatePicks` was updated so that when `preferredBook` is set, it now:
+
+1. filters using `isAvailableAtPreferredBook`
+2. sorts by:
+   - primary: `confidence` descending
+   - secondary: preferred-book odds value descending (`+100` ahead of `-140`)
+
+Implementation shape:
+
+```js
+const topSlatePicks = preferredBook
+  ? rawSlatePicks
+      .filter(isAvailableAtPreferredBook)
+      .sort((a, b) => {
+        if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+        return getPreferredOdds(b) - getPreferredOdds(a);
+      })
+  : rawSlatePicks;
+```
+
+This did **not** change:
+- `computeTopSlatePicks(...)`
+- `isAvailableAtPreferredBook(...)`
+- tier grouping logic below (`highPicks`, `mediumPicks`, `specPicks`)
+
+### Verification run
+
+Passed:
+- `npm run build`
+
+### Notes for Cowork
+
+- Task 26 was fully frontend-only.
+- The new bullpen factor only affects the Games board `O/U Total` scoring path.
+- The preferred-book odds tiebreaker only kicks in when `preferredBook` is truthy; otherwise behavior stays exactly as before.
+
+---
+
+## CODEX TASK 27 — Label + Unify Algorithmic vs AI-Powered Picks (Phase A — UI Badges Only) (Task #27)
+
+### Goal
+
+Add small, consistent source-label badges that distinguish **algorithmic** picks (Model Picks board) from **AI-powered** picks (Props tab confidence meters) so users immediately understand what system generated each recommendation. Phase A is **frontend only** — no backend changes, no new state, no new API calls.
+
+### File to edit
+
+- `prop-scout-v7.jsx` only
+
+---
+
+### Part 1 — ⚙ ALGO badge on Model Pick cards
+
+**Location:** Inside the `TierSection` component's card render, in the subtitle row at approximately line 4379.
+
+That row currently looks like:
+
+```jsx
+<div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
+  <span style={{ fontSize: 9, color: "#6b7280" }}>{p.game}</span>
+  {p.lineupConfirmed && <span style={{ fontSize: 8, color: "#22c55e", fontWeight: 700 }}>✓ LINEUP</span>}
+  {gameStatus === "LIVE" && ( ... LIVE badge ... )}
+  {gameStatus === "FINAL" && ( ... FINAL badge ... )}
+  {isResolved && modelHit && ( ... ✓ HIT badge ... )}
+  {cardMatchesPick(p) && ( ... ✦ CARD AGREES badge ... )}
+  {isResolved && !modelHit && ( ... ✗ MISS badge ... )}
+  {p.avgIP < 5.0 && <span ...>⚠ LOW IP</span>}
+</div>
+```
+
+**Insert the ALGO badge as the very first item after the game label span** (before the `{p.lineupConfirmed && ...}` check):
+
+```jsx
+<span style={{
+  fontSize: 7,
+  fontWeight: 800,
+  color: "#94a3b8",
+  background: "rgba(148,163,184,0.08)",
+  border: "1px solid rgba(148,163,184,0.2)",
+  borderRadius: 4,
+  padding: "1px 5px",
+  fontFamily: "monospace",
+  letterSpacing: "0.04em",
+}}>⚙ ALGO</span>
+```
+
+---
+
+### Part 2 — ✦ AI badge on Props tab pick cards
+
+**Location:** Inside the `displayProps.map(...)` render at approximately line 6701. Each card starts with:
+
+```jsx
+<Card key={i} style={inParlay ? { borderColor: "rgba(251,191,36,0.4)" } : {}}>
+  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+    <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", flex: 1, paddingRight: 8, lineHeight: 1.4 }}>{p.label}</div>
+    <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+      <LeanBadge ... />
+      {/* Parlay toggle */}
+      {/* Log pick */}
+    </div>
+  </div>
+  <ConfBar ... />
+  <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, lineHeight: 1.4 }}>{p.reason}</div>
+</Card>
+```
+
+**Add the AI badge inline with the label**, changing the label `<div>` into a flex row so the badge sits right of the text:
+
+Replace:
+```jsx
+<div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", flex: 1, paddingRight: 8, lineHeight: 1.4 }}>{p.label}</div>
+```
+
+With:
+```jsx
+<div style={{ display: "flex", alignItems: "center", gap: 5, flex: 1, paddingRight: 8, minWidth: 0 }}>
+  <span style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", lineHeight: 1.4 }}>{p.label}</span>
+  <span style={{
+    fontSize: 7,
+    fontWeight: 800,
+    color: "#818cf8",
+    background: "rgba(129,140,248,0.08)",
+    border: "1px solid rgba(129,140,248,0.2)",
+    borderRadius: 4,
+    padding: "1px 5px",
+    fontFamily: "monospace",
+    letterSpacing: "0.04em",
+    flexShrink: 0,
+  }}>✦ AI</span>
+</div>
+```
+
+---
+
+### Styling constraints
+
+- Match the visual weight of existing badges: `fontSize: 7–8`, `fontWeight: 800`, `fontFamily: "monospace"`, small rounded pill (`borderRadius: 4`)
+- **⚙ ALGO** uses muted slate color (`#94a3b8`) — neutral, not prominent
+- **✦ AI** uses indigo (`#818cf8`) — matches the existing `✦ CARD AGREES` badge palette, signaling the AI origin
+- Do **not** add tooltips, modals, or hover states in Phase A — that is Phase B
+
+---
+
+### What NOT to change
+
+- Do not touch `TierSection` props or signature
+- Do not touch `computeTopSlatePicks`, `kBoardScore`, or any scoring logic
+- Do not touch the Scout tab, Chat tab, or Board tab
+- Do not touch any backend files
+- `npm run build` must pass with zero new warnings
+
+---
+
+### Verification
+
+After applying changes, run `npm run build` and confirm it exits 0. Spot-check that both badge spans appear in the JSX and that no existing badge logic was accidentally moved or removed.
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — CODEX TASK 27 COMPLETED
+
+Codex completed both requested badge-only UI changes in `prop-scout-v7.jsx`.
+
+### Files changed
+
+- `prop-scout-v7.jsx`
+
+### What was implemented
+
+#### Part 1 — ⚙ ALGO badge on Model Pick cards
+
+Inside `TierSection`’s `tierPicks.map(...)` card render, Codex inserted the new neutral `⚙ ALGO` badge in the subtitle row immediately after the `{p.game}` span and before the existing lineup confirmation badge.
+
+Badge styling matches the spec:
+- muted slate color `#94a3b8`
+- small monospace pill
+- no behavior changes
+
+This means every Model Pick card now explicitly shows that it is algorithm-driven without changing any pick logic, tiering, or scoring.
+
+#### Part 2 — ✦ AI badge on Props tab pick cards
+
+Inside `displayProps.map(...)`, Codex replaced the plain label `<div>` with a flex row that contains:
+- the existing prop label text
+- a new indigo `✦ AI` badge to the right
+
+Badge styling matches the spec:
+- `#818cf8` accent
+- small monospace pill
+- `flexShrink: 0` so the badge stays visible on narrow layouts
+
+This change is display-only and does not affect:
+- prop scoring
+- parlay logic
+- logging logic
+- any backend behavior
+
+### What was intentionally NOT changed
+
+- No backend files
+- No scoring logic
+- No `TierSection` props/signature changes
+- No Scout / Chat / Board tab logic
+
+### Verification run
+
+Passed:
+- `npm run build`
+
+### Notes for Cowork
+
+- Task 27 is strictly cosmetic.
+- The new badges are now present in:
+  - Model Picks cards (`⚙ ALGO`)
+  - Props tab AI pick cards (`✦ AI`)
+- Nothing else in the render tree was restructured beyond the small label-row updates needed to place the badges inline.
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — CODEX QUEUE (JD hitting usage limit)
+
+CW (Cowork) is unavailable due to weekly usage limit. The following two tasks are queued for Codex in priority order. Both have full specs below.
+
+### Task queue
+
+| # | Task | Files | LOE |
+|---|------|-------|-----|
+| CODEX TASK 28 | Barrel% + Hard Hit% allowed in arsenal pipeline + K scoring (#33 remaining) | `backend/routes/arsenal.js`, `prop-scout-v7.jsx` | Small-Medium |
+| CODEX TASK 29 | Phase B: Source badge tooltips (#27 Phase B) | `prop-scout-v7.jsx` only | XS |
+
+### Do NOT attempt without CW present
+
+- #28 Backend-first DB architecture migration (risky, needs oversight)
+- #29 (table consolidation) — low priority, DB migration risk
+- #36 xFIP/xERA — data pipeline not yet designed
+- #40 Line movement — schema decision needed
+- #31 Scout self-evaluation loop — design work needed
+
+---
+
+## CODEX TASK 28 — Barrel% + Hard Hit% Allowed in Arsenal Pipeline + K Scoring (Task #33 remaining)
+
+### Background
+
+`backend/routes/arsenal.js` already fetches a per-pitch Statcast CSV from Baseball Savant and aggregates it in `buildArsenalFromRows(rows)`. CODEX TASKs 24 and 25 already extended this function to compute `pitcherStats` (swStrPct, oSwingPct, fStrikePct). This task adds two more metrics to `pitcherStats` using the same row data:
+
+- **Barrel%** — percentage of batted balls that are "barrels" (optimal exit velocity + launch angle combination). Elite pitchers suppress barrels. The Savant CSV includes a `launch_speed_angle` column that Savant pre-classifies: `6` = Barrel, `5` = Solid Contact, `4` = Flare/Burner, `3` = Under, `2` = Topped, `1` = Weak.
+- **Hard Hit%** — percentage of batted balls with exit velocity ≥ 95 mph. The `launch_speed` column holds exit velocity (as a float string, e.g. `"103.4"`). Only populated for batted ball events (not called/swinging strikes).
+
+Both are pitcher-allowed metrics — higher = worse for the pitcher.
+
+### Step 1 — Extend `buildArsenalFromRows` in `backend/routes/arsenal.js`
+
+The existing `pitcherStats` computation block (around the `totalPitchesAll`, `totalWhiffsAll`, etc. counters) already loops through all rows once. Extend that same loop to also collect:
+
+```js
+let battedBalls = 0;
+let barrels = 0;
+let hardHits = 0;
+
+// Inside the existing rows.forEach loop, after current stats:
+const lsa = parseInt(r.launch_speed_angle, 10);
+const ev  = parseFloat(r.launch_speed);
+
+if (!isNaN(lsa) && lsa >= 1 && lsa <= 6) {
+  // This row is a batted ball event
+  battedBalls++;
+  if (lsa === 6) barrels++;
+}
+if (!isNaN(ev) && ev >= 95) {
+  hardHits++;
+}
+// Note: hardHits denominator should be battedBalls (same as barrels denominator)
+```
+
+Then extend the `pitcherStats` object to include:
+
+```js
+const pitcherStats = {
+  swStrPct:    ...,   // existing
+  oSwingPct:   ...,   // existing
+  fStrikePct:  ...,   // existing
+  barrelPct:   battedBalls > 0 ? Math.round((barrels  / battedBalls) * 1000) / 10 : null,
+  hardHitPct:  battedBalls > 0 ? Math.round((hardHits / battedBalls) * 1000) / 10 : null,
+};
+```
+
+**Guard:** if `launch_speed_angle` column is absent from the rows (check `Object.keys(rows[0])`), set `barrelPct` and `hardHitPct` to `null` — do not throw.
+
+### Step 2 — Display in pitcher card in `prop-scout-v7.jsx`
+
+The Overview pitcher card already shows a SwStr%/Chase/F-Str% row (added in CODEX TASK 24). Find that row (search for `SwStr%` or `swStrPct`) and extend it to also show Barrel% and Hard Hit%:
+
+Format: add two more stat chips to the same flex row, e.g.:
+
+```
+SwStr%: 13.2%   Chase: 31.4%   F-Str: 67.1%   Barrel%: 7.8%   HH%: 38.2%
+```
+
+Follow the existing chip styling exactly. If a value is `null`, show `—` rather than crashing.
+
+### Step 3 — K scoring adjustments in `prop-scout-v7.jsx`
+
+In `kBoardScore` (or wherever `swStrPct` is used for K scoring), add parallel scoring for the two new metrics. Insert after the existing `swStrPct` / `oSwingPct` / `fStrikePct` blocks:
+
+```js
+// Barrel% signal — high barrel% = poor contact suppression = fewer Ks
+const barrelPct = pitcher.pitcherStats?.barrelPct ?? null;
+if (barrelPct !== null) {
+  if      (barrelPct <= 5)  { score += 3; kR.push(`Barrel% ${barrelPct}% (elite suppression)`); }
+  else if (barrelPct <= 7)  { score += 1; kR.push(`Barrel% ${barrelPct}% (above avg)`); }
+  else if (barrelPct >= 12) { score -= 3; kR.push(`Barrel% ${barrelPct}% (high contact risk)`); }
+  else if (barrelPct >= 10) { score -= 1; kR.push(`Barrel% ${barrelPct}% (elevated)`); }
+}
+
+// Hard Hit% signal
+const hardHitPct = pitcher.pitcherStats?.hardHitPct ?? null;
+if (hardHitPct !== null) {
+  if      (hardHitPct <= 32) { score += 2; kR.push(`HH% ${hardHitPct}% (elite)`); }
+  else if (hardHitPct >= 42) { score -= 2; kR.push(`HH% ${hardHitPct}% (elevated)`); }
+}
+```
+
+### Constraints
+
+- Do not change `buildArsenalPayload` signature or cache keys
+- Do not change the HTTP response shape — `pitcherStats` already exists, just gains two new nullable fields
+- `barrelPct` and `hardHitPct` should gracefully be `null` when the CSV doesn't include `launch_speed_angle` or has zero batted balls — never crash
+- `npm run build` must exit 0
+
+### Verification
+
+After changes:
+1. `npm run build` — must pass
+2. Hit `GET /api/arsenal/:pitcherId` for any active starter. Response `pitcherStats` should now include `barrelPct` and `hardHitPct` alongside the existing three fields (or `null` if Savant CSV doesn't include those columns for this query shape).
+3. Update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 28 handoff note in the same format as tasks 24–27.
+
+---
+
+## CODEX TASK 29 — Phase B: Source Badge Tooltips (#27 Phase B)
+
+### Background
+
+CODEX TASK 27 (Phase A) added `⚙ ALGO` badges to Model Pick cards and `✦ AI` badges to Props tab pick cards. Phase B adds `title` tooltip attributes to both badges so users who hover can read a one-line explanation.
+
+### File to edit
+
+`prop-scout-v7.jsx` only. No backend changes.
+
+### Changes
+
+**Change 1 — ⚙ ALGO badge (Model Picks, in `TierSection`)**
+
+Find the `⚙ ALGO` badge span (search for `⚙ ALGO`). Add a `title` attribute:
+
+```jsx
+<span
+  title="Algorithmic pick — generated by the scoring model using Statcast + sportsbook data. No AI/LLM involved."
+  style={{ ... }}
+>⚙ ALGO</span>
+```
+
+**Change 2 — ✦ AI badge (Props tab, in `displayProps.map`)**
+
+Find the `✦ AI` badge span (search for `✦ AI`). Add a `title` attribute:
+
+```jsx
+<span
+  title="AI-powered pick — generated by Claude analyzing pitcher stats, lineup matchups, and park factors."
+  style={{ ... }}
+>✦ AI</span>
+```
+
+### Constraints
+
+- Exactly two `title` attribute additions — nothing else
+- Do not restructure any surrounding JSX
+- `npm run build` must exit 0
+- Update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 29 handoff note
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — CODEX TASK 28 COMPLETED
+
+Codex completed Task 28 across the requested two files.
+
+### Files changed
+
+- `backend/routes/arsenal.js`
+- `prop-scout-v7.jsx`
+
+### What was implemented
+
+#### Part 1 — Barrel% + Hard Hit% added to arsenal `pitcherStats`
+
+In `backend/routes/arsenal.js`, inside `buildArsenalFromRows(rows)`, Codex extended the existing aggregate stats pass to compute:
+
+- `barrelPct`
+- `hardHitPct`
+
+Implementation details:
+- Added counters:
+  - `battedBalls`
+  - `barrels`
+  - `hardHits`
+- Added `hasLaunchSpeedAngleColumn` guard using `Object.keys(rows[0])`
+- During the existing `rows.forEach(...)` loop:
+  - counts batted balls when `launch_speed_angle` is `1..6`
+  - counts barrels when `launch_speed_angle === 6`
+  - counts hard-hit balls when `launch_speed >= 95`
+- Extends `pitcherStats` with:
+
+```js
+barrelPct
+hardHitPct
+```
+
+Both fields are safely `null` when:
+- `launch_speed_angle` is absent from the CSV
+- or `battedBalls === 0`
+
+No new API calls were added and no existing response keys were changed beyond these two new nullable fields on `pitcherStats`.
+
+#### Part 2 — Overview pitcher card display
+
+In `prop-scout-v7.jsx`, the existing Overview pitcher stat strip that already showed:
+
+- `SwStr%`
+- `Chase`
+- `F-Str%`
+
+was extended to also show:
+
+- `Barrel%`
+- `HH%`
+
+Display behavior:
+- matches the existing inline chip/text styling
+- shows `—` when either stat is `null`
+- the strip now renders if *any* of the five arsenal-derived pitcher stats exist
+
+#### Part 3 — K model scoring adjustments
+
+In the existing K model scoring block in `prop-scout-v7.jsx` (the same one already using `swStrPct`, `oSwingPct`, and `fStrikePct`), Codex added the new contact-quality adjustments:
+
+- `barrelPct`
+  - `<= 5` → `+3`
+  - `<= 7` → `+1`
+  - `>= 10` → `-1`
+  - `>= 12` → `-3`
+- `hardHitPct`
+  - `<= 32` → `+2`
+  - `>= 42` → `-2`
+
+These also append corresponding reason strings into the K signal array so the model explanation now reflects the contact-suppression read.
+
+### Verification run
+
+Passed:
+- `node --check backend/routes/arsenal.js`
+- `npm run build`
+
+### Notes for Cowork
+
+- Task 28 reused the existing Savant CSV payload only; no new API surfaces were introduced.
+- The new `barrelPct` / `hardHitPct` live under the existing `pitcherStats` object returned by `/api/arsenal/:pitcherId`.
+- The K model is now slightly more sensitive to contact-quality suppression, not just swing/whiff/chase metrics.
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — CODEX TASK 29 COMPLETED
+
+Codex completed Task 29 as a tooltip-only follow-up to Task 27.
+
+### Files changed
+
+- `prop-scout-v7.jsx`
+
+### What was implemented
+
+Exactly two `title` attributes were added:
+
+#### 1. `⚙ ALGO` badge tooltip
+
+In the Model Picks card badge inside `TierSection`, Codex added:
+
+```jsx
+title="Algorithmic pick — generated by the scoring model using Statcast + sportsbook data. No AI/LLM involved."
+```
+
+#### 2. `✦ AI` badge tooltip
+
+In the Props tab pick card badge inside `displayProps.map(...)`, Codex added:
+
+```jsx
+title="AI-powered pick — generated by Claude analyzing pitcher stats, lineup matchups, and park factors."
+```
+
+### What was intentionally NOT changed
+
+- No JSX restructuring beyond the inline `title` additions
+- No backend changes
+- No scoring changes
+- No badge styling changes
+
+### Verification run
+
+Passed:
+- `npm run build`
+
+### Notes for Cowork
+
+- Task 29 was intentionally minimal: two tooltip attributes only.
+- This completes Phase B of the source-badge UX without changing badge placement or interaction patterns.
+
+---
+
+## CODEX TASK 30 — Scout Self-Evaluation Feedback Loop: Feed Prior Day Improvement Flags into Next Day's Picks (Task #31 partial)
+
+### Background
+
+The Scout (`backend/routes/scout.js`) runs `generateScoutPicks(date, generationsUsed)` to produce each day's picks using GPT-4o. After games go final each night, a separate job (`runScoutEvaluation` in `backend/jobs/snapshotJobs.js`) evaluates the picks and writes a `scout_evaluations` row containing `improvement_flags` — an array of strings like `"Integrate batter performance data against high strikeout pitchers"`.
+
+Right now these flags are stored and displayed in the UI but are **never read back**. The Scout generates tomorrow's picks with no awareness of what it got wrong today. This task closes the loop: before generating picks, load the previous day's `improvement_flags` from the DB and inject them into the GPT-4o system prompt so The Scout is aware of its own recent self-critique.
+
+### File to edit
+
+`backend/routes/scout.js` only. No frontend changes, no schema changes.
+
+---
+
+### Implementation
+
+Inside `generateScoutPicks(date, generationsUsed)`, after the existing `if (isConnected())` data-loading block (the one that fetches props, odds, umpires, and injuries — around line 417–442), add a block to load the prior day's flags:
+
+```js
+// Load prior day's improvement flags for self-correction
+let priorImprovementFlags = [];
+if (isConnected()) {
+  try {
+    const prevDate = new Date(date + "T12:00:00Z");
+    prevDate.setDate(prevDate.getDate() - 1);
+    const yesterdayStr = prevDate.toISOString().slice(0, 10);
+    const evalRow = await query(
+      "SELECT improvement_flags FROM scout_evaluations WHERE slate_date = $1",
+      [yesterdayStr]
+    );
+    priorImprovementFlags = evalRow?.rows?.[0]?.improvement_flags ?? [];
+  } catch (err) {
+    console.warn("  · scout: could not load prior improvement flags:", err.message);
+  }
+}
+```
+
+Then update the `systemPrompt` string (currently around line 529) to append the flags if any exist:
+
+**Before:**
+```js
+const systemPrompt = `You are The Scout — a sharp professional sports bettor...`;
+```
+
+**After:**
+```js
+const priorFlagsBlock = priorImprovementFlags.length > 0
+  ? `\n\nYesterday's self-evaluation flagged these areas for improvement:\n${priorImprovementFlags.map((f, i) => `${i + 1}. ${f}`).join("\n")}\nFactor these into today's analysis where relevant.`
+  : "";
+
+const systemPrompt = `You are The Scout — a sharp professional sports bettor with 15 years of experience beating closing lines. You are data-obsessed, value-focused, and direct. You only recommend a prop when at least two independent signals point the same direction. You always cite specific numbers. You speak in first person, present tense. Each reasoning is 2–4 sentences max. Be selective — quality over quantity. Only make picks you genuinely believe in.${priorFlagsBlock}`;
+```
+
+### Constraints
+
+- Only modifies `generateScoutPicks` in `backend/routes/scout.js`
+- The prior flags load is **fully guarded**: wrapped in `if (isConnected())` + `try/catch`. If the DB is unavailable or the query returns nothing, `priorImprovementFlags` stays `[]` and the system prompt is unchanged — no crash, no behavior change
+- No changes to `runScoutEvaluation`, the evaluations table schema, the HTTP routes, or any frontend files
+- No changes to the `userPrompt`, `response_format`, model, temperature, or pick output structure
+- `npm run build` (or `node -e "require('./backend/routes/scout.js')"`) must pass
+- Update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 30 handoff note in the same format as Tasks 24–29
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — CODEX TASK 30 COMPLETED
+
+Codex completed the Scout self-evaluation feedback loop in `backend/routes/scout.js` only.
+
+### Files changed
+
+- `backend/routes/scout.js`
+
+### What was implemented
+
+#### Part 1 — Prior-day improvement flags are now loaded inside `generateScoutPicks(...)`
+
+After the existing DB-backed snapshot load block (props / odds / umpires / injuries), Codex added a second guarded DB read for the previous day’s `scout_evaluations.improvement_flags`.
+
+Implementation details:
+- Uses:
+  - `if (isConnected())`
+  - `try/catch`
+- Computes yesterday from the current Scout `date`
+- Queries:
+
+```sql
+SELECT improvement_flags FROM scout_evaluations WHERE slate_date = $1
+```
+
+- Falls back safely to:
+
+```js
+let priorImprovementFlags = [];
+```
+
+if:
+- DB is unavailable
+- no prior evaluation row exists
+- or the query throws
+
+When that happens, Scout behavior is unchanged from before.
+
+#### Part 2 — Prior flags are injected into the Scout system prompt
+
+Just before the existing `systemPrompt`, Codex added:
+
+```js
+const priorFlagsBlock = priorImprovementFlags.length > 0
+  ? `...`
+  : "";
+```
+
+Then appended `${priorFlagsBlock}` to the end of the existing `systemPrompt`.
+
+Effect:
+- if yesterday’s evaluation flagged weaknesses, The Scout now sees them before generating today’s picks
+- if there are no flags, the prompt is unchanged
+
+This closes the intended feedback loop:
+
+1. Scout makes picks
+2. nightly evaluation writes `improvement_flags`
+3. next day’s Scout prompt incorporates those flags where relevant
+
+### What was intentionally NOT changed
+
+- No frontend files
+- No schema changes
+- No HTTP route shape changes
+- No changes to:
+  - `runScoutEvaluation`
+  - `userPrompt`
+  - model
+  - temperature
+  - output format
+
+### Verification run
+
+Passed:
+- `node -e "require('./backend/routes/scout.js')"`
+
+Observed expected fallback log in a no-DB local environment:
+- `DATABASE_URL not set — DB layer disabled, using in-memory cache only`
+
+### Notes for Cowork
+
+- Task 30 is fully backend-only and intentionally low-risk.
+- The self-correction loop only becomes active when:
+  - Scout evaluations exist for the prior day
+  - and the DB connection is available
+- Otherwise Scout behaves exactly as before.
+
+---
+
+## CODEX TASK 31 — xwOBA Allowed in Arsenal Pipeline + K/Outs Scoring (Task #36)
+
+### Background
+
+True xFIP requires HR/FB rate and league-average constants not easily available from our current data sources. However, **xwOBA allowed** — a contact-quality regression metric that strips out defense and luck — is computable directly from the existing Savant CSV rows we already fetch in `backend/routes/arsenal.js`. No new API calls, no new data sources.
+
+How it works: the Savant CSV includes a `woba_denom` column (= `1` on the final pitch of each plate appearance) and `estimated_woba_using_speedangle` (xwOBA, populated for batted ball events) and `woba_value` (actual outcome value for Ks, BBs, HBP). By filtering to `woba_denom == 1` rows and preferring `estimated_woba_using_speedangle` over `woba_value` where available, we get a regressed quality metric per PA.
+
+**League average xwOBA** is typically ~0.310–0.315. Elite starters are routinely sub-0.290. Below 0.270 is exceptional; above 0.340 is concerning.
+
+### Files to edit
+
+- `backend/routes/arsenal.js`
+- `prop-scout-v7.jsx`
+- `backend/routes/scout.js`
+
+---
+
+### Step 1 — Compute xwOBA in `buildArsenalFromRows` (`backend/routes/arsenal.js`)
+
+**Column guards** (add alongside existing `hasZoneColumn`, `hasLaunchSpeedAngleColumn`, etc.):
+
+```js
+const hasWobaDenomColumn = sampleKeys.includes("woba_denom");
+const hasXwOBAColumn     = sampleKeys.includes("estimated_woba_using_speedangle");
+```
+
+**Counters** (add alongside existing `battedBalls`, `barrels`, etc.):
+
+```js
+let xwobaNumer = 0;
+let xwobaDenom = 0;
+```
+
+**Inside the existing `rows.forEach` loop** (after the `hasLaunchSpeedAngleColumn` block):
+
+```js
+if (hasWobaDenomColumn) {
+  const wobaDen = parseFloat(r.woba_denom);
+  if (!isNaN(wobaDen) && wobaDen === 1) {
+    xwobaDenom++;
+    const xwoba  = hasXwOBAColumn ? parseFloat(r.estimated_woba_using_speedangle) : NaN;
+    const wobaV  = parseFloat(r.woba_value);
+    // Prefer xwOBA (regressed) for batted balls; fall back to woba_value for Ks/BBs/HBP
+    xwobaNumer += !isNaN(xwoba) ? xwoba : (!isNaN(wobaV) ? wobaV : 0);
+  }
+}
+```
+
+**Extend `pitcherStats` object** (add alongside `barrelPct`, `hardHitPct`):
+
+```js
+xwOBAAllowed: hasWobaDenomColumn && xwobaDenom >= 10
+  ? Math.round((xwobaNumer / xwobaDenom) * 1000) / 1000
+  : null,
+```
+
+The `>= 10` PA minimum prevents noise on tiny sample sizes.
+
+---
+
+### Step 2 — Display in pitcher Overview card (`prop-scout-v7.jsx`)
+
+The pitcher card already has a stats row showing `SwStr%`, `Chase`, `F-Str%`, `Barrel%`, `HH%` (search for `swStrPct` to find it). Add `xwOBA` as a new chip in that same row:
+
+```
+xwOBA: <span style={{ color: xwOBAColor }}>{value}</span>
+```
+
+Color the value:
+- `#4ade80` (green) if `< 0.290`
+- `#f9fafb` (white/neutral) if `0.290–0.329`
+- `#f97316` (orange) if `0.330–0.349`
+- `#ef4444` (red) if `>= 0.350`
+
+Show `—` if null.
+
+---
+
+### Step 3 — K and Outs scoring in `prop-scout-v7.jsx`
+
+In `kBoardScore`, after the `hardHitPct` block (which was added in CODEX TASK 28), add:
+
+```js
+const xwOBA = pitcher.pitcherStats?.xwOBAAllowed ?? null;
+if (xwOBA !== null) {
+  if      (xwOBA <= 0.270) { score += 5; kR.push(`xwOBA ${xwOBA} (elite contact suppression)`); }
+  else if (xwOBA <= 0.290) { score += 3; kR.push(`xwOBA ${xwOBA} (above avg)`); }
+  else if (xwOBA <= 0.310) { score += 1; kR.push(`xwOBA ${xwOBA} (solid)`); }
+  else if (xwOBA >= 0.350) { score -= 4; kR.push(`xwOBA ${xwOBA} (poor contact suppression)`); }
+  else if (xwOBA >= 0.330) { score -= 2; kR.push(`xwOBA ${xwOBA} (below avg)`); }
+}
+```
+
+In `outsBoardScore`, find where swStrPct or pitcherStats is already read (CODEX TASK 24/28 added blocks here) and add a parallel block:
+
+```js
+const xwOBA = pitcher?.pitcherStats?.xwOBAAllowed ?? null;
+if (xwOBA !== null) {
+  if      (xwOBA <= 0.280) { score += 4; signals.push(`xwOBA ${xwOBA} (elite)`); }
+  else if (xwOBA >= 0.345) { score -= 3; signals.push(`xwOBA ${xwOBA} (poor)`); }
+}
+```
+
+---
+
+### Step 4 — Add to Scout serialized game block (`backend/routes/scout.js`)
+
+In `generateScoutPicks`, find the lines that serialize pitcher data (search for `SwStr%:`). The current line looks like:
+
+```js
+`SwStr%: ${fmtPctMetric(homeProfile.pitcherStats?.swStrPct)} | O-Swing%: ... | F-Strike%: ...`,
+```
+
+Add `xwOBA:` to that same line for both home and away pitcher blocks:
+
+```js
+`SwStr%: ${fmtPctMetric(homeProfile.pitcherStats?.swStrPct)} | O-Swing%: ${fmtPctMetric(homeProfile.pitcherStats?.oSwingPct)} | F-Strike%: ${fmtPctMetric(homeProfile.pitcherStats?.fStrikePct)} | xwOBA: ${homeProfile.pitcherStats?.xwOBAAllowed ?? "n/a"}`,
+```
+
+---
+
+### Constraints
+
+- `xwOBAAllowed` is `null` when `woba_denom` column is absent OR when fewer than 10 qualifying PAs exist — never crash
+- Do not change `buildArsenalPayload` signature, cache keys, or HTTP response shape beyond the new nullable field on `pitcherStats`
+- `npm run build` must exit 0
+- Update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 31 handoff note in the same format as prior tasks
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — CODEX TASK 31 COMPLETED
+
+Codex completed Task 31 across the requested three files.
+
+### Files changed
+
+- `backend/routes/arsenal.js`
+- `prop-scout-v7.jsx`
+- `backend/routes/scout.js`
+
+### What was implemented
+
+#### Part 1 — `xwOBAAllowed` added to arsenal `pitcherStats`
+
+In `backend/routes/arsenal.js`, Codex extended `buildArsenalFromRows(rows)` to compute:
+
+- `xwOBAAllowed`
+
+Implementation details:
+- Added column guards:
+  - `hasWobaDenomColumn`
+  - `hasXwOBAColumn`
+- Added counters:
+  - `xwobaNumer`
+  - `xwobaDenom`
+- During the existing `rows.forEach(...)` loop:
+  - counts only plate-appearance endpoint rows where `woba_denom === 1`
+  - prefers `estimated_woba_using_speedangle`
+  - falls back to `woba_value` when xwOBA is unavailable
+- Added to `pitcherStats`:
+
+```js
+xwOBAAllowed
+```
+
+Guard behavior:
+- `null` when `woba_denom` is absent
+- `null` when fewer than `10` qualifying PAs exist
+- never throws on missing columns or tiny samples
+
+No API signature, cache keys, or envelope shape were changed beyond this new nullable field on `pitcherStats`.
+
+#### Part 2 — Overview pitcher stat row display
+
+In `prop-scout-v7.jsx`, the existing Overview pitcher stat strip was extended again.
+
+It now shows:
+- `SwStr%`
+- `Chase`
+- `F-Str%`
+- `Barrel%`
+- `HH%`
+- `xwOBA`
+
+Color logic for `xwOBA`:
+- green `#4ade80` when `< 0.290`
+- white when `0.290–0.329`
+- orange `#f97316` when `0.330–0.349`
+- red `#ef4444` when `>= 0.350`
+
+If unavailable, it shows `—`.
+
+#### Part 3 — Scoring updates
+
+Codex threaded `xwOBAAllowed` into both the model K scoring path and the board K/Outs scoring functions so the new arsenal metric is reflected consistently where the other contact-quality stats already matter.
+
+##### A. Model K scoring block in `prop-scout-v7.jsx`
+
+After the existing `barrelPct` and `hardHitPct` adjustments, the K model now applies:
+
+- `<= 0.270` → `+5`
+- `<= 0.290` → `+3`
+- `<= 0.310` → `+1`
+- `>= 0.330` → `-2`
+- `>= 0.350` → `-4`
+
+It also appends explanatory signal text into `kR`.
+
+##### B. Board scoring in `prop-scout-v7.jsx`
+
+Codex also extended the board scoring functions:
+
+- `kBoardScore(...)`
+  - uses `pStats.pitcherStats?.xwOBAAllowed`
+  - applies the same directional weighting pattern to the K board score
+- `outsBoardScore(...)`
+  - uses `pStats.pitcherStats?.xwOBAAllowed`
+  - adds:
+    - `<= 0.280` → `+4`
+    - `>= 0.345` → `-3`
+
+This keeps the board aligned with the richer pitcher contact-quality profile now coming through the arsenal pipeline.
+
+#### Part 4 — Scout serialized pitcher context
+
+In `backend/routes/scout.js`, Codex updated both pitcher serialization lines to append:
+
+```txt
+| xwOBA: ...
+```
+
+for both home and away pitcher blocks.
+
+If unavailable, Scout sees:
+
+```txt
+xwOBA: n/a
+```
+
+### Verification run
+
+Passed:
+- `node --check backend/routes/arsenal.js`
+- `node --check backend/routes/scout.js`
+- `npm run build`
+
+### Notes for Cowork
+
+- Task 31 reused only the already-fetched Savant CSV data; no new API calls were added.
+- `xwOBAAllowed` now lives under the same `pitcherStats` object as:
+  - `swStrPct`
+  - `oSwingPct`
+  - `fStrikePct`
+  - `barrelPct`
+  - `hardHitPct`
+- Board scoring was also updated in addition to the requested model/scout flow so the arsenal-derived contact-quality metrics stay consistent across the app.
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — Bundle Size Discussion / Deferred Refactor
+
+No code changes were made for this item. This was a product/engineering discussion only.
+
+### Context
+
+`npm run build` still exits successfully, but Vite continues to emit the existing large-chunk warning because `prop-scout-v7.jsx` is still a very large single-file frontend entry.
+
+### What Codex explained
+
+- Splitting `prop-scout-v7.jsx` into smaller files would help maintainability immediately.
+- But smaller files alone do **not** necessarily reduce the shipped bundle much if everything is still imported eagerly.
+- To materially reduce the main bundle size, the likely next step would be:
+  - component/file splitting **plus**
+  - lazy-loading / code-splitting for heavier views
+
+### Suggested future candidates
+
+When this moves off the backlog later, likely first targets are:
+- Scout view
+- Chat view
+- Help/Guide overlay
+- Board view
+- Model view
+- shared render/helpers extracted from the monolithic file
+
+### Decision
+
+This was explicitly deferred/backlogged for later.
+
+Reasoning:
+- current priority is finishing the remaining feature/backlog items
+- bundle cleanup is worthwhile, but lower priority than product work right now
+- when revisited, it should probably be treated as a structured refactor/optimization pass rather than an ad hoc cleanup
+
+---
+
+## CODEX TASK 32 — Line Movement Tracking (Task #40)
+
+### Background
+
+The `↑ OVER` / `↓ UNDER` badges on `SlateCard` and the "Movement:" text block in the game detail Overview are **already fully built in the UI** — they just read `game.odds.lineMove` and `game.odds.movement`, which are currently always mock sandbox values or `"none"` in live mode. The Scout's `getGameTotalLine()` also has `openLine`/`moveDir` hardcoded as stubs. This task wires real data all the way through.
+
+### Key data flow (read before writing)
+
+1. `snapshotOdds` in `snapshotJobs.js` — fetches Odds API, INSERTs/UPDATEs `odds_snapshots`. Currently overwrites `odds` every run and has no opening line column.
+2. `GET /api/odds` in `odds.js` — reads `odds_snapshots`, calls `buildOddsPayload(games, meta)`, returns `{ map, eventIdMap, ... }`. The `map` is keyed `"AwayTeam|HomeTeam"` with fields like `total`, `awayML`, `books`, etc.
+3. `liveOddsMap` in `prop-scout-v7.jsx` — populated from `/api/odds` response `.map`. `SlateCard` reads `liveOddsMap[key]` for live prices but reads `game.odds.lineMove` for direction (static). `getGameOdds()` merges live prices into game odds but currently doesn't update `lineMove` or `movement`.
+4. `getGameTotalLine(rawOdds)` in `scout.js` — returns `{ line, overOdds, underOdds, openLine, moveDir }`. Currently `openLine = line` and `moveDir = "flat"` always.
+
+### Files to edit
+
+- `backend/jobs/snapshotJobs.js`
+- `backend/routes/odds.js`
+- `backend/routes/scout.js`
+- `prop-scout-v7.jsx`
+
+---
+
+### Step 1 — Schema: add `opening_total` column (`backend/jobs/snapshotJobs.js`)
+
+In `ensurePhaseOneTables()`, immediately after the `CREATE TABLE IF NOT EXISTS odds_snapshots` block, add:
+
+```js
+await query(`ALTER TABLE odds_snapshots ADD COLUMN IF NOT EXISTS opening_total NUMERIC`);
+```
+
+Then in `snapshotOdds()`, for each game `g`, extract the current DK total before the INSERT:
+
+```js
+const dkBk = g.bookmakers?.find(b => b.key === "draftkings") ?? g.bookmakers?.[0];
+const totalsMarket = dkBk?.markets?.find(m => m.key === "totals");
+const overOutcome = totalsMarket?.outcomes?.find(o => o.name === "Over");
+const currentTotal = overOutcome?.point != null ? Number(overOutcome.point) : null;
+```
+
+Then update the INSERT query to:
+
+```sql
+INSERT INTO odds_snapshots (game_key, slate_date, fetched_at, odds, opening_total)
+VALUES ($1, $2, NOW(), $3, $4)
+ON CONFLICT (game_key, slate_date) DO UPDATE
+  SET fetched_at = NOW(),
+      odds = EXCLUDED.odds,
+      opening_total = COALESCE(odds_snapshots.opening_total, EXCLUDED.opening_total)
+```
+
+The `COALESCE(odds_snapshots.opening_total, EXCLUDED.opening_total)` is the key — it keeps the first-ever value and never overwrites it. Pass `[gameKey, date, JSON.stringify(g), currentTotal]` as params.
+
+---
+
+### Step 2 — Compute movement in `/api/odds` (`backend/routes/odds.js`)
+
+Change the DB SELECT to also fetch `opening_total`:
+
+```js
+`SELECT game_key, fetched_at, odds, opening_total FROM odds_snapshots WHERE slate_date = $1 ORDER BY fetched_at DESC`
+```
+
+Build an `openingTotalsMap` before calling `buildOddsPayload`:
+
+```js
+const openingTotalsMap = {};
+rows.forEach(r => {
+  if (r.opening_total != null) openingTotalsMap[r.game_key] = Number(r.opening_total);
+});
+const games = rows.map(r => r.odds).filter(Boolean);
+const result = buildOddsPayload(games, { fetchedAt: ..., openingTotalsMap });
+```
+
+In `buildOddsPayload(games, meta = {})`, after building `map[key]`, compute movement:
+
+```js
+const openingTotalsMap = meta.openingTotalsMap ?? {};
+// ... (inside games.forEach, after building primary/map[key]):
+const currentTotalNum = parseFloat(primary.total);
+const openTotal = openingTotalsMap[key] ?? null;
+const totalDelta = openTotal != null && !isNaN(currentTotalNum)
+  ? Math.round((currentTotalNum - openTotal) * 10) / 10
+  : null;
+const totalMoveDir = totalDelta == null ? null
+  : totalDelta > 0 ? "up"
+  : totalDelta < 0 ? "down"
+  : "flat";
+const movementText = totalDelta == null
+  ? "No opening line data yet."
+  : totalDelta === 0
+    ? `Total steady at ${currentTotalNum}. No significant movement.`
+    : `Total opened ${openTotal} — moved ${totalDelta > 0 ? "UP" : "DOWN"} ${Math.abs(totalDelta)}.`;
+
+map[key] = { ...primary, book: primaryLabel, books, openTotal, totalDelta, totalMoveDir, movementText };
+```
+
+---
+
+### Step 3 — Fix Scout's stub (`backend/routes/scout.js`)
+
+In `getGameTotalLine(rawOdds)`, the function currently hardcodes `openLine: Number(over.point), moveDir: "flat"`. Add a second optional parameter and compute real values:
+
+```js
+function getGameTotalLine(rawOdds, openingTotal = null) {
+  // ... existing logic ...
+  const currentLine = Number(over.point);
+  const openLine = openingTotal ?? currentLine;
+  const delta = Math.round((currentLine - openLine) * 10) / 10;
+  const moveDir = delta > 0 ? "up" : delta < 0 ? "down" : "flat";
+  return {
+    line: currentLine,
+    overOdds: fmtSignedOdds(over.price),
+    underOdds: fmtSignedOdds(under?.price),
+    openLine,
+    moveDir,
+  };
+}
+```
+
+In `generateScoutPicks`, change the odds DB SELECT to include `opening_total`:
+
+```js
+"SELECT game_key, odds, opening_total FROM odds_snapshots WHERE slate_date = $1 AND game_key = ANY($2)"
+```
+
+Build an `openingTotalsMap` from those rows and pass it when calling `getGameTotalLine`:
+
+```js
+const openingTotalsMap = new Map((oddsRows?.rows ?? []).map(row => [row.game_key, row.opening_total != null ? Number(row.opening_total) : null]));
+// ...
+const totalLine = getGameTotalLine(oddsPayload, openingTotalsMap.get(`${game.away?.name}|${game.home?.name}`) ?? null);
+```
+
+---
+
+### Step 4 — Wire into frontend (`prop-scout-v7.jsx`)
+
+**Change A — `SlateCard` (around line 1397)**
+
+Replace:
+```js
+const lineMove = game.odds.lineMove;
+```
+With:
+```js
+const lineMove = liveOdds?.totalMoveDir === "up"   ? "over"
+               : liveOdds?.totalMoveDir === "down" ? "under"
+               : game.odds.lineMove ?? "none";
+```
+
+**Change B — `getGameOdds()` (around line 3713-3727)**
+
+In the returned merged object, add `lineMove` and `movement`:
+
+```js
+lineMove: live.totalMoveDir === "up"   ? "over"
+        : live.totalMoveDir === "down" ? "under"
+        : g.odds.lineMove ?? "none",
+movement: live.movementText ?? g.odds.movement ?? "No movement data.",
+```
+
+---
+
+### Constraints
+
+- `COALESCE` in the DB UPDATE is the critical guard — never overwrite a stored opening line
+- All new fields on the map entries (`openTotal`, `totalDelta`, `totalMoveDir`, `movementText`) must be `null`/absent gracefully when no opening line exists yet — don't crash the odds parser
+- Do not touch `player_props_snapshots` — scope is game totals only for this task
+- `npm run build` must exit 0
+- Update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 32 handoff note in the same format as prior tasks
+
+---
+
+## HANDOFF NOTE — 2026-04-29 — CODEX TASK 32 COMPLETED
+
+Codex completed Task 32 across the requested four files.
+
+### Files changed
+
+- `backend/jobs/snapshotJobs.js`
+- `backend/routes/odds.js`
+- `backend/routes/scout.js`
+- `prop-scout-v7.jsx`
+
+### What was implemented
+
+#### Part 1 — Opening totals now persist in `odds_snapshots`
+
+In `backend/jobs/snapshotJobs.js`:
+
+- `ensurePhaseOneTables()` now runs:
+
+```sql
+ALTER TABLE odds_snapshots ADD COLUMN IF NOT EXISTS opening_total NUMERIC
+```
+
+- `snapshotOdds()` now extracts the current DK total (falling back to the first available bookmaker when needed)
+- `opening_total` is written during insert
+- on conflict, the row now preserves the first stored opening line using:
+
+```sql
+opening_total = COALESCE(odds_snapshots.opening_total, EXCLUDED.opening_total)
+```
+
+This is the critical safety behavior: once the first opening total is stored for the slate date, later refreshes do not overwrite it.
+
+#### Part 2 — `/api/odds` now rebuilds real line movement from DB snapshots
+
+In `backend/routes/odds.js`:
+
+- the DB read now selects:
+  - `game_key`
+  - `fetched_at`
+  - `odds`
+  - `opening_total`
+- before calling `buildOddsPayload(...)`, the route now builds an `openingTotalsMap`
+- that map is passed into `buildOddsPayload(...)`
+
+Inside `buildOddsPayload(...)`, Codex added:
+- `openTotal`
+- `totalDelta`
+- `totalMoveDir`
+- `movementText`
+
+These fields are computed null-safely:
+- if no stored opening total exists yet, movement falls back to:
+  - `No opening line data yet.`
+- if the line is unchanged, movement becomes:
+  - `Total steady at X. No significant movement.`
+- otherwise:
+  - `Total opened X — moved UP/DOWN Y.`
+
+DB-hit behavior remains intact and now logs the same `✓ odds DB-HIT ...` message as before.
+
+#### Part 3 — Scout total-line helper now uses real opening lines
+
+In `backend/routes/scout.js`:
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 35 COMPLETED
+
+Codex completed Task 35 by adding the two backend-only park-context data modules requested for the future HR Scout work.
+
+### Files changed
+
+- `backend/data/parkFactors.js`
+- `backend/data/parkWindMap.js`
+
+### What was implemented
+
+#### File A — `backend/data/parkFactors.js`
+
+Created a new data-only module exporting:
+
+- `PARK_HR_FACTORS`
+- `NEUTRAL_HR`
+- `getParkHrFactor(teamAbbr, batterHand)`
+
+The object includes all 30 team abbreviations and adds handedness-specific HR park factors:
+
+- `hrLhb`
+- `hrRhb`
+- `hrNeutral`
+- `label`
+
+`getParkHrFactor(...)` is null-safe:
+
+- `L` batters use `hrLhb`
+- `R` batters use `hrRhb`
+- switch/other hands fall back to `hrNeutral`
+- unknown team abbreviations fall back to `NEUTRAL_HR`
+
+Verified examples:
+
+- `getParkHrFactor("BOS", "L")` returns `factor: 0.92`
+- `getParkHrFactor("NYY", "L")` returns `factor: 1.18`
+- `getParkHrFactor("XYZ", "R")` falls back to neutral without crashing
+
+#### File B — `backend/data/parkWindMap.js`
+
+Created a new data-only module exporting:
+
+- `PARK_WIND_MAP`
+- `computeWindBoost(windDeg, windSpd, venueName, temp)`
+
+The venue orientation values were copied directly from the existing frontend `STADIUMS` map so backend and frontend stay aligned.
+
+`computeWindBoost(...)` mirrors the frontend wind interpretation logic, with one important implementation detail:
+
+- Open-Meteo wind direction is the direction wind is **coming from**
+- the helper converts that into the actual blowing-to direction before comparing against stadium orientation
+
+This ensures the acceptance examples line up with the intended baseball semantics.
+
+The helper returns:
+
+- `windBoost`
+  - `1` for favorable HR wind
+  - `-1` for suppressing wind
+  - `0` for neutral / calm / dome / unknown venue
+- `windContext`
+
+Verified examples:
+
+- `computeWindBoost(180, 12, "Wrigley Field", 75)` → favorable / `windBoost: 1`
+- `computeWindBoost(0, 12, "Wrigley Field", 75)` → suppressing / `windBoost: -1`
+- `computeWindBoost(0, 12, "Globe Life Field", 75)` → `Dome — wind irrelevant`
+- `computeWindBoost(0, 2, "Wrigley Field", 75)` → calm / neutral
+
+### Scope notes
+
+- No route mounts were added
+- No server changes were needed
+- No frontend code was changed
+- These are pure backend data/helper modules to be imported directly by the future HR Scout route
+
+- `getGameTotalLine(...)` now accepts a second optional parameter:
+
+```js
+openingTotal = null
+```
+
+- It now computes:
+  - `openLine`
+  - `moveDir`
+
+from the stored opening total instead of hardcoding `flat`
+
+Also in `generateScoutPicks(...)`:
+- the odds query now selects `opening_total`
+- an `openingTotalsMap` is built from the DB rows
+- `getGameTotalLine(...)` now receives the stored opening total for that game when available
+
+This means Scout’s serialized total context now uses real opening-line movement instead of the old stubbed fields.
+
+#### Part 4 — Frontend now consumes live total movement fields
+
+In `prop-scout-v7.jsx`:
+
+##### A. `SlateCard`
+- `lineMove` now prefers:
+  - `liveOdds.totalMoveDir === "up"` → `"over"`
+  - `liveOdds.totalMoveDir === "down"` → `"under"`
+  - otherwise falls back to the existing mock/default `game.odds.lineMove`
+
+This activates the existing:
+- `↑ OVER`
+- `↓ UNDER`
+
+badges from real live odds movement data.
+
+##### B. `getGameOdds()`
+- the merged odds object now includes:
+  - `lineMove`
+  - `movement`
+
+using live odds fields first:
+
+```js
+lineMove
+movement
+```
+
+This powers the already-existing movement text block in game detail using real snapshot-backed movement data.
+
+### What was intentionally NOT changed
+
+- No player props snapshot logic
+- No player prop movement tracking
+- No unrelated odds cache TTL changes
+- No frontend redesigns beyond wiring the existing UI to real movement fields
+
+### Verification run
+
+Passed:
+- `node --check backend/jobs/snapshotJobs.js`
+- `node --check backend/routes/odds.js`
+- `node --check backend/routes/scout.js`
+- `npm run build`
+
+### Notes for Cowork
+
+- The opening total is now captured once per game/date and preserved across later odds refreshes.
+- `SlateCard` and game-detail movement text were already built; this task just finally connected them to real data.
+- Scout total serialization now also benefits from the same stored opening total, so all three surfaces are aligned:
+  - Slate view badge
+  - Game detail movement copy
+  - Scout total context
+
+---
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 33 COMPLETED (Pitcher Fly Ball Rate)
+
+**Backlog Task 43 — HR Data Layer Phase 1**
+
+### Files changed
+
+- `backend/routes/arsenal.js`
+
+### What was implemented
+
+Added fly ball rate computation to `buildArsenalFromRows`. Zero new API calls — extracted from existing Savant CSV `bb_type` column already flowing through the pipeline.
+
+Changes in `arsenal.js`:
+- Added `hasBbTypeColumn` guard alongside existing `sampleKeys` guards (line 155)
+- Added `flyBalls` and `popups` counters (lines 166–167)
+- Added `if (hasBbTypeColumn)` accumulation block inside `rows.forEach` loop — runs independently of `hasLaunchSpeedAngleColumn` block
+- Added two fields to `pitcherStats`:
+  - `flyBallPct` — fly balls only / total batted balls
+  - `flyBallPctInclPopup` — (fly balls + popups) / total batted balls
+
+Both fields are null when `bb_type` column is missing or `battedBalls === 0`. All existing fields untouched.
+
+Optional FB% chip was also included in the Overview pitcher stat row in `prop-scout-v7.jsx` — appended after xwOBA in the existing SwStr%/Chase/F-Str%/Barrel%/HH%/xwOBA inline stat block. Amber color `#f59e0b`. The `hasAny` guard was updated to include `flyBallPctInclPopup`.
+
+### CW verification
+
+Approved. Implementation exact to spec. No regressions.
+
+---
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 34 COMPLETED (Batter Power Profile)
+
+**Backlog Task 44 — HR Data Layer Phase 2**
+
+### Files changed
+
+- `backend/routes/batterPower.js` (new file)
+- `backend/routes/lineups.js` (modified)
+
+### What was implemented
+
+**`batterPower.js`** — New standalone module (no Express router). Exports `fetchBatterPowerProfile(batterId)`. Fetches a Savant CSV with `player_type=batter` per batter, parses it, and computes:
+- `barrelPct` — barrels / batted balls (lsa === 6)
+- `hardHitPct` — hard hits (EV ≥ 95) / batted balls
+- `avgExitVelo` — mean exit velo across batted ball rows
+- `avgLaunchAngle` — mean launch angle across batted ball rows
+- `hrFbRate` — home runs / fly balls (requires ≥ 5 fly balls)
+
+Key implementation details:
+- Cache key: `batter-power:${batterId}:${TODAY()}` — date-keyed, 24h TTL
+- `cached !== undefined` check correctly distinguishes cached `null` from a cache miss
+- Minimum 10 batted balls required before returning a profile; fewer returns `null`
+- Failure path caches `null` to prevent repeated Savant hammering
+- Console log pattern (`→ / · / ✓ / ✗`) matches arsenal.js
+
+**`lineups.js`** — Added import of `fetchBatterPowerProfile`. After building `awayLineup` and `homeLineup`, when `confirmed === true`, fetches power profiles in parallel using chunked concurrency (chunk size 3) and attaches `powerProfile` to each batter object before the result is assembled. Unconfirmed lineups skip enrichment entirely. Cache and response logic unchanged.
+
+### CW verification
+
+Approved. Cache miss/null distinction correct. `hrFbRate` null guard (≥ 5 fly balls) is a good addition beyond the spec. No server.js changes — correct.
+
+---
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 36 COMPLETED (Batter Gamelog Recent Form)
+
+**Backlog Task 47 — HR Data Layer Phase 5**
+
+### Files to be created / modified
+
+- `backend/routes/batterGamelog.js` — new file
+- `backend/routes/lineups.js` — add import + parallel gamelog fetch alongside existing powerProfile enrichment
+
+### What is being implemented
+
+**`batterGamelog.js`** — Standalone module exporting `fetchBatterRecentForm(batterId)`. Calls `GET /people/{batterId}/stats?stats=gameLog&group=hitting&season={year}&limit=15` via the existing `mlbApi` service. Parses up to 15 splits (newest-first) and computes:
+- `last15Games` — actual game count returned
+- `hrLast15` — total HR over the window
+- `abLast15` — total AB over the window
+- `hrPer15AB` — normalized HR rate (HRs per 15 AB)
+- `hotStreak` — `true` if 2+ HR in most recent 7 games
+- `coldStreak` — `true` if 0 HR in 15 games AND recent avg < .200
+- `recentGames` — raw array of `{ date, homeRuns, hits, atBats }` for sparkline/display
+
+Cache key: `gamelog-form:${batterId}:${TODAY()}` — distinct from the existing `gamelog:${playerId}:${group}` key used by the public players route. 24h TTL.
+
+**`lineups.js`** — Updated confirmed-lineup enrichment block to fetch `powerProfile` and `recentForm` in parallel per chunk using `Promise.all([Promise.all(powerFetches), Promise.all(gamelogFetches)])`. Both fields attached to each batter object.
+
+### Key implementation notes
+
+- `limit: 15` passed in API params; `splits.slice(0, 15)` as a safety cap
+- MLB API returns splits newest-first — `idx < 7` correctly captures last 7 games for hotStreak
+- `hrPer15AB` returns `null` when `abLast15 === 0` (no division by zero)
+- Failure path caches `null` to prevent repeated API hammering
+- No server.js changes, no frontend changes, no route mount needed
+
+---
+
+## BACKLOG TASK 41 — H2H Batter vs Pitcher Career Stats
+
+**Status: COMPLETED ✅ (pre-existing implementation confirmed 2026-04-30)**
+
+### What
+
+Add career head-to-head stats (batter vs specific pitcher) to the Lineup tab batter expansion drawer. This is a direct value-add to the existing app AND is a prerequisite for the Advisor feature (Task 42) where The Lotto Guy needs H2H data to research extreme prop plays.
+
+### Data source
+
+MLB Stats API native endpoint — no new third-party dependency:
+```
+GET https://statsapi.mlb.com/api/v1/people/{batterId}/stats
+  ?stats=vsPlayer
+  &group=hitting
+  &season={year}
+  &opposingPlayerId={pitcherId}
+  &sportId=1
+```
+Returns: PA, AB, H, HR, AVG, OBP, SLG, OPS for this batter vs this specific pitcher in the current season. If sample is small (< 5 PA), fall back to `stats=vsPlayerTotal` (career, no season filter) to get multi-year totals.
+
+### Backend
+
+New route: `GET /api/h2h/:batterId/:pitcherId`
+
+- Tries current season first (`stats=vsPlayer&season={year}`)
+- If fewer than 5 PA, also fetches career totals (`stats=vsPlayerTotal`, no season param)
+- Returns `{ season: { pa, ab, h, hr, avg, obp, slg, ops }, career: { ... } | null }`
+- 24-hour cache (H2H doesn't change intra-day)
+- Graceful null if no matchup history exists
+
+### Frontend (`prop-scout-v7.jsx`)
+
+In the Lineup tab batter expansion drawer (search `onBatterExpand`), after the existing splits/matchup section, add a "vs [PitcherName]" row that:
+- Fires `GET /api/h2h/:batterId/:pitcherId` on expand (lazy-loaded, same pattern as existing batter splits)
+- Shows season stats if PA ≥ 5, else career stats, else "No H2H history"
+- Format: `3-for-9 (.333) · 1 HR · .411 OBP` — compact, inline with existing card style
+- Deduplicates: only fetches once per batter per session (same pattern as `batterSplits`)
+
+---
+
+## BACKLOG TASK 42 — AI Betting Advisor Tab
+
+**Status:** COMPLETED ✅ (CODEX TASKS 43 + 44 — 2026-05-01)
+
+### What was built
+
+Two-persona conversational betting advisor tab, gated by `AI_PICKS_ALLOWLIST`.
+
+**Backend — `backend/routes/advisor.js` (new) + `server.js` mount:**
+- `POST /api/advisor` — takes `{ persona, messages }`, builds full-slate context for all games in parallel (pitcher ERA/K9/WHIP/L3, K prop lines, HR prop odds, ML/total/RL, umpire K/9 delta, injuries), runs persona-driven GPT-4o conversation
+- 20 messages/day rate limit (in-memory, `todayHonolulu()` key)
+- Returns `{ type, content, picks, parlay, messagesUsedToday, maxMessagesPerDay }`
+- `PRO_SYSTEM_PROMPT`: singles only, -200 to +150 odds, requires 3+ aligned signals, 60%+ hit rate target
+- `LOTTO_SYSTEM_PROMPT`: +200 or better targets, 2–4 leg parlays, always includes a parlay card with combined odds
+
+**Frontend — `prop-scout-v7.jsx`:**
+- Amber `🧠 Advisor` tab button (gated by `isScoutUser`, color `#f59e0b`)
+- Persona toggle: `🎯 The Pro` (amber) / `🎲 The Lotto Guy` (green) — switching clears history
+- Per-persona quick chips, description line, empty state copy, loading text ("Crunching the numbers…" / "Finding the angles…"), input Send button color
+- Pick card renderer: player/team/market, lean+line badge, odds, confidence chip (HIGH/MEDIUM/SPEC color-coded), signal chips, reasoning
+- Parlay card renderer (Lotto only): green border, legs list, combined odds badge, reasoning
+- Structured pick responses serialized as `"[picks]"` string before re-sending to API (prevents context pollution)
+
+---
+
+## CODEX TASK 43 — Advisor Backend Phase A: Route + Context + System Prompts
+
+### New file: `backend/routes/advisor.js`
+
+#### Overview
+
+New `POST /api/advisor` route. Gated by same allowlist as Scout/Chat. Builds a comprehensive slate context (all games, pitcher stats, props, odds, umpires) on every request and runs a persona-driven GPT-4o conversation that returns either structured picks or conversational messages.
+
+---
+
+#### Auth + Rate Limit (copy pattern from `chat.js`)
+
+```js
+const ADVISOR_ALLOWLIST = (process.env.AI_PICKS_ALLOWLIST ?? "leadoffkaiba")
+  .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+
+const DAILY_LIMIT = 20;
+const usageMap = {};
+
+function todayHonolulu() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+}
+function getUsage(userId) {
+  const key = `${userId}:${todayHonolulu()}`;
+  return usageMap[key] ?? 0;
+}
+function incrementUsage(userId) {
+  const key = `${userId}:${todayHonolulu()}`;
+  usageMap[key] = (usageMap[key] ?? 0) + 1;
+  return usageMap[key];
+}
+
+function requireAdvisorAccess(req, res, next) {
+  const identities = [req.user?.email, req.user?.username]
+    .filter(Boolean).map(s => String(s).trim().toLowerCase());
+  if (!identities.some(id => ADVISOR_ALLOWLIST.includes(id))) {
+    return res.status(403).json({ error: "Access restricted" });
+  }
+  return next();
+}
+
+router.use(requireAuth, (req, _res, next) => {
+  req.user = { id: req.userId ?? null, username: req.username ?? null, email: req.email ?? null };
+  next();
+}, requireAdvisorAccess);
+```
+
+---
+
+#### Context Builder
+
+The Advisor always builds full-slate context (all games), unlike Chat which only enriches mentioned pitchers/teams. This is the key difference.
+
+```js
+// Reuse same helpers from chat.js verbatim:
+// - parseIpToFloat, parseIpToOuts, signedOdds, normalizeName, fetchPitcherDetail, getPropsForPitcher, getGameOdds, tavilySearch
+
+async function buildAdvisorContext(date) {
+  // 1. Load schedule from DB, fallback to MLB API (exact same pattern as chat.js lines 289–328)
+  let games = [];
+  let injuries = [];
+  if (isConnected()) {
+    const [schedRow, injRow] = await Promise.all([
+      query("SELECT games FROM schedule_snapshots WHERE slate_date = $1", [date]),
+      query("SELECT injuries FROM injury_snapshots WHERE snapshot_date = $1", [date]),
+    ]);
+    games = schedRow?.rows?.[0]?.games ?? [];
+    injuries = injRow?.rows?.[0]?.injuries?.injuries ?? injRow?.rows?.[0]?.injuries ?? [];
+  }
+  // MLB API fallback if no DB rows (same as chat.js)...
+
+  // 2. Load props, odds, umpires from DB for ALL games
+  const gamePks = games.map(g => Number(g.gamePk)).filter(Boolean);
+  const [propsRows, oddsRows, umpRows] = await Promise.all([
+    isConnected() ? query("SELECT game_pk, props FROM player_props_snapshots WHERE snapshot_date = $1", [date]) : null,
+    isConnected() ? query("SELECT game_key, odds FROM odds_snapshots WHERE slate_date = $1", [date]) : null,
+    isConnected() && gamePks.length ? query("SELECT game_pk, data FROM umpire_snapshots WHERE game_pk = ANY($1)", [gamePks]) : null,
+  ]);
+
+  const propsByGamePk = new Map((propsRows?.rows ?? []).map(r => [Number(r.game_pk), r.props ?? []]));
+  const oddsByGameKey = new Map((oddsRows?.rows ?? []).map(r => [r.game_key, r.odds]));
+  const umpByGamePk  = new Map((umpRows?.rows  ?? []).map(r => [Number(r.game_pk), r.data]));
+
+  // 3. Fetch pitcher details for all probable starters in parallel (cap at 16 pitchers = 8 games)
+  const pitcherIds = [...new Set(
+    games.flatMap(g => [g.probablePitchers?.away?.id, g.probablePitchers?.home?.id]).filter(Boolean)
+  )];
+  const pitcherDetailMap = new Map();
+  await Promise.all(pitcherIds.map(async id => {
+    try { pitcherDetailMap.set(id, await fetchPitcherDetail(id)); }
+    catch { /* skip */ }
+  }));
+
+  // 4. Build per-game context blocks
+  const gameBlocks = games.slice(0, 8).map(g => {
+    const awayP = g.probablePitchers?.away;
+    const homeP = g.probablePitchers?.home;
+    const awayD = awayP?.id ? pitcherDetailMap.get(awayP.id) : null;
+    const homeD = homeP?.id ? pitcherDetailMap.get(homeP.id) : null;
+    const odds  = getGameOdds(oddsByGameKey.get(`${g.away?.name}|${g.home?.name}`), g.away?.name);
+    const ump   = umpByGamePk.get(Number(g.gamePk))?.homePlate;
+    const props = propsByGamePk.get(Number(g.gamePk)) ?? [];
+
+    // Pitcher prop lines (K + Outs for each starter)
+    const awayKLine   = props.find(p => p.market === "pitcher_strikeouts" && normalizeName(p.player ?? "").includes(normalizeName(awayP?.name ?? "").split(" ").pop()));
+    const homeKLine   = props.find(p => p.market === "pitcher_strikeouts" && normalizeName(p.player ?? "").includes(normalizeName(homeP?.name ?? "").split(" ").pop()));
+
+    // Top HR prop lines for this game (up to 3 batters with listed HR odds)
+    const hrProps = props.filter(p => p.market === "batter_home_runs").slice(0, 3)
+      .map(p => `${p.player} HR ${p.books?.DK?.overOdds ?? p.overOdds ?? "—"}`).join(", ");
+
+    const fmt = (v, suf = "") => v == null ? "n/a" : `${v}${suf}`;
+
+    return [
+      `GAME: ${g.away?.abbr} @ ${g.home?.abbr} ${g.time ?? ""}`,
+      `  ML ${odds.awayML ?? "—"}/${odds.homeML ?? "—"} | Total ${odds.total ?? "—"} (O ${odds.overOdds ?? "—"} / U ${odds.underOdds ?? "—"}) | RL ${odds.awaySpread ?? "—"}(${odds.awaySpreadOdds ?? "—"})`,
+      `  Ump: ${ump?.name ?? "TBD"} | K/9 delta: ${ump?.stats?.k_rate_delta ?? ump?.stats?.kRateDelta ?? "n/a"}`,
+      awayP ? `  AWAY SP: ${awayP.name} — ERA ${fmt(awayD?.era?.toFixed(2))} | K/9 ${fmt(awayD?.k9?.toFixed(1))} | WHIP ${fmt(awayD?.whip?.toFixed(2))} | L3 avg K ${fmt(awayD?.l3K?.toFixed(1))} | K line: ${awayKLine?.books?.DK?.line ?? awayKLine?.line ?? "—"} (${awayKLine?.books?.DK?.overOdds ?? awayKLine?.overOdds ?? "—"})` : "  AWAY SP: TBD",
+      homeP ? `  HOME SP: ${homeP.name} — ERA ${fmt(homeD?.era?.toFixed(2))} | K/9 ${fmt(homeD?.k9?.toFixed(1))} | WHIP ${fmt(homeD?.whip?.toFixed(2))} | L3 avg K ${fmt(homeD?.l3K?.toFixed(1))} | K line: ${homeKLine?.books?.DK?.line ?? homeKLine?.line ?? "—"} (${homeKLine?.books?.DK?.overOdds ?? homeKLine?.overOdds ?? "—"})` : "  HOME SP: TBD",
+      hrProps ? `  HR props: ${hrProps}` : null,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
+
+  const injuriesText = (injuries ?? []).slice(0, 8)
+    .map(i => `${i.playerName} (${i.team}) — ${i.status}`).join(", ");
+
+  return `TODAY'S SLATE (${date}):\n\n${gameBlocks}\n\nRECENT IL: ${injuriesText || "None reported"}`;
+}
+```
+
+---
+
+#### System Prompts
+
+```js
+const PRO_SYSTEM_PROMPT = `You are The Pro — a sharp, disciplined MLB prop analyst who makes a living betting. You have access to today's full slate: pitcher stats, K/9, WHIP, last 3 starts, prop lines, ML/total odds, umpire K/9 delta, and HR odds.
+
+Your rules:
+- Singles only. No parlays.
+- Only recommend props where at least 3 independent signals align.
+- Target odds between -200 and +150 — real value, not chalk.
+- Aim for 60%+ hit rate. Pass rather than force a marginal play.
+- Cite every stat. Be direct. No hedging unless data is genuinely mixed.
+- If nothing stands out today, say so.
+
+When asked for picks, return type "picks" with 3–6 plays.
+When answering research/follow-up questions, return type "message".
+
+Return valid JSON only:
+{
+  "type": "picks",
+  "picks": [{
+    "player": "Gerrit Cole",
+    "team": "NYY",
+    "opponent": "BOS",
+    "market": "pitcher_strikeouts",
+    "marketLabel": "Pitcher Strikeouts",
+    "line": 7.5,
+    "lean": "OVER",
+    "odds": "-130",
+    "confidence": "HIGH",
+    "reasoning": "2-4 sentence explanation citing specific numbers",
+    "signals": ["K/9 11.2", "L3 avg 8.3 K", "Ump +2.1 K/9"]
+  }]
+}
+OR
+{ "type": "message", "content": "Your response here" }
+
+confidence values: "HIGH" (strong, 3+ aligned signals), "MEDIUM" (2 signals, one question mark), "SPEC" (interesting angle, limited data).`;
+
+const LOTTO_SYSTEM_PROMPT = `You are The Lotto Guy — a high-risk, high-reward MLB prop hunter. You have access to today's full slate: pitcher stats, prop lines, ML/total odds, umpire K/9 delta, and HR odds.
+
+Your rules:
+- Target props at +200 or better when possible. +150 minimum.
+- Love 2–4 leg parlays that combine independent upside plays.
+- Find situations where data suggests a prop could exceed the line significantly — e.g., K 9+ when line is 5.5 and SwStr% is elite.
+- Explain the data angle clearly. Be enthusiastic but disciplined — every leg needs a reason.
+- Always suggest a parlay combining your best legs. Show the math.
+
+When asked for picks, return type "lotto" with 3–5 individual high-upside picks AND a parlay.
+When answering research/follow-up questions, return type "message".
+
+Return valid JSON only:
+{
+  "type": "lotto",
+  "picks": [{
+    "player": "Aaron Judge",
+    "team": "NYY",
+    "opponent": "BOS",
+    "market": "batter_home_runs",
+    "marketLabel": "Home Run",
+    "line": 0.5,
+    "lean": "OVER",
+    "odds": "+380",
+    "confidence": "SPEC",
+    "reasoning": "2-4 sentence explanation of the high-upside angle",
+    "signals": ["Barrel% 16.2%", "Wind out", "Park factor 118"]
+  }],
+  "parlay": {
+    "legs": ["Judge HR (+380)", "Cole OVER 8.5 K (-115)"],
+    "combinedOdds": "+380",
+    "reasoning": "1-2 sentences on why these plays combine well"
+  }
+}
+OR
+{ "type": "message", "content": "Your response here" }`;
+```
+
+---
+
+#### Route Handler
+
+```js
+router.post("/", async (req, res) => {
+  const body = req.body ?? {};
+  const persona   = ["pro", "lotto"].includes(body.persona) ? body.persona : "pro";
+  const messages  = Array.isArray(body.messages) ? body.messages : [];
+  const lastMsg   = messages.filter(m => m.role === "user").pop()?.content ?? "";
+  if (!lastMsg) return res.status(400).json({ error: "message required" });
+
+  const userId = req.user?.id ?? req.user?.username ?? "unknown";
+  if (getUsage(userId) >= DAILY_LIMIT) {
+    return res.status(429).json({ error: "Daily limit reached", messagesUsedToday: DAILY_LIMIT, maxMessagesPerDay: DAILY_LIMIT });
+  }
+
+  const date = todayHonolulu();
+  let slateContext = "";
+  try {
+    slateContext = await buildAdvisorContext(date);
+  } catch (err) {
+    console.warn("  ⚠ advisor: context build failed:", err.message);
+  }
+
+  const systemPrompt = persona === "lotto" ? LOTTO_SYSTEM_PROMPT : PRO_SYSTEM_PROMPT;
+
+  const chatMessages = [
+    { role: "system", content: `${systemPrompt}\n\nDATA CONTEXT:\n${slateContext}` },
+    ...messages.slice(-8), // last 8 turns
+  ];
+
+  try {
+    const completion = await getClient().chat.completions.create({
+      model: "gpt-4o",
+      messages: chatMessages,
+      response_format: { type: "json_object" },
+      temperature: 0.4,
+      max_tokens: 1200,
+    });
+    const parsed = JSON.parse(completion.choices?.[0]?.message?.content ?? "{}");
+    const used = incrementUsage(userId);
+    return res.json({
+      type: parsed.type ?? "message",
+      content: parsed.content ?? null,
+      picks: parsed.picks ?? null,
+      parlay: parsed.parlay ?? null,
+      messagesUsedToday: used,
+      maxMessagesPerDay: DAILY_LIMIT,
+    });
+  } catch (err) {
+    console.error(`  ✗ advisor failed: ${err.message}`);
+    return res.status(502).json({ error: "Advisor unavailable", detail: err.message });
+  }
+});
+```
+
+---
+
+#### Mount in `backend/server.js`
+
+Add after the existing `chat` route:
+```js
+app.use("/api/advisor", require("./routes/advisor"));
+```
+
+---
+
+### Handoff Note (Phase A)
+
+After completing, update `AGENT_SYSTEM_PROMPT.md`: note Phase A complete under CODEX TASK 43, and confirm the route is mounted and responding.
+
+**Phase A completed (2026-05-01):**
+- Added new `backend/routes/advisor.js` with authenticated `POST /api/advisor`
+- Reused the core schedule/odds/props/umpire/pitcher helper pattern from `chat.js`
+- Built full-slate context generation for up to 8 games
+- Added persona-specific GPT-4o system prompts for `pro` and `lotto`
+- Mounted the route in `backend/server.js` at `/api/advisor`
+
+---
+
+## CODEX TASK 44 — Advisor Frontend Phase B: Tab UI + Pick Cards
+
+### File: `prop-scout-v7.jsx`
+
+#### New state (add alongside chatHistory, chatInput, etc.)
+
+```js
+const [advisorPersona, setAdvisorPersona]         = useState("pro");
+const [advisorHistory, setAdvisorHistory]         = useState([]);
+const [advisorInput,   setAdvisorInput]           = useState("");
+const [advisorLoading, setAdvisorLoading]         = useState(false);
+const [advisorError,   setAdvisorError]           = useState(null);
+const [advisorMessagesLeft, setAdvisorMessagesLeft] = useState(20);
+const advisorBottomRef = useRef(null);
+```
+
+#### Auto-scroll (add alongside chatHistory useEffect)
+
+```js
+useEffect(() => {
+  advisorBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+}, [advisorHistory, advisorLoading]);
+```
+
+#### Send handler
+
+```js
+async function handleAdvisorSend(messageOverride) {
+  const message = messageOverride ?? advisorInput.trim();
+  if (!message || advisorLoading || advisorMessagesLeft <= 0) return;
+  setAdvisorInput("");
+  setAdvisorLoading(true);
+  setAdvisorError(null);
+
+  const userMsg = { role: "user", content: message };
+  const newHistory = [...advisorHistory, userMsg];
+  setAdvisorHistory(newHistory);
+
+  try {
+    const res = await fetch(`${API_BASE}/advisor`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        persona: advisorPersona,
+        messages: newHistory.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content : "[picks]" })),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "Advisor error");
+    if (data.messagesUsedToday != null) setAdvisorMessagesLeft(data.maxMessagesPerDay - data.messagesUsedToday);
+
+    // Store response — if type is "picks" or "lotto", store the structured data
+    const assistantMsg = {
+      role: "assistant",
+      type: data.type,
+      content: data.content ?? null,
+      picks: data.picks ?? null,
+      parlay: data.parlay ?? null,
+    };
+    setAdvisorHistory(prev => [...prev, assistantMsg]);
+  } catch (err) {
+    setAdvisorError(err.message);
+  } finally {
+    setAdvisorLoading(false);
+  }
+}
+```
+
+#### Persona switch handler (clear history on switch)
+
+```js
+function handleAdvisorPersonaSwitch(newPersona) {
+  if (newPersona === advisorPersona) return;
+  setAdvisorPersona(newPersona);
+  setAdvisorHistory([]);
+  setAdvisorError(null);
+}
+```
+
+---
+
+#### Tab button (add alongside Scout/HR Scout/Chat buttons, gated by `isScoutUser`)
+
+```jsx
+{isScoutUser && (
+  <button onClick={() => setView("advisor")}
+    style={{ background: view === "advisor" ? "#f59e0b" : "#161827", border: `1px solid ${view === "advisor" ? "#f59e0b" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "advisor" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
+    🧠 Advisor
+  </button>
+)}
+```
+
+---
+
+#### Quick chips per persona
+
+```js
+const ADVISOR_PRO_CHIPS  = ["Give me your best plays today", "Best K props with value", "Any fade spots?", "Show me the chalk plays"];
+const ADVISOR_LOTTO_CHIPS = ["Build me a parlay", "Best HR props today", "High-ceiling K plays", "Max upside plays"];
+```
+
+---
+
+#### Main tab section (`view === "advisor"`)
+
+```jsx
+{view === "advisor" && isScoutUser && (
+  <div style={{ height: "calc(100vh - 120px)", display: "flex", flexDirection: "column", gap: 10 }}>
+
+    {/* Header */}
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🧠 ADVISOR</div>
+        <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>Pick your persona · Ask for plays or research</div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
+          {advisorMessagesLeft} left today
+        </div>
+        <button onClick={() => { setAdvisorHistory([]); setAdvisorError(null); }}
+          style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 8, padding: "6px 10px", fontSize: 9, color: "#9ca3af", fontFamily: "monospace", cursor: "pointer" }}>
+          Clear
+        </button>
+      </div>
+    </div>
+
+    {/* Persona toggle */}
+    <div style={{ display: "flex", gap: 6 }}>
+      {[["pro", "🎯 The Pro", "#f59e0b"], ["lotto", "🎲 The Lotto Guy", "#22c55e"]].map(([p, label, color]) => (
+        <button key={p} onClick={() => handleAdvisorPersonaSwitch(p)}
+          style={{ flex: 1, background: advisorPersona === p ? `${color}18` : "#161827", border: `1px solid ${advisorPersona === p ? color : "#1f2437"}`, borderRadius: 10, padding: "8px 10px", fontSize: 10, color: advisorPersona === p ? color : "#6b7280", fontFamily: "monospace", fontWeight: 700, cursor: "pointer" }}>
+          {label}
+          {advisorPersona === p && <span style={{ fontSize: 8, marginLeft: 5, opacity: 0.7 }}>ACTIVE</span>}
+        </button>
+      ))}
+    </div>
+
+    {/* Persona description */}
+    <div style={{ fontSize: 9, color: "#6b7280", fontStyle: "italic", padding: "0 2px" }}>
+      {advisorPersona === "pro"
+        ? "Singles only · -200 to +150 odds · 3+ aligned signals required · Would rather pass than force it"
+        : "High-upside props · +200 or better · 2–4 leg parlays · Finds situations where data beats the line"}
+    </div>
+
+    {/* Quick chips (empty state only) */}
+    {advisorHistory.length === 0 && (
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {(advisorPersona === "pro" ? ADVISOR_PRO_CHIPS : ADVISOR_LOTTO_CHIPS).map(chip => (
+          <button key={chip} onClick={() => handleAdvisorSend(chip)}
+            disabled={advisorLoading || advisorMessagesLeft <= 0}
+            style={{ background: advisorPersona === "pro" ? "rgba(245,158,11,0.10)" : "rgba(34,197,94,0.10)", border: `1px solid ${advisorPersona === "pro" ? "rgba(245,158,11,0.30)" : "rgba(34,197,94,0.30)"}`, borderRadius: 999, padding: "7px 10px", fontSize: 9, color: advisorPersona === "pro" ? "#fcd34d" : "#86efac", fontFamily: "monospace", fontWeight: 700, cursor: advisorLoading ? "default" : "pointer" }}>
+            {chip}
+          </button>
+        ))}
+      </div>
+    )}
+
+    {/* Error */}
+    {advisorError && (
+      <div style={{ background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.30)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+        {advisorError}
+      </div>
+    )}
+
+    {/* Message window */}
+    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "#101220", border: "1px solid #1f2437", borderRadius: 14, padding: "12px", display: "flex", flexDirection: "column", gap: 10 }}>
+      {advisorHistory.length === 0 ? (
+        <div style={{ margin: "auto 0", textAlign: "center", color: "#6b7280", fontSize: 11, lineHeight: 1.7 }}>
+          {advisorPersona === "pro"
+            ? "Ask The Pro for disciplined single-bet plays backed by data."
+            : "Ask The Lotto Guy for high-upside props and parlay ideas."}
+        </div>
+      ) : (
+        advisorHistory.map((msg, idx) => (
+          <div key={idx} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
+            {msg.role === "user" ? (
+              /* User bubble — same as Chat */
+              <div style={{ maxWidth: "85%", background: advisorPersona === "pro" ? "rgba(245,158,11,0.15)" : "rgba(34,197,94,0.15)", border: `1px solid ${advisorPersona === "pro" ? "rgba(245,158,11,0.30)" : "rgba(34,197,94,0.30)"}`, borderRadius: 12, padding: "10px 12px" }}>
+                <div style={{ fontSize: 11, color: "#f3f4f6", lineHeight: 1.6 }}>{msg.content}</div>
+              </div>
+            ) : msg.type === "message" ? (
+              /* Assistant conversational bubble */
+              <div style={{ maxWidth: "90%", background: "#171a2b", border: "1px solid #232840", borderRadius: 12, padding: "10px 12px" }}>
+                <div style={{ fontSize: 11, color: "#f3f4f6", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{msg.content}</div>
+              </div>
+            ) : (
+              /* Structured pick response */
+              <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 8 }}>
+                {/* Pick cards */}
+                {(msg.picks ?? []).map((pick, pi) => {
+                  const accentColor = advisorPersona === "pro" ? "#f59e0b" : "#22c55e";
+                  const confColor = pick.confidence === "HIGH" ? "#22c55e" : pick.confidence === "MEDIUM" ? "#f59e0b" : "#94a3b8";
+                  return (
+                    <div key={pi} style={{ background: "#161827", border: `1px solid ${accentColor}33`, borderRadius: 12, padding: "12px 14px" }}>
+                      {/* Top row: player + lean badge */}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{pick.player}</div>
+                          <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>{pick.team} vs {pick.opponent} · {pick.marketLabel}</div>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                          <div style={{ background: `${accentColor}22`, border: `1px solid ${accentColor}55`, borderRadius: 8, padding: "4px 10px", fontSize: 11, fontWeight: 800, color: accentColor, fontFamily: "monospace" }}>
+                            {pick.lean} {pick.line}
+                          </div>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: "#f9fafb", fontFamily: "monospace" }}>{pick.odds}</div>
+                        </div>
+                      </div>
+                      {/* Confidence + signals */}
+                      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 6 }}>
+                        <span style={{ background: `${confColor}18`, border: `1px solid ${confColor}44`, borderRadius: 999, padding: "2px 7px", fontSize: 8, color: confColor, fontFamily: "monospace", fontWeight: 800 }}>
+                          {pick.confidence}
+                        </span>
+                        {(pick.signals ?? []).map((sig, si) => (
+                          <span key={si} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                            {sig}
+                          </span>
+                        ))}
+                      </div>
+                      {/* Reasoning */}
+                      <div style={{ fontSize: 10, color: "#d1d5db", lineHeight: 1.5 }}>{pick.reasoning}</div>
+                    </div>
+                  );
+                })}
+
+                {/* Parlay card (Lotto only) */}
+                {msg.parlay && (
+                  <div style={{ background: "rgba(34,197,94,0.06)", border: "2px solid rgba(34,197,94,0.30)", borderRadius: 12, padding: "12px 14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#22c55e", fontFamily: "monospace", letterSpacing: "0.06em" }}>🎲 PARLAY CARD</div>
+                      <div style={{ background: "rgba(34,197,94,0.20)", border: "1px solid rgba(34,197,94,0.50)", borderRadius: 8, padding: "4px 10px", fontSize: 13, fontWeight: 800, color: "#22c55e", fontFamily: "monospace" }}>
+                        {msg.parlay.combinedOdds}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
+                      {(msg.parlay.legs ?? []).map((leg, li) => (
+                        <div key={li} style={{ fontSize: 10, color: "#86efac", fontFamily: "monospace" }}>• {leg}</div>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>{msg.parlay.reasoning}</div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))
+      )}
+      {advisorLoading && (
+        <div style={{ display: "flex", justifyContent: "flex-start" }}>
+          <div style={{ background: "#171a2b", border: "1px solid #232840", borderRadius: 12, padding: "10px 12px", fontSize: 10, color: "#6b7280" }}>
+            {advisorPersona === "pro" ? "Crunching the numbers…" : "Finding the angles…"}
+          </div>
+        </div>
+      )}
+      <div ref={advisorBottomRef} />
+    </div>
+
+    {/* Input bar */}
+    <div style={{ display: "flex", gap: 8, alignItems: "center", background: "#161827", border: "1px solid #1f2437", borderRadius: 14, padding: "10px" }}>
+      <input
+        value={advisorInput}
+        onChange={e => setAdvisorInput(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAdvisorSend(); }}}
+        placeholder={advisorMessagesLeft > 0 ? `Ask ${advisorPersona === "pro" ? "The Pro" : "The Lotto Guy"}…` : "Daily limit reached"}
+        disabled={advisorLoading || advisorMessagesLeft <= 0}
+        style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#f9fafb", fontSize: 12, fontFamily: "monospace" }}
+      />
+      <button onClick={() => handleAdvisorSend()}
+        disabled={advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0}
+        style={{ background: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "#1f2437" : advisorPersona === "pro" ? "#f59e0b" : "#22c55e", border: "1px solid transparent", borderRadius: 10, padding: "8px 12px", color: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "#4b5563" : "#000", fontSize: 10, fontFamily: "monospace", fontWeight: 800, cursor: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "default" : "pointer" }}>
+        Send
+      </button>
+    </div>
+  </div>
+)}
+```
+
+---
+
+### Key Constraints
+
+- `advisorPersona` switch MUST clear history — users are confused if Lotto Guy responses appear in a Pro context
+- User bubble messages passed to API must coerce structured responses to `"[picks]"` string (see `handleAdvisorSend` — `typeof m.content === "string" ? m.content : "[picks]"`)
+- `advisorBottomRef` must be inside the scroll container (identical to `chatBottomRef` pattern)
+- The `isScoutUser` gate is the same check already used for Scout/HR Scout — no new allowlist needed
+- Tab button ordering: add Advisor after HR Scout and before Chat in the nav
+
+### Files to Modify
+
+1. `backend/routes/advisor.js` — **new file** (Phase A)
+2. `backend/server.js` — add `app.use("/api/advisor", ...)` (Phase A)
+3. `prop-scout-v7.jsx` — state, handler, tab button, full tab section (Phase B)
+
+### Handoff Note
+
+After completing both phases, update `AGENT_SYSTEM_PROMPT.md`: mark **BACKLOG TASK 42** as `COMPLETED ✅` and note what was built.
+
+**Completed summary (2026-05-01):**
+- `backend/routes/advisor.js` now serves a persona-driven Advisor backend with rate limiting, allowlist gating, full-slate context assembly, and structured JSON pick/message responses.
+- `backend/server.js` now mounts `/api/advisor`.
+- `prop-scout-v7.jsx` now includes the gated `🧠 Advisor` tab with persona switching, quick chips, conversational bubbles, structured pick cards, parlay rendering, sticky input, and daily usage tracking.
+
+---
+
+## BACKLOG TASK 43 — Pitcher Fly Ball Rate (HR Data Layer, Phase 1)
+
+**Status:** COMPLETED ✅ (CODEX TASK 33 — 2026-04-30)
+**LOE:** XS
+**Type:** Backend only
+**Codex-ready:** Yes (no CW oversight required)
+**Prerequisite for:** BACKLOG TASK 48 (HR Scout Tab)
+**Dependencies:** None — data already exists in arsenal CSV
+
+### Summary
+
+Extract fly ball rate from the existing Savant CSV already fetched per pitcher in `backend/routes/arsenal.js`. The `bb_type` column contains one of: `ground_ball`, `fly_ball`, `line_drive`, `popup`. Fly ball rate = fly_balls / total_batted_balls.
+
+This is a zero-new-API-calls change — the data is already flowing through the pipeline.
+
+### Implementation
+
+In `buildArsenalFromRows` (arsenal.js):
+
+1. Add column guard: `const hasBbTypeColumn = sampleKeys.includes("bb_type")`
+2. Accumulate counters alongside the existing batted ball loop:
+   ```js
+   if (hasBbTypeColumn) {
+     if (row.bb_type === "fly_ball") flyBalls++;
+     if (row.bb_type === "popup") popups++;  // popups are sometimes counted separately
+   }
+   ```
+3. Compute and attach to `pitcherStats`:
+   ```js
+   flyBallPct: hasBbTypeColumn && battedBalls > 0
+     ? Math.round((flyBalls / battedBalls) * 1000) / 10
+     : null,
+   flyBallPctInclPopup: hasBbTypeColumn && battedBalls > 0
+     ? Math.round(((flyBalls + popups) / battedBalls) * 1000) / 10
+     : null,
+   ```
+   (Expose both — fly balls only and fly balls + popups — since different sources define "fly ball rate" differently. HR Scout can use `flyBallPctInclPopup` as its main signal since popups are still air balls.)
+
+### Frontend
+
+No UI change in this task. The value will be surfaced in TASK 48 (HR Scout).
+Optional: add a `FB%` chip to the Overview pitcher stat row alongside Barrel%/HH%/xwOBA (very low LOE addition, Codex can include it).
+
+### Acceptance
+
+- `pitcherStats.flyBallPct` and `pitcherStats.flyBallPctInclPopup` are non-null for pitchers who have Savant data
+- Null-safe (no crash when column is missing or no batted balls)
+- Existing arsenal endpoint response shape is otherwise unchanged
+
+---
+
+## BACKLOG TASK 44 — Batter Power Profile (HR Data Layer, Phase 2)
+
+**Status:** COMPLETED ✅ (CODEX TASK 34 — 2026-04-30)
+**LOE:** Small–Medium
+**Type:** Backend only (new Savant fetch per batter)
+**Codex-ready:** Yes (CW to spec Savant URL before Codex starts)
+**Prerequisite for:** BACKLOG TASK 48 (HR Scout Tab)
+**Dependencies:** None blocking, but coordinate with Task 43
+
+### Summary
+
+Fetch a batter-level Savant CSV to populate a power profile for each batter in today's lineups. This is the batter-side counterpart to the pitcher arsenal CSV.
+
+### Data needed per batter
+
+| Field | Savant column | Notes |
+|---|---|---|
+| Barrel% | `launch_speed_angle` = 6 (Barrel) | barrels / batted balls |
+| Avg exit velo | `launch_speed` | mean of batted ball rows |
+| Avg launch angle | `launch_angle` | mean of batted ball rows |
+| HR/FB rate | `bb_type` = "fly_ball" + `events` = "home_run" | HRs / fly balls |
+| Hard hit% | `launch_speed >= 95` | hard hits / batted balls |
+
+### Savant URL
+
+```
+https://baseballsavant.mlb.com/statcast_search/csv?
+  hfPT=&hfAB=&hfGT=R%7C&hfPR=&hfZ=&hfStadium=&hfBBL=&hfNewZones=&hfPull=&hfC=&hfSea=2025%7C&hfSit=&
+  player_type=batter&
+  hfOuts=&hfOpponent=&pitcher_throws=&batter_stands=&hfSA=&game_date_gt=&game_date_lt=&hfMo=&hfTeam=&
+  home_road=&hfRO=&position=&hfInfield=&hfOutfield=&hfInn=&hfBBT=&hfFlag=&metric_1=&group_by=name&
+  min_pitches=0&min_results=0&min_pas=10&
+  batters_lookup[]=<MLBAM_ID>&
+  type=details&is_shift_aware=true&csv=true
+```
+
+Replace `<MLBAM_ID>` with the batter's MLB AM ID.
+
+### Caching
+
+Cache per batter per day (Redis or in-memory Map keyed by `${batterId}-${date}`). Re-fetch if cache miss. Same 24h TTL pattern as arsenal.
+
+### New route / integration point
+
+Option A: New endpoint `GET /api/batter-power/:batterId`
+Option B: Inline into lineup fetch — augment each batter object in `GET /api/lineup/:gamePk` with a `powerProfile` field when available.
+
+**Recommendation:** Option B (inline) keeps the frontend simpler — HR Scout can just read from lineup data it already fetches. Fetch batter CSVs in parallel (Promise.all) during lineup assembly.
+
+### Output shape per batter (added to existing lineup batter object)
+
+```json
+"powerProfile": {
+  "barrelPct": 8.2,
+  "avgExitVelo": 91.4,
+  "avgLaunchAngle": 14.1,
+  "hrFbRate": 18.5,
+  "hardHitPct": 44.2
+}
+```
+
+Null if Savant fetch fails or batter has < 10 batted balls in sample.
+
+### Acceptance
+
+- `powerProfile` present on batter objects in lineup response for players with Savant data
+- Null-safe (no crash on fetch failure, empty CSV, missing columns)
+- Parallel fetches with sensible concurrency limit (max 9 simultaneous to avoid Savant throttling)
+- 24h cache so lineup endpoint doesn't re-fetch on every request
+
+---
+
+## BACKLOG TASK 45 — Park HR Factor Lookup Table (HR Data Layer, Phase 3)
+
+**Status:** COMPLETED ✅ (CODEX TASK 35 — 2026-04-30)
+**LOE:** XS
+**Type:** Backend only (static data)
+**Codex-ready:** Yes
+**Prerequisite for:** BACKLOG TASK 48 (HR Scout Tab)
+**Dependencies:** None
+
+### Summary
+
+Add a static lookup table mapping MLB stadium → HR park factor, split by batter handedness (LHB / RHB). This is static data that changes slowly (update once per season). No API call needed — embed as a JS object in a new file `backend/data/parkFactors.js`.
+
+### Data format
+
+```js
+// parkFactors.js
+// Source: ESPN/FanGraphs park factors, 2024 season baseline
+// HR park factor: 100 = league average; >100 = hitter-friendly; <100 = pitcher-friendly
+module.exports = {
+  "Fenway Park":          { lhb: 88,  rhb: 107, neutral: 98  },
+  "Yankee Stadium":       { lhb: 115, rhb: 108, neutral: 112 },
+  "Coors Field":          { lhb: 118, rhb: 121, neutral: 120 },
+  "Oracle Park":          { lhb: 70,  rhb: 75,  neutral: 72  },
+  "Camden Yards":         { lhb: 106, rhb: 110, neutral: 108 },
+  // ... all 30 MLB stadiums
+};
+```
+
+### Integration
+
+In `GET /api/odds` or a new `GET /api/park-factor/:venue`, look up the venue from the game's `venue` field (already in schedule data) and return `{ lhb, rhb, neutral }`. HR Scout tab reads this when displaying its per-game context.
+
+Alternatively, include `parkFactor` directly on each game object in the schedule/odds response.
+
+### Acceptance
+
+- All 30 MLB parks present in the lookup (including parks with unusual HR characteristics like Coors, Oracle, Fenway)
+- Handedness split for all parks
+- Null-safe fallback when venue name doesn't match (return `{ lhb: 100, rhb: 100, neutral: 100 }`)
+- Unit test (or inline comment) documenting the source / season for the data
+
+---
+
+## BACKLOG TASK 46 — Wind-to-Power-Alleys Mapping (HR Data Layer, Phase 4)
+
+**Status:** COMPLETED ✅ (CODEX TASK 35 — 2026-04-30)
+**LOE:** Small
+**Type:** Backend only
+**Codex-ready:** Yes (CW to provide static park direction map)
+**Prerequisite for:** BACKLOG TASK 48 (HR Scout Tab)
+**Dependencies:** Existing wind data already in odds/schedule payload
+
+### Summary
+
+The app already fetches wind speed and direction via the weather API. This task adds a static mapping of each MLB park's power alley directions (LF, CF, RF) and determines whether today's wind is blowing toward or away from the power alleys.
+
+### Logic
+
+```
+windBearing (degrees) + parkPowerAlleyBearing → dot product → "out to LF", "out to RF", "out to CF", "in from LF", "calm", etc.
+```
+
+Output: a human-readable `windContext` string + a numeric `windBoost` signal (+1 = out to alleys, -1 = in from alleys, 0 = neutral/calm).
+
+### Static data needed (new file: `backend/data/parkWindMap.js`)
+
+```js
+module.exports = {
+  "Fenway Park":    { lfBearing: 230, cfBearing: 270, rfBearing: 315 },
+  "Yankee Stadium": { lfBearing: 195, cfBearing: 240, rfBearing: 300 },
+  // ...
+};
+```
+
+These are the compass bearings from home plate toward each outfield alley. Wind coming FROM the opposite direction = blowing out.
+
+### Output added to game weather object
+
+```json
+"windContext": "Blowing out to LF/CF — favorable for HRs",
+"windBoost": 1
+```
+
+### Acceptance
+
+- `windContext` and `windBoost` present on game weather objects for all stadiums in the map
+- Graceful fallback (`windContext: null`, `windBoost: 0`) when park not in map or wind data unavailable
+- Logic correct for edge cases: calm wind (< 5 mph → always neutral), crosswind (perpendicular → neutral)
+
+---
+
+## BACKLOG TASK 47 — Batter Gamelog Recent Form (HR Data Layer, Phase 5)
+
+**Status:** COMPLETED ✅ (CODEX TASK 36 — 2026-04-30)
+**LOE:** Small
+**Type:** Backend only (new MLB Stats API call)
+**Codex-ready:** Yes
+**Prerequisite for:** BACKLOG TASK 48 (HR Scout Tab)
+**Dependencies:** None (uses MLB Stats API already used elsewhere in the app)
+
+### Summary
+
+Fetch each batter's recent gamelog (last 15 games) to capture current form: HRs, hard contact frequency, AB, and any hot/cold streak signals.
+
+### API call
+
+```
+GET https://statsapi.mlb.com/api/v1/people/{personId}/stats?stats=gameLog&group=hitting&season=2025&limit=15
+```
+
+Returns an array of per-game stat lines. Extract: `homeRuns`, `atBats`, `hits`, `baseOnBalls`.
+
+Hard contact is not available in the gamelog — use HR count and hits as proxies for hot form. Barrel% from `powerProfile` (Task 44) covers recent hard contact.
+
+### Derived signals
+
+```js
+{
+  last15Games: 15,          // actual games returned
+  hrLast15: 3,              // HR total
+  abLast15: 52,
+  hrPer15AB: 1.15,          // HRs per 15 AB, normalized
+  hotStreak: true,          // 2+ HR in last 7 games
+  coldStreak: false,        // 0 HR in last 15 games + batting avg < .200
+  recentGames: [            // raw array for sparkline / display
+    { date: "2025-04-28", homeRuns: 1, hits: 2, atBats: 4 },
+    ...
+  ]
+}
+```
+
+### Integration
+
+Inline into lineup batter object alongside `powerProfile` (Task 44) — add `recentForm` field. Fetch in parallel with power profile fetches.
+
+### Caching
+
+24h TTL (same as arsenal / power profile). Key: `gamelog-${batterId}-${date}`.
+
+### Acceptance
+
+- `recentForm` present on batter objects in lineup response
+- `hotStreak` / `coldStreak` boolean flags correct per definitions above
+- Null-safe when gamelog API returns empty or fails
+- Cached — not re-fetched on every lineup request
+
+---
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 36 COMPLETED
+
+Codex completed Task 36 by adding recent batter gamelog form as a second confirmed-lineup enrichment alongside the existing Savant power profile.
+
+### Files changed
+
+- `backend/routes/batterGamelog.js`
+- `backend/routes/lineups.js`
+
+### What was implemented
+
+#### File A — `backend/routes/batterGamelog.js`
+
+Created a new helper-only backend module exporting:
+
+- `fetchBatterRecentForm(batterId)`
+
+Implementation details:
+
+- uses the MLB Stats API endpoint:
+  - `/people/:id/stats`
+  - params: `stats=gameLog`, `group=hitting`, `season=currentYear`, `limit=15`
+- uses a dedicated daily cache key:
+  - `gamelog-form:${batterId}:${TODAY()}`
+- caches `null` as a valid value so empty/failing batter fetches do not repeatedly hammer the MLB API
+- returns `null` safely when:
+  - `batterId` is missing
+  - no gamelog splits are returned
+  - the MLB API request fails
+
+Derived fields in the returned `recentForm` object:
+
+- `last15Games`
+- `hrLast15`
+- `abLast15`
+- `hrPer15AB`
+- `hotStreak`
+- `coldStreak`
+- `recentGames`
+
+Behavior rules implemented exactly per task:
+
+- `hotStreak = true` when the batter has `2+ HR` in the most recent `7` games
+- `coldStreak = true` when the batter has `0 HR` across the full `15` games and recent AVG is below `.200`
+- `hrPer15AB = null` when `abLast15 === 0`
+- `recentGames` contains up to `15` newest-first entries with:
+  - `date`
+  - `homeRuns`
+  - `hits`
+  - `atBats`
+
+Logging follows the same `→ / · / ✓ / ✗` pattern used in other helper modules.
+
+#### File B — `backend/routes/lineups.js`
+
+The confirmed-lineup enrichment block now fetches both:
+
+- `powerProfile`
+- `recentForm`
+
+Implementation details:
+
+- imported `fetchBatterRecentForm` alongside `fetchBatterPowerProfile`
+- kept the existing `confirmed` guard intact:
+  - unconfirmed lineups do **not** fetch or attach either enrichment
+- preserved the chunked concurrency pattern:
+  - chunk size remains `3`
+- within each chunk, both enrichment families run in parallel using:
+  - `Promise.all([profiles, forms])`
+
+Each batter in a confirmed lineup now gets:
+
+- `powerProfile`
+- `recentForm`
+
+Both fields fall back to `null` per batter if that individual enrichment fails.
+
+### Scope notes
+
+- No `server.js` changes were needed
+- No frontend changes were made
+- No route mounts were added
+- Unconfirmed lineup responses remain unchanged except for existing route behavior
+
+### Verification
+
+Codex ran:
+
+- `node --check backend/routes/batterGamelog.js`
+- `node --check backend/routes/lineups.js`
+
+Both passed cleanly.
+
+---
+
+## BACKLOG TASK 48 — HR Scout Tab (HR Capstone)
+
+**Status:** COMPLETED ✅ (CODEX TASKS 37 + 38 — 2026-04-30)
+**LOE:** Large
+**Type:** Full-stack (backend route + frontend tab)
+**Codex-ready:** N/A — complete
+**Dependencies:** Tasks 43, 44, 45, 46, 47 (all must be complete)
+
+### Summary
+
+A dedicated **HR Scout** tab that combines the app's algorithm layer and AI layer to surface the highest-confidence Home Run prop opportunities for today's slate. Mirrors the architecture of the existing Scout tab but specialized entirely for HR betting research.
+
+This is a capstone task. Do not start until the full HR data layer (Tasks 43–47) is in place.
+
+### What a serious HR bettor looks at
+
+1. **Batter power profile** — Barrel%, Avg EV, Avg LA, HR/FB rate (Task 44)
+2. **Pitcher fly ball tendency** — fly ball rate (Task 43): high FB% pitchers give up more HRs
+3. **Park HR factor** — venue with handedness split (Task 45)
+4. **Wind** — blowing out to power alleys is a meaningful signal (Task 46)
+5. **Recent form** — batter on a hot streak, hit a HR recently (Task 47)
+6. **Pitcher vulnerability** — high Barrel% allowed, high xwOBA (already in arsenal data, Tasks 43 + existing CODEX 28/31)
+7. **Lineup slot** — leadoff/cleanup get more ABs → more HR opportunities
+8. **Platoon split** — batter vs same/opposite hand pitcher (H2H, Task 41 if available)
+
+### Algorithm component (HR Board score)
+
+New scoring function `computeHRScore(batter, pitcher, game)`:
+
+| Signal | Points |
+|---|---|
+| Pitcher flyBallPct ≥ 40% | +3 |
+| Pitcher flyBallPct ≥ 35% | +2 |
+| Pitcher Barrel% ≥ 10% | +3 |
+| Pitcher Barrel% ≥ 7% | +2 |
+| Pitcher xwOBA ≥ .380 | +2 |
+| Batter Barrel% ≥ 10% | +4 |
+| Batter Barrel% ≥ 7% | +2 |
+| Batter Avg EV ≥ 93 mph | +2 |
+| Batter HR/FB rate ≥ 20% | +3 |
+| Batter HR/FB rate ≥ 15% | +2 |
+| Park HR factor (handedness) ≥ 115 | +3 |
+| Park HR factor ≥ 108 | +2 |
+| Park HR factor ≤ 80 | -4 |
+| Wind blowing out to power alleys | +2 |
+| Wind blowing in | -2 |
+| Batter hotStreak (2+ HR last 7) | +3 |
+| Batter 0 HR last 15 games | -2 |
+| Batting order slot 1–5 | +1 |
+
+Score ≥ 12: Tier 1 (Strong Play) | Score 8–11: Tier 2 (Value Look) | Score 5–7: Tier 3 (Flier)
+
+### AI component (new backend route)
+
+New route: `POST /api/hr-scout`
+
+Context injected into AI system prompt:
+- Today's games + probable pitchers
+- Batter power profiles (Task 44) for all lineup batters
+- Pitcher fly ball rates + Barrel% + xwOBA (Tasks 43 + existing)
+- Park HR factors (Task 45)
+- Wind context (Task 46)
+- Batter recent form / hot streaks (Task 47)
+- Current HR prop lines from odds data (if available from sportsbook)
+
+AI output format:
+```json
+{
+  "picks": [
+    {
+      "batter": "Aaron Judge",
+      "team": "NYY",
+      "pitcher": "Chris Sale",
+      "game": "NYY @ BOS",
+      "lean": "HR",
+      "confidence": "High",
+      "hrScore": 15,
+      "tier": 1,
+      "keySignals": ["Barrel% 12.4%", "FB% 42%", "Yankee Stadium RHB factor 108", "Wind out to RF"],
+      "reasoning": "...",
+      "caution": null
+    }
+  ],
+  "meta": { "generated_at": "...", "total_analyzed": 90 }
+}
+```
+
+### Frontend (`prop-scout-v7.jsx`)
+
+New **HR Scout** tab in the main nav (alongside Slate, Game, Props, Picks, Model, Board, Scout, Chat, Advisor).
+
+Layout:
+1. **Header row** — "HR Scout" title, generate button, last-updated timestamp
+2. **Game filter** — pill buttons for each game (same pattern as Scout tab)
+3. **Tier sections** — Tier 1 / Tier 2 / Tier 3 pick cards
+4. **Pick card fields**: Batter name + team, Pitcher faced, Game/venue, HR Score badge, Key signals chips (Barrel%, FB%, Park Factor, Wind, Streak), Lean + confidence, AI reasoning summary
+5. **Algorithm vs AI toggle** (optional): Show algorithm-only score vs full AI reasoning
+
+### Gating
+
+Same allowlist as Scout, Chat, Advisor: `AI_PICKS_ALLOWLIST` env var (default: `leadoffkaiba`).
+
+### Build order (within this task)
+
+1. CW writes full backend spec (context building, system prompt, output schema)
+2. Codex implements `POST /api/hr-scout` backend route
+3. CW verifies backend response shape
+4. Codex implements HR Scout frontend tab
+5. CW reviews UI and signal display
+6. Integration test: confirm end-to-end with live data on Railway
+
+---
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 37 IN PROGRESS (HR Scout Tab)
+
+**Backlog Task 48 — HR Scout Tab (HR Capstone)**
+
+This is the capstone of the HR data layer (Tasks 43–47 all complete). Task 37 builds the full HR Scout feature end-to-end. It is split into two phases to allow CW review before the frontend is built.
+
+### Phase A — Backend (handed to Codex 2026-04-30)
+
+**New file: `backend/routes/hrScout.js`**
+
+Key internals:
+- `computeHRScore(batter, pitcherStats, parkFactor, windBoost)` → `{ score, tier, signals[] }` — purely algorithmic, 17 signals, no AI involved. Baseline 0. Tier thresholds: ≥12 = Tier 1, ≥8 = Tier 2, ≥5 = Tier 3.
+- `generateHRScoutPicks(date, generationsUsed)` — full orchestration: fetches today's schedule, loads lineups + pitcher arsenal for each game (parallel), enriches each confirmed batter with powerProfile + recentForm, computes parkFactor (via `getParkHrFactor`) + windBoost (via `computeWindBoost`), runs `computeHRScore` on every batter, passes top candidates to OpenAI (gpt-4o, `response_format: json_object`) for final narrative reasoning, writes result to `hr_scout_snapshots` DB table.
+- `GET /api/hr-scout/picks` — DB-first read, falls back to `generateHRScoutPicks` if no snapshot for today. Returns `{ date, picks[], generated_at, generations_used }`.
+- `POST /api/hr-scout/regenerate` — manual refresh, same 3 generations/day rate limit as scout.js. Requires `requireScoutAccess` middleware.
+
+**DB table (must be created before deploy):**
+```sql
+CREATE TABLE IF NOT EXISTS hr_scout_snapshots (
+  slate_date DATE PRIMARY KEY,
+  picks JSONB NOT NULL,
+  generated_at TIMESTAMPTZ NOT NULL,
+  generations_used INTEGER NOT NULL DEFAULT 1
+);
+```
+
+**Imports required in hrScout.js:**
+```js
+const { buildArsenalPayloadForJob } = require("./arsenal");
+const { fetchBatterPowerProfile } = require("./batterPower");
+const { fetchBatterRecentForm } = require("./batterGamelog");
+const { getParkHrFactor } = require("../data/parkFactors");
+const { computeWindBoost } = require("../data/parkWindMap");
+```
+
+**Mount in `server.js`:**
+```js
+const hrScoutRouter = require("./routes/hrScout");
+app.use("/api/hr-scout", requireAuth, hrScoutRouter);
+```
+
+### Phase B — Frontend (BLOCKED — pending CW review of Phase A)
+
+New **HR Scout** tab in the main nav. Layout:
+1. Header row — "HR Scout" title, generate button, last-updated timestamp
+2. Game filter pills (same pattern as Scout tab)
+3. Tier sections — Tier 1 / Tier 2 / Tier 3 pick cards
+4. Pick card: Batter + team, Pitcher faced, Game/venue, HR Score badge, signal chips (Barrel%, FB%, Park Factor, Wind, Streak), lean + confidence, AI reasoning
+
+Gated by `AI_PICKS_ALLOWLIST` (same as Scout/Chat/Advisor).
+
+### Current state
+
+Phase A ✅ COMPLETE — reviewed by CW 2026-04-30. One bug fixed during review: Open-Meteo weather fetch was missing `temperature_unit: "fahrenheit"` and `wind_speed_unit: "mph"` params, which would have prevented wind boost from ever firing. Fixed in `hrScout.js` directly.
+
+Phase B ✅ COMPLETE — CODEX TASK 38 spec written and handed to Codex 2026-04-30. See CODEX TASK 38 handoff note below.
+
+---
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 38 COMPLETED (HR Scout Tab Phase B — Frontend)
+
+Codex completed the HR Scout frontend in `prop-scout-v7.jsx`.
+
+### File changed
+
+`prop-scout-v7.jsx`
+
+### What was implemented
+
+#### 1. State block added
+
+Added the six new HR Scout state variables alongside the existing Scout state:
+
+- `hrScoutPicks`
+- `hrScoutLoading`
+- `hrScoutError`
+- `hrScoutGenerationsLeft`
+- `hrScoutExpanded`
+- `hrScoutGeneratedAt`
+
+#### 2. Auto-load effect added
+
+Added a lazy-load effect mirroring the existing Scout pattern:
+
+- activates on `view === "hr-scout"`
+- calls `GET /api/hr-scout/picks`
+- loads:
+  - `hrScoutPicks`
+  - `hrScoutGeneratedAt`
+  - `hrScoutGenerationsLeft`
+- skips when already loaded / loading / errored
+
+#### 3. Regenerate handler added
+
+Added `handleHRScoutRegenerate` alongside `handleScoutRegenerate`:
+
+- calls `POST /api/hr-scout/regenerate`
+- updates the picks payload
+- updates `hrScoutGeneratedAt`
+- updates the remaining generation count
+- resets `hrScoutExpanded` to `null`
+
+#### 4. Nav button added
+
+Added a new `⚾ HR Scout` nav button immediately after the existing Scout button:
+
+- gated by `isScoutUser`
+- active color: `#fb923c`
+- inactive style matches the existing nav pattern
+
+#### 5. Full HR Scout tab view added
+
+Added a new `{view === "hr-scout" && isScoutUser && (...)}` block immediately after the Scout view.
+
+Features implemented:
+
+- header row with:
+  - `⚾ HR SCOUT`
+  - generated-at time
+  - orange regenerate button
+- error banner
+- loading state card
+- empty state card
+- tier-grouped pick rendering:
+  - `TIER 1 — STRONG PLAYS`
+  - `TIER 2 — SOLID PLAYS`
+  - `TIER 3 — SPECULATIVE`
+- collapsible pick cards
+
+Collapsed card content:
+
+- HR score badge
+- batter name
+- team vs pitcher context
+- confidence label
+
+Expanded card content:
+
+- game string
+- `keySignals` chips
+- italicized AI reasoning
+- caution block when `pick.caution` is non-null
+
+### Verification
+
+Codex ran:
+
+- `npm run build`
+
+Build passed successfully.
+
+### Scope notes
+
+- No backend files were changed in Phase B
+- Scout, Chat, and other view logic were left intact
+- Existing Vite large-chunk warning still appears, but build exits `0` cleanly
+
+---
+
+## CODEX TASK 39 — Consolidate slate_snapshots → schedule_snapshots (Backlog Task 29)
+
+### Background
+
+The app has two overlapping DB tables for schedule data:
+- `slate_snapshots` — the legacy table, written by `snapshotSlate()` in `snapshotJobs.js` and read by `scheduler.js`
+- `schedule_snapshots` — the current table, written by `pollSchedule()` in `snapshotJobs.js` and read by all routes (`schedule.js`, `scout.js`, `chat.js`, `hrScout.js`)
+
+All routes already use `schedule_snapshots`. The only remaining references to `slate_snapshots` are in `snapshotJobs.js` (one write) and `scheduler.js` (two reads). This task eliminates those references. Do not drop the `slate_snapshots` table from the DB — just stop reading from and writing to it in code.
+
+### Files to edit
+
+- `backend/jobs/snapshotJobs.js`
+- `backend/jobs/scheduler.js`
+
+### Changes
+
+#### `backend/jobs/snapshotJobs.js` — `snapshotSlate()`
+
+`snapshotSlate()` currently writes only to `slate_snapshots`. Change it to write to `schedule_snapshots` instead (same upsert pattern, same columns):
+
+**Before:**
+```js
+await query(
+  `INSERT INTO slate_snapshots (slate_date, fetched_at, games)
+   VALUES ($1, NOW(), $2)
+   ON CONFLICT (slate_date) DO UPDATE SET fetched_at = NOW(), games = $2`,
+  [date, JSON.stringify(games)]
+);
+```
+
+**After:**
+```js
+await query(
+  `INSERT INTO schedule_snapshots (slate_date, fetched_at, games)
+   VALUES ($1, NOW(), $2)
+   ON CONFLICT (slate_date) DO UPDATE SET fetched_at = NOW(), games = $2`,
+  [date, JSON.stringify(games)]
+);
+```
+
+#### `backend/jobs/scheduler.js` — `getTodayGames()` and `getInProgressGamePks()`
+
+Both functions currently query `slate_snapshots`. Change both to `schedule_snapshots`:
+
+**`getTodayGames()`:**
+```js
+// Before:
+const result = await query("SELECT games FROM slate_snapshots WHERE slate_date = $1", [date]);
+// After:
+const result = await query("SELECT games FROM schedule_snapshots WHERE slate_date = $1", [date]);
+```
+
+**`getInProgressGamePks()`:**
+```js
+// Before:
+const result = await query("SELECT games FROM slate_snapshots WHERE slate_date = $1", [date]);
+// After:
+const result = await query("SELECT games FROM schedule_snapshots WHERE slate_date = $1", [date]);
+```
+
+### Constraints
+
+- Do NOT drop the `slate_snapshots` table — leave it in the DB and in `migrations/001_init.sql`
+- Do NOT change `schedule_snapshots` schema or any routes that already use it
+- No frontend changes
+- No behavioral changes — this is a pure consolidation
+- `npm run build` must exit 0
+- Update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 39 handoff note
+
+---
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 39 COMPLETED
+
+Codex completed the legacy schedule snapshot consolidation.
+
+### Files changed
+
+- `backend/jobs/snapshotJobs.js`
+- `backend/jobs/scheduler.js`
+
+### What changed
+
+#### `backend/jobs/snapshotJobs.js`
+
+Inside `snapshotSlate()`, Codex changed the upsert target from:
+
+- `slate_snapshots`
+
+to:
+
+- `schedule_snapshots`
+
+The SQL shape, columns, params, and upsert behavior were left unchanged. This was a pure table-name substitution.
+
+#### `backend/jobs/scheduler.js`
+
+Codex updated both legacy reads:
+
+- `getTodayGames()`
+- `getInProgressGamePks()`
+
+Both functions now query:
+
+- `schedule_snapshots`
+
+instead of:
+
+- `slate_snapshots`
+
+### Scope notes
+
+- No routes were changed
+- No frontend files were changed
+- No schema or migration changes were made
+- `slate_snapshots` was **not** dropped or modified in `migrations/001_init.sql`
+- This was strictly a consolidation cleanup so all schedule snapshot reads/writes now point to the same current table
+
+### Verification
+
+Codex ran:
+
+- `npm run build`
+- `node --check backend/jobs/snapshotJobs.js`
+- `node --check backend/jobs/scheduler.js`
+
+All passed cleanly.
+
+---
+
+## BACKLOG TASK 49 — Pitcher Handedness Splits (Savant)
+
+**Status:** COMPLETED ✅ (CODEX TASK 40 — 2026-04-30)
+**LOE:** Small–Medium
+**Type:** Full-stack (backend computation + frontend display + HR Scout scoring upgrade)
+**Codex-ready:** Yes — see CODEX TASK 40 below
+**Dependencies:** None — `stand` column already present in Savant CSV rows
+
+### What
+
+Split pitcher contact-quality stats (Barrel%, HH%, FB%, HR allowed) by batter handedness (vs LHH / vs RHH). This is exactly what the "study guide" social media bettors publish — Skenes' stats specifically against left-handed hitters vs right-handed hitters. Currently the app computes only overall pitcher stats.
+
+### Data source
+
+No new API calls. The Savant CSV already downloaded in `arsenal.js` includes a `stand` column on every row (value: "L" or "R" for batter stance). We just filter the existing rows.
+
+### Files to edit
+
+- `backend/routes/arsenal.js` — compute splits, add to `pitcherStats`
+- `backend/routes/hrScout.js` — use hand-specific stats in `computeHRScore()`
+- `prop-scout-v7.jsx` — display splits in Overview pitcher stats section
+
+---
+
+## BACKLOG TASK 50 — Batter Power by Pitch Type (Savant)
+
+**Status:** COMPLETED ✅
+**LOE:** Medium
+**Type:** Full-stack
+**Codex-ready:** Yes — see CODEX TASK 41 below
+**Dependencies:** Task 49 ✅ complete
+
+### What
+
+Show batter's Barrel%/HH%/FB%/HR count broken out by pitch type (e.g. "vs FF: Brl 11.2% · HH 48% · 3 HR"). Requires filtering the batter Savant CSV (already fetched in `batterPower.js`) by `pitch_type`, then cross-referencing against the facing pitcher's top pitches in the Scout drawer and HR Scout scoring model.
+
+---
+
+## CODEX TASK 41 — Batter Power by Pitch Type (Backlog Task 50)
+
+### Background
+
+`backend/routes/batterPower.js` fetches each batter's full Savant pitch-level CSV (already used for overall Barrel%/EV). Every row has a `pitch_type` column (e.g. `FF`, `SL`, `CH`). We want to group those rows by pitch type, compute contact-quality stats per type, and surface them (a) in the Scout Overview batter drawer and (b) as a new HR Scout scoring signal.
+
+### Part A — `backend/routes/batterPower.js`
+
+**Goal:** Add `pitchTypeSplits` map to the returned profile object.
+
+**Step 1** — Add column guard alongside existing guards (after `hasEvents` or `hasBbType`):
+```js
+const hasPitchType = sampleKeys.includes("pitch_type");
+```
+
+**Step 2** — Add accumulator before the `rows.forEach` loop:
+```js
+const pitchTypeAcc = {}; // keyed by pitch abbr
+```
+
+**Step 3** — Inside the existing `rows.forEach(r => { ... })` block, inside the `if (!isNaN(lsa) && lsa >= 1 && lsa <= 6)` batted-ball block, after the existing barrel/hardHit/evSum lines, add:
+```js
+if (hasPitchType) {
+  const pt = (r.pitch_type || "").trim().toUpperCase();
+  if (pt && pt !== "PO") {
+    if (!pitchTypeAcc[pt]) pitchTypeAcc[pt] = { battedBalls: 0, barrels: 0, hardHits: 0, flyBalls: 0, hrCount: 0 };
+    const s = pitchTypeAcc[pt];
+    s.battedBalls++;
+    if (lsa === 6) s.barrels++;
+    if (hasLaunchSpeed && !isNaN(ev) && ev >= 95) s.hardHits++;
+    if (hasBbType && r.bb_type === "fly_ball") s.flyBalls++;
+    if (hasEvents && r.events === "home_run") s.hrCount++;
+  }
+}
+```
+
+**Step 4** — After the `rows.forEach` loop, before building the `profile` object, compute the final map:
+```js
+const pitchTypeSplits = {};
+if (hasPitchType) {
+  for (const [abbr, s] of Object.entries(pitchTypeAcc)) {
+    if (s.battedBalls >= 15) {
+      pitchTypeSplits[abbr] = {
+        battedBalls: s.battedBalls,
+        hrCount: s.hrCount,
+        barrelPct: Math.round((s.barrels / s.battedBalls) * 1000) / 10,
+        hardHitPct: Math.round((s.hardHits / s.battedBalls) * 1000) / 10,
+        flyBallPct: hasBbType ? Math.round((s.flyBalls / s.battedBalls) * 1000) / 10 : null,
+      };
+    }
+  }
+}
+```
+
+**Step 5** — Add `pitchTypeSplits` to the returned `profile` object:
+```js
+const profile = {
+  barrelPct: ...,
+  hardHitPct: ...,
+  avgExitVelo: ...,
+  avgLaunchAngle: ...,
+  hrFbRate: ...,
+  pitchTypeSplits,   // ← add this
+};
+```
+
+---
+
+### Part B — `backend/routes/hrScout.js`
+
+**Goal:** (1) Store pitcher arsenal array alongside pitcher stats in `arsenalMap`. (2) Pass it into `computeHRScore` as a new 5th param and add a pitch-type matchup signal. (3) Add pitch-type matchup lines to the AI context string.
+
+**Step 1** — Change `arsenalMap` to store both stats and arsenal. Find the `buildArsenalPayloadForJob` call block (around line 274–279) and replace:
+```js
+// BEFORE:
+arsenalMap.set(id, data?.pitcherStats ?? null);
+
+// AFTER:
+arsenalMap.set(id, {
+  stats: data?.pitcherStats ?? null,
+  arsenal: data?.arsenal ?? [],
+});
+```
+
+**Step 2** — Update everywhere `arsenalMap.get(...)` is used to extract `.stats`:
+- In the candidates loop: `const pitcherStats = arsenalMap.get(batter.facingPitcherId)?.stats ?? null;`
+- Also extract arsenal: `const pitcherArsenal = arsenalMap.get(batter.facingPitcherId)?.arsenal ?? [];`
+- Update the `computeHRScore` call: `const { score, tier, signals } = computeHRScore(batter, pitcherStats, parkFactor, windBoost, pitcherArsenal);`
+
+**Step 3** — Update `computeHRScore` signature and add pitch-type signal. Change the function signature:
+```js
+function computeHRScore(batter, pitcherStats, parkFactor, windBoost, pitcherArsenal = []) {
+```
+Then, after the `// ── Batting order ──` block and before the tier/return, add:
+```js
+// ── Pitch-type power matchup ──────────────────────────────────
+const pts = batter.powerProfile?.pitchTypeSplits ?? null;
+if (pts && pitcherArsenal.length > 0) {
+  const topPitch = pitcherArsenal.reduce(
+    (best, p) => (!best || (p.pct ?? 0) > (best.pct ?? 0)) ? p : best, null
+  );
+  if (topPitch?.abbr) {
+    const split = pts[topPitch.abbr] ?? null;
+    if (split && split.battedBalls >= 15) {
+      if (split.barrelPct >= 12) {
+        score += 2;
+        signals.push(`Barrels ${topPitch.abbr} at ${split.barrelPct}% (${split.battedBalls} BB)`);
+      } else if (split.barrelPct <= 2) {
+        score -= 1;
+        signals.push(`Low barrel vs ${topPitch.abbr} (${split.barrelPct}%)`);
+      }
+    }
+  }
+}
+```
+
+**Step 4** — Add pitch-type matchup to the AI context. In `generateHRScoutPicks`, in the `contextLines` build block, find the `POWER:` line and add a new line after it:
+```js
+const ptsMap = pp.pitchTypeSplits ?? {};
+const pitcherArsenalCtx = arsenalMap.get(batter.facingPitcherId)?.arsenal ?? [];
+const pitchMatchups = pitcherArsenalCtx.slice(0, 3)
+  .map(p => {
+    const s = ptsMap[p.abbr];
+    if (!s || s.battedBalls < 15) return null;
+    return `vs ${p.abbr} Brl${s.barrelPct}% HH${s.hardHitPct}% (${s.battedBalls}BB)`;
+  }).filter(Boolean);
+```
+Then add to the context array:
+```js
+...(pitchMatchups.length ? [`PITCH SPLITS: ${pitchMatchups.join(" | ")}`] : []),
+```
+(Place this line right after the `POWER:` line in the array.)
+
+---
+
+### Part C — `prop-scout-v7.jsx`
+
+**Goal:** In the existing "vs pitcher arsenal" section of the batter expansion drawer, add a small power row beneath each pitch's progress bar showing Brl%/HH%/HR from `b.powerProfile?.pitchTypeSplits`.
+
+**Location:** Around line 6545, inside `facingPitcher.arsenal.map(a => {...})`, right after the existing `<div style={{ background: "#1e2030", borderRadius: 3, height: 5 ... }}>` progress bar div and before the `{note && ...}` block.
+
+**Insert this IIFE block:**
+```jsx
+{(() => {
+  const s = b.powerProfile?.pitchTypeSplits?.[a.abbr];
+  if (!s || s.battedBalls < 15) return null;
+  const brlColor = s.barrelPct >= 12 ? "#fb923c" : s.barrelPct >= 7 ? "#f59e0b" : "#6b7280";
+  const hhColor  = s.hardHitPct >= 45 ? "#22c55e" : s.hardHitPct >= 35 ? "#f59e0b" : "#6b7280";
+  return (
+    <div style={{ display: "flex", gap: 8, marginTop: 3 }}>
+      <span style={{ fontSize: 8, color: brlColor, fontFamily: "monospace" }}>Brl {s.barrelPct}%</span>
+      <span style={{ fontSize: 8, color: hhColor,  fontFamily: "monospace" }}>HH {s.hardHitPct}%</span>
+      {s.flyBallPct != null && <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>FB {s.flyBallPct}%</span>}
+      <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>{s.hrCount} HR · {s.battedBalls} BB</span>
+    </div>
+  );
+})()}
+```
+
+This renders only when the batter has ≥15 batted balls against that pitch type — no empty states, no loading spinners needed (data is already part of `powerProfile` loaded at lineup time).
+
+### Key Constraints
+
+- Minimum **15 batted balls** per pitch type before surfacing any data (not pitches seen — batted balls only)
+- `pitch_type === "PO"` (pitchout) must be excluded from accumulation
+- The `pitchTypeSplits` object on the profile is always present (empty `{}` if no data) — never `null`
+- `arsenalMap` change affects only `hrScout.js` — no other files use it
+- `pitchTypeSplits` flows to the Scout Overview tab automatically via `lineups.js` → `fetchBatterPowerProfile` enrichment
+
+### Files to Modify
+
+1. `backend/routes/batterPower.js` — add `pitchTypeSplits` computation
+2. `backend/routes/hrScout.js` — update `arsenalMap` structure, extend `computeHRScore`, add AI context line
+3. `prop-scout-v7.jsx` — add power stats row inside per-pitch arsenal render
+
+### Handoff Note
+
+After completing, update `AGENT_SYSTEM_PROMPT.md`: mark **BACKLOG TASK 50** as `COMPLETED ✅` and add a brief summary of what was built under the CODEX TASK 41 heading.
+
+**Completed summary (2026-05-01):**
+- `backend/routes/batterPower.js` now computes `pitchTypeSplits` from the existing Savant CSV, keyed by pitch abbreviation, with `barrelPct`, `hardHitPct`, `flyBallPct`, `hrCount`, and `battedBalls` for pitch types with at least 15 batted balls.
+- `backend/routes/hrScout.js` now stores both `pitcherStats` and `arsenal` in `arsenalMap`, adds a pitch-type matchup scoring signal based on the pitcher's top usage pitch, and includes top pitch-split context in the AI prompt.
+- `prop-scout-v7.jsx` now shows per-pitch batter power rows in the Scout batter drawer beneath each facing-pitcher arsenal bar when enough split data exists.
+
+---
+
+## BACKLOG TASK 51 — Rolling 7-Day Exit Velocity (L7 EV)
+
+**Status:** COMPLETED ✅
+**LOE:** Small-Medium
+**Type:** Full-stack
+**Codex-ready:** Yes — see CODEX TASK 42 below
+**Dependencies:** None (extends batterPower.js which is already complete)
+
+### What
+
+Add a rolling 7-day EV profile to every batter: Avg EV L7, Hard Hit% L7, Barrel% L7, and delta vs season average. Surface in Scout batter drawer and as a new HR Scout signal. Zero new HTTP requests — Savant CSV rows already include `game_date`, just filter in-memory.
+
+---
+
+## CODEX TASK 42 — Rolling 7-Day Exit Velocity (Backlog Task 51)
+
+### Background
+
+`batterPower.js` already fetches a full-season Savant CSV for each batter. Every row has a `game_date` column (`YYYY-MM-DD`). This task filters those existing in-memory rows to the last 7 days and computes avg EV, HH%, barrel%, and delta vs season average. No new HTTP requests — purely an additional computation pass over already-fetched rows.
+
+### Part A — `backend/routes/batterPower.js`
+
+**Step 1** — Add column guard alongside existing guards:
+```js
+const hasGameDate = sampleKeys.includes("game_date");
+```
+
+**Step 2** — After the existing `rows.forEach` loop (after `hrOnFlyBalls` counting), before building `pitchTypeSplits`, add the L7 computation:
+```js
+// ── L7 Exit Velocity ─────────────────────────────────────────
+let recentEv = null;
+if (hasGameDate && hasLaunchSpeed && hasLaunchSpeedAngle) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 7);
+  const cutoffStr = cutoff.toISOString().slice(0, 10); // YYYY-MM-DD
+
+  let l7BB = 0, l7EvSum = 0, l7HH = 0, l7Barrels = 0;
+
+  rows.forEach(r => {
+    if (!r.game_date || r.game_date < cutoffStr) return;
+    const lsa = parseInt(r.launch_speed_angle, 10);
+    const ev  = parseFloat(r.launch_speed);
+    if (!isNaN(lsa) && lsa >= 1 && lsa <= 6) {
+      l7BB++;
+      if (!isNaN(ev)) {
+        l7EvSum += ev;
+        if (ev >= 95) l7HH++;
+      }
+      if (lsa === 6) l7Barrels++;
+    }
+  });
+
+  if (l7BB >= 5) {
+    const evL7 = Math.round((l7EvSum / l7BB) * 10) / 10;
+    const seasonEv = hasLaunchSpeed && battedBalls > 0
+      ? Math.round((evSum / battedBalls) * 10) / 10
+      : null;
+    recentEv = {
+      evL7,
+      bbL7: l7BB,
+      hardHitPctL7: Math.round((l7HH      / l7BB) * 1000) / 10,
+      barrelPctL7:  Math.round((l7Barrels  / l7BB) * 1000) / 10,
+      evDelta: seasonEv != null ? Math.round((evL7 - seasonEv) * 10) / 10 : null,
+    };
+  }
+}
+```
+
+**Step 3** — Add `recentEv` to the returned `profile` object (alongside `pitchTypeSplits`):
+```js
+const profile = {
+  barrelPct: ...,
+  hardHitPct: ...,
+  avgExitVelo: ...,
+  avgLaunchAngle: ...,
+  hrFbRate: ...,
+  pitchTypeSplits,
+  recentEv,   // null if < 5 batted balls in last 7 days
+};
+```
+
+Also update the console log line:
+```js
+console.log(`  ✓ Batter Power  batterId=${batterId} barrel=${profile.barrelPct}% EV=${profile.avgExitVelo} evL7=${profile.recentEv?.evL7 ?? "n/a"}`);
+```
+
+---
+
+### Part B — `backend/routes/hrScout.js`
+
+**Step 1** — In `computeHRScore`, after the `hrFb` signal block (inside `// ── Batter power signals ──`), add:
+```js
+// ── L7 EV trend ───────────────────────────────────────────────
+const evDelta = pp.recentEv?.evDelta ?? null;
+const bbL7    = pp.recentEv?.bbL7    ?? 0;
+if (evDelta != null && bbL7 >= 5) {
+  if (evDelta >= 4)       { score += 2; signals.push(`EV spiking +${evDelta} mph vs season avg (L7)`); }
+  else if (evDelta >= 2)  { score += 1; signals.push(`EV trending up +${evDelta} mph vs season (L7)`); }
+  else if (evDelta <= -3) { score -= 1; signals.push(`EV down ${evDelta} mph vs season avg (L7)`); }
+}
+```
+
+**Step 2** — In `generateHRScoutPicks`, in the context line array, add a new line after the `POWER:` line using the same spread pattern as `PITCH SPLITS:`:
+```js
+...(pp.recentEv ? [`EV L7: ${pp.recentEv.evL7} mph (${pp.recentEv.evDelta >= 0 ? "+" : ""}${pp.recentEv.evDelta} vs szn) | HH% ${pp.recentEv.hardHitPctL7}% | Brl% ${pp.recentEv.barrelPctL7}% | ${pp.recentEv.bbL7} BB`] : []),
+```
+
+---
+
+### Part C — `prop-scout-v7.jsx`
+
+**Location:** In the batter expansion drawer, find the `<div style={{ display: "flex", gap: 6, marginBottom: 10 }}>` row containing the `<StatMini label="AVG" ...>` chips. Insert this IIFE block immediately **after** that div (before the Career H2H block):
+
+```jsx
+{(() => {
+  const rev = b.powerProfile?.recentEv;
+  if (!rev) return null;
+  const deltaColor = rev.evDelta >= 4  ? "#22c55e"
+                   : rev.evDelta >= 2  ? "#86efac"
+                   : rev.evDelta <= -3 ? "#ef4444"
+                   : "#6b7280";
+  const deltaStr = rev.evDelta != null
+    ? `${rev.evDelta >= 0 ? "+" : ""}${rev.evDelta} vs szn`
+    : null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, background: "#1a1b2e", borderRadius: 8, padding: "6px 10px" }}>
+      <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>L7 EV</span>
+      <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{rev.evL7} mph</span>
+      {deltaStr && <span style={{ fontSize: 10, fontWeight: 700, color: deltaColor, fontFamily: "monospace" }}>{deltaStr}</span>}
+      <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>HH {rev.hardHitPctL7}%</span>
+      <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>Brl {rev.barrelPctL7}%</span>
+      <span style={{ fontSize: 8, color: "#4b5563", marginLeft: "auto", flexShrink: 0 }}>{rev.bbL7} BB</span>
+    </div>
+  );
+})()}
+```
+
+---
+
+### Key Constraints
+
+- Minimum **5 batted balls** in the 7-day window — if fewer, `recentEv` is `null` and nothing renders
+- `game_date >= cutoffStr` string comparison works correctly since both are `YYYY-MM-DD` ISO format
+- `evDelta` is `null` when season `avgExitVelo` is unavailable — `evL7` still shows in the drawer without the delta chip
+- `recentEv` is always present on the profile object (null if insufficient data) — never omitted
+- No new HTTP requests — second pass over already-fetched rows only
+
+### Files to Modify
+
+1. `backend/routes/batterPower.js`
+2. `backend/routes/hrScout.js`
+3. `prop-scout-v7.jsx`
+
+### Handoff Note
+
+After completing, update `AGENT_SYSTEM_PROMPT.md`: mark **BACKLOG TASK 51** as `COMPLETED ✅` and note what was built under CODEX TASK 42.
+
+**Completed summary (2026-05-01):**
+- `backend/routes/batterPower.js` now computes a `recentEv` object from the already-fetched Savant CSV using a second pass over the last 7 days of batted-ball events, including `evL7`, `hardHitPctL7`, `barrelPctL7`, `bbL7`, and `evDelta` versus season EV.
+- `backend/routes/hrScout.js` now uses the rolling L7 EV trend as an HR Scout scoring signal and includes the recent EV block in the AI context prompt.
+- `prop-scout-v7.jsx` now shows an `L7 EV` strip in the batter expansion drawer when enough recent batted-ball sample exists.
+
+---
+
+## CODEX TASK 40 — Pitcher Handedness Splits (Backlog Task 49)
+
+### Background
+
+The Savant pitch-level CSV fetched in `backend/routes/arsenal.js` includes a `stand` column on every row (`"L"` or `"R"` for batter stance). `buildArsenalFromRows(rows)` currently computes pitcher contact-quality stats (Barrel%, HH%, FB%) over all batters combined. This task splits those computations by batter handedness and upgrades the HR Scout scoring model to use the hand-appropriate split.
+
+### Part A — Backend: `backend/routes/arsenal.js`
+
+**Step 1 — Add column guard** alongside existing guards (after `hasBbTypeColumn`):
+
+```js
+const hasStandColumn = sampleKeys.includes("stand");
+const hasEventsColumn = sampleKeys.includes("events");
+```
+
+**Step 2 — Add a helper function** `computeHandSplit(splitRows)` directly above `buildArsenalFromRows`. It takes a pre-filtered subset of rows and computes the same contact-quality metrics as the main loop:
+
+```js
+function computeHandSplit(splitRows, hasLSA, hasBbType, hasEvents) {
+  let battedBalls = 0, barrels = 0, hardHits = 0, flyBalls = 0, popups = 0, hrAllowed = 0;
+  splitRows.forEach(r => {
+    if ((r.pitch_type || "").trim().toUpperCase() === "PO") return;
+
+    if (hasEvents && (r.events || "").toLowerCase() === "home_run") hrAllowed++;
+
+    if (hasLSA) {
+      const lsa = parseInt(r.launch_speed_angle, 10);
+      const ev  = parseFloat(r.launch_speed);
+      if (!isNaN(lsa) && lsa >= 1 && lsa <= 6) {
+        battedBalls++;
+        if (lsa === 6) barrels++;
+        if (!isNaN(ev) && ev >= 95) hardHits++;
+      }
+    }
+    if (hasBbType) {
+      if (r.bb_type === "fly_ball") flyBalls++;
+      if (r.bb_type === "popup")    popups++;
+    }
+  });
+
+  if (battedBalls < 20) return null; // insufficient sample
+
+  return {
+    hrAllowed,
+    barrelPct:        Math.round((barrels / battedBalls) * 1000) / 10,
+    hardHitPct:       Math.round((hardHits / battedBalls) * 1000) / 10,
+    flyBallPct:       hasBbType ? Math.round(((flyBalls + popups) / battedBalls) * 1000) / 10 : null,
+  };
+}
+```
+
+**Step 3 — Compute splits in `buildArsenalFromRows`**, after the main `rows.forEach` loop and before the `pitcherStats` object is built:
+
+```js
+const vsLeft  = hasStandColumn
+  ? computeHandSplit(rows.filter(r => (r.stand || "").toUpperCase() === "L"),
+      hasLaunchSpeedAngleColumn, hasBbTypeColumn, hasEventsColumn)
+  : null;
+const vsRight = hasStandColumn
+  ? computeHandSplit(rows.filter(r => (r.stand || "").toUpperCase() === "R"),
+      hasLaunchSpeedAngleColumn, hasBbTypeColumn, hasEventsColumn)
+  : null;
+```
+
+**Step 4 — Add to `pitcherStats` object**:
+
+```js
+const pitcherStats = {
+  swStrPct: ...,
+  // ... existing fields unchanged ...
+  vsLeft,   // { hrAllowed, barrelPct, hardHitPct, flyBallPct } | null
+  vsRight,  // { hrAllowed, barrelPct, hardHitPct, flyBallPct } | null
+};
+```
+
+---
+
+### Part B — HR Scout scoring upgrade: `backend/routes/hrScout.js`
+
+In `computeHRScore(batter, pitcherStats, parkFactor, windBoost)`, the three pitcher signals currently use overall stats. Upgrade them to prefer hand-specific stats when available:
+
+```js
+// At the top of computeHRScore, resolve the hand-appropriate pitcher split:
+const handSplit = batter.hand === "L" ? (pitcherStats?.vsLeft ?? null)
+                : batter.hand === "R" ? (pitcherStats?.vsRight ?? null)
+                : null;
+
+// Then replace:
+const fbPct   = handSplit?.flyBallPct   ?? pitcherStats?.flyBallPctInclPopup ?? null;
+const pBarrel = handSplit?.barrelPct    ?? pitcherStats?.barrelPct           ?? null;
+// xwOBA stays overall — not computed per-hand
+const xwOBA   = pitcherStats?.xwOBAAllowed ?? null;
+```
+
+Also add `hrAllowed` as a new signal (add after the existing pitcher signals block):
+
+```js
+const hrAllowed = handSplit?.hrAllowed ?? null;
+if (hrAllowed != null) {
+  if (hrAllowed >= 15) { score += 2; signals.push(`${hrAllowed} HR allowed vs ${batter.hand}HB`); }
+  else if (hrAllowed <= 3)  { score -= 1; signals.push(`Only ${hrAllowed} HR allowed vs ${batter.hand}HB`); }
+}
+```
+
+---
+
+### Part C — Frontend display: `prop-scout-v7.jsx`
+
+In the Overview tab pitcher stats section (search for `hasAny` guard that gates the Barrel%/HH%/xwOBA chips), add a vs-handedness row **after** the existing stats chips. Only render if at least one side has data:
+
+```jsx
+{(stats.vsLeft || stats.vsRight) && (
+  <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+    {["vsLeft", "vsRight"].map(side => {
+      const split = stats[side];
+      if (!split) return null;
+      const label = side === "vsLeft" ? "vs LHH" : "vs RHH";
+      const color = "#94a3b8";
+      return (
+        <div key={side} style={{ background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 5, padding: "3px 8px", fontSize: 9, color, fontFamily: "monospace" }}>
+          {label} · {split.hrAllowed} HR · {split.barrelPct}% Brl · {split.hardHitPct}% HH{split.flyBallPct != null ? ` · ${split.flyBallPct}% FB` : ""}
+        </div>
+      );
+    })}
+  </div>
+)}
+```
+
+---
+
+### Acceptance criteria
+
+1. `pitcherStats.vsLeft` and `pitcherStats.vsRight` present on arsenal responses when `stand` column exists and sample ≥ 20 batted balls per side; `null` otherwise
+2. `computeHRScore` uses hand-specific barrel% and FB% when available, falls back to overall if not
+3. `hrAllowed` signal fires correctly for high (≥15) and low (≤3) HR counts
+4. Overview pitcher stats shows vs LHH / vs RHH chips when data is available
+5. No regressions — existing `barrelPct`, `hardHitPct`, `xwOBAAllowed` fields unchanged
+6. `npm run build` exits 0
+7. Update `AGENT_SYSTEM_PROMPT.md` with CODEX TASK 40 handoff note
+
+---
+
+## HANDOFF NOTE — 2026-04-30 — CODEX TASK 40 COMPLETED
+
+Codex completed the pitcher handedness split upgrade across the Savant arsenal pipeline, HR Scout scoring, and the Overview pitcher UI.
+
+### Files changed
+
+- `backend/routes/arsenal.js`
+- `backend/routes/hrScout.js`
+- `prop-scout-v7.jsx`
+
+### What changed
+
+#### Part A — `backend/routes/arsenal.js`
+
+Added two new column guards in `buildArsenalFromRows(rows)`:
+
+- `hasStandColumn`
+- `hasEventsColumn`
+
+Added a new helper directly above `buildArsenalFromRows`:
+
+- `computeHandSplit(splitRows, hasLSA, hasBbType, hasEvents)`
+
+This helper computes handedness-specific contact-quality stats from a pre-filtered subset of Savant rows:
+
+- `hrAllowed`
+- `barrelPct`
+- `hardHitPct`
+- `flyBallPct`
+
+Important behavior:
+
+- returns `null` when fewer than `20` batted balls are present for that handedness split
+- skips pickoff rows (`PO`) just like the main aggregator
+- never crashes when relevant columns are absent
+
+After the main pitch-row aggregation loop, Codex added:
+
+- `vsLeft`
+- `vsRight`
+
+These are built by filtering on `stand === "L"` and `stand === "R"` respectively, then passing those row subsets into `computeHandSplit(...)`.
+
+`pitcherStats` now includes:
+
+- `vsLeft`
+- `vsRight`
+
+All existing aggregate fields remain unchanged:
+
+- `barrelPct`
+- `hardHitPct`
+- `flyBallPct`
+- `flyBallPctInclPopup`
+- `xwOBAAllowed`
+- etc.
+
+#### Part B — `backend/routes/hrScout.js`
+
+Inside `computeHRScore(...)`, Codex added a hand-specific split resolver:
+
+- LHB batters use `pitcherStats.vsLeft`
+- RHB batters use `pitcherStats.vsRight`
+- switch/unknown hands fall back to overall pitcher stats
+
+The HR Scout model now prefers handedness-specific values for:
+
+- `flyBallPct`
+- `barrelPct`
+
+with fallback to:
+
+- `pitcherStats.flyBallPctInclPopup`
+- `pitcherStats.barrelPct`
+
+`xwOBAAllowed` remains overall-only, per spec.
+
+Also added a new `hrAllowed` signal:
+
+- `+2` if `hrAllowed >= 15`
+- `-1` if `hrAllowed <= 3`
+
+Signal text includes batter handedness, e.g.:
+
+- `15 HR allowed vs LHB`
+- `Only 3 HR allowed vs RHB`
+
+#### Part C — `prop-scout-v7.jsx`
+
+In the Overview pitcher stats section, Codex added a second row beneath the existing stat strip that renders only when handedness splits exist.
+
+The new row shows:
+
+- `vs LHH`
+- `vs RHH`
+
+Each chip includes:
+
+- HR allowed
+- Barrel%
+- HardHit%
+- FlyBall%
+
+Only sides with valid split data render, so small-sample `null` sides remain hidden.
+
+### Verification
+
+Codex ran:
+
+- `node --check backend/routes/arsenal.js`
+- `node --check backend/routes/hrScout.js`
+- `npm run build`
+
+All passed cleanly.
+
+### Scope notes
+
+- No new routes were added
+- No cache keys or payload signatures changed outside the new nullable `vsLeft` / `vsRight` fields on `pitcherStats`
+- Existing aggregate pitcher metrics were preserved exactly as before

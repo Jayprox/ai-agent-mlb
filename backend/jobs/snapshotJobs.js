@@ -57,6 +57,7 @@ async function ensurePhaseOneTables() {
       PRIMARY KEY (game_key, slate_date)
     )
   `);
+  await query(`ALTER TABLE odds_snapshots ADD COLUMN IF NOT EXISTS opening_total NUMERIC`);
   await query(`
     CREATE TABLE IF NOT EXISTS player_props_snapshots (
       game_pk       INTEGER NOT NULL,
@@ -212,7 +213,7 @@ async function snapshotSlate(date = todayHonolulu()) {
   try {
     const games = await buildScheduleSnapshot(date);
     await query(
-      `INSERT INTO slate_snapshots (slate_date, fetched_at, games)
+      `INSERT INTO schedule_snapshots (slate_date, fetched_at, games)
        VALUES ($1, NOW(), $2)
        ON CONFLICT (slate_date) DO UPDATE SET fetched_at = NOW(), games = $2`,
       [date, JSON.stringify(games)]
@@ -274,11 +275,18 @@ async function snapshotOdds(date = todayHonolulu()) {
     const games = res.data ?? [];
     for (const g of games) {
       const gameKey = `${g.away_team}|${g.home_team}`;
+      const dkBk = g.bookmakers?.find(b => b.key === "draftkings") ?? g.bookmakers?.[0];
+      const currentTotal = dkBk?.markets?.find(m => m.key === "totals")
+        ?.outcomes?.find(o => o.name === "Over")?.point ?? null;
+      const currentTotalNum = currentTotal != null ? Number(currentTotal) : null;
       await query(
-        `INSERT INTO odds_snapshots (game_key, slate_date, fetched_at, odds)
-         VALUES ($1, $2, NOW(), $3)
-         ON CONFLICT (game_key, slate_date) DO UPDATE SET fetched_at = NOW(), odds = $3`,
-        [gameKey, date, JSON.stringify(g)]
+        `INSERT INTO odds_snapshots (game_key, slate_date, fetched_at, odds, opening_total)
+         VALUES ($1, $2, NOW(), $3, $4)
+         ON CONFLICT (game_key, slate_date) DO UPDATE
+           SET fetched_at = NOW(),
+               odds = EXCLUDED.odds,
+               opening_total = COALESCE(odds_snapshots.opening_total, EXCLUDED.opening_total)`,
+        [gameKey, date, JSON.stringify(g), currentTotalNum]
       );
     }
     console.log(`  ✓ snapshotOdds  date=${date}  games=${games.length}  remaining=${res.headers["x-requests-remaining"] ?? "?"}`);
@@ -367,7 +375,9 @@ async function pollPlayerProps(date = todayHonolulu()) {
   const games = result?.rows?.[0]?.games ?? [];
   const active = games.filter(g => {
     const s = g.status ?? "";
-    return !["Final", "Game Over", "Postponed", "Cancelled", "Suspended"].includes(s);
+    const msToFirstPitch = Date.parse(g.gameTime) - Date.now();
+    const tooEarly = Number.isFinite(msToFirstPitch) && msToFirstPitch > 30 * 60 * 1000;
+    return !["Final", "Game Over", "Postponed", "Cancelled", "Suspended"].includes(s) && !tooEarly;
   });
   console.log(`  · pollPlayerProps  active=${active.length}/${games.length}`);
   for (const game of active) {

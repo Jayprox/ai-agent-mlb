@@ -56,6 +56,7 @@ const extractBook = (bk, awayTeam) => {
 const buildOddsPayload = (games, meta = {}) => {
   const map        = {};
   const eventIdMap = {};
+  const openingTotalsMap = meta.openingTotalsMap ?? {};
 
   games.forEach(g => {
     const key = `${g.away_team}|${g.home_team}`;
@@ -73,7 +74,15 @@ const buildOddsPayload = (games, meta = {}) => {
 
     const primary      = extractBook(primaryBk, g.away_team);
     const primaryLabel = TARGET_BOOKS.find(t => t.key === primaryBk.key)?.label ?? primaryBk.title;
-    map[key] = { ...primary, book: primaryLabel, books };
+    const currentTotalNum = parseFloat(primary.total);
+    const openTotal = openingTotalsMap[key] ?? null;
+    const totalDelta = openTotal != null && !isNaN(currentTotalNum)
+      ? Math.round((currentTotalNum - openTotal) * 10) / 10 : null;
+    const totalMoveDir = totalDelta == null ? null : totalDelta > 0 ? "up" : totalDelta < 0 ? "down" : "flat";
+    const movementText = totalDelta == null ? "No opening line data yet."
+      : totalDelta === 0 ? `Total steady at ${currentTotalNum}. No significant movement.`
+      : `Total opened ${openTotal} — moved ${totalDelta > 0 ? "UP" : "DOWN"} ${Math.abs(totalDelta)}.`;
+    map[key] = { ...primary, book: primaryLabel, books, openTotal, totalDelta, totalMoveDir, movementText };
   });
 
   return {
@@ -101,7 +110,7 @@ router.get("/", async (req, res) => {
     try {
       const today = todayHonolulu();
       const row = await query(
-        `SELECT game_key, fetched_at, odds
+        `SELECT game_key, fetched_at, odds, opening_total
          FROM odds_snapshots
          WHERE slate_date = $1
          ORDER BY fetched_at DESC`,
@@ -113,8 +122,11 @@ router.get("/", async (req, res) => {
         const ageMs = Date.now() - freshestMs;
         if (ageMs < TTL_MS) {
           const games = rows.map(r => r.odds).filter(Boolean);
+          const openingTotalsMap = {};
+          rows.forEach(r => { if (r.opening_total != null) openingTotalsMap[r.game_key] = Number(r.opening_total); });
           const result = buildOddsPayload(games, {
             fetchedAt: new Date(freshestMs).toISOString(),
+            openingTotalsMap,
           });
           cache.set(cacheKey, result, TTL_MS);
           res.setHeader("X-Cache", "DB-HIT");

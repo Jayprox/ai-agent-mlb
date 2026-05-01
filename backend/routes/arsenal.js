@@ -99,6 +99,38 @@ async function fetchCSVRows(pitcherId, year) {
   return rows;
 }
 
+function computeHandSplit(splitRows, hasLSA, hasBbType, hasEvents) {
+  let battedBalls = 0, barrels = 0, hardHits = 0, flyBalls = 0, popups = 0, hrAllowed = 0;
+  splitRows.forEach(r => {
+    if ((r.pitch_type || "").trim().toUpperCase() === "PO") return;
+
+    if (hasEvents && (r.events || "").toLowerCase() === "home_run") hrAllowed++;
+
+    if (hasLSA) {
+      const lsa = parseInt(r.launch_speed_angle, 10);
+      const ev  = parseFloat(r.launch_speed);
+      if (!isNaN(lsa) && lsa >= 1 && lsa <= 6) {
+        battedBalls++;
+        if (lsa === 6) barrels++;
+        if (!isNaN(ev) && ev >= 95) hardHits++;
+      }
+    }
+    if (hasBbType) {
+      if (r.bb_type === "fly_ball") flyBalls++;
+      if (r.bb_type === "popup")    popups++;
+    }
+  });
+
+  if (battedBalls < 20) return null; // insufficient sample
+
+  return {
+    hrAllowed,
+    barrelPct:        Math.round((barrels / battedBalls) * 1000) / 10,
+    hardHitPct:       Math.round((hardHits / battedBalls) * 1000) / 10,
+    flyBallPct:       hasBbType ? Math.round(((flyBalls + popups) / battedBalls) * 1000) / 10 : null,
+  };
+}
+
 function buildArsenalFromRows(rows) {
   // Aggregate individual pitch rows by pitch type
   const byType = {};
@@ -147,7 +179,109 @@ function buildArsenalFromRows(rows) {
     })
     .sort((a, b) => b.pct - a.pct);
 
-  return arsenal.length ? arsenal : null;
+  const sampleKeys = rows?.[0] ? Object.keys(rows[0]) : [];
+  const hasZoneColumn = sampleKeys.includes("zone");
+  const hasPitchNumberColumn = sampleKeys.includes("pitch_number");
+  const hasWobaDenomColumn = sampleKeys.includes("woba_denom");
+  const hasXwOBAColumn = sampleKeys.includes("estimated_woba_using_speedangle");
+  const hasBbTypeColumn = sampleKeys.includes("bb_type");
+  const hasStandColumn = sampleKeys.includes("stand");
+  const hasEventsColumn = sampleKeys.includes("events");
+
+  let totalPitchesAll = 0;
+  let totalWhiffsAll = 0;
+  let outsidePitches = 0;
+  let outsideSwings = 0;
+  let firstPitches = 0;
+  let firstStrikes = 0;
+  let battedBalls = 0;
+  let barrels = 0;
+  let hardHits = 0;
+  let flyBalls = 0;
+  let popups = 0;
+  let xwobaNumer = 0;
+  let xwobaDenom = 0;
+  const hasLaunchSpeedAngleColumn = sampleKeys.includes("launch_speed_angle");
+
+  rows.forEach((r) => {
+    if ((r.pitch_type || "").trim().toUpperCase() === "PO") return;
+    totalPitchesAll++;
+
+    const desc = (r.description || "").toLowerCase();
+    const isWhiff = ["swinging_strike","swinging_strike_blocked","missed_bunt"].some(d => desc.includes(d));
+    const isSwing = ["swinging_strike","swinging_strike_blocked","foul","foul_bunt","missed_bunt","hit_into_play","foul_tip"].some(d => desc.includes(d));
+    const isStrike = isWhiff || ["called_strike","foul","foul_bunt","foul_tip"].some(d => desc.includes(d));
+
+    if (isWhiff) totalWhiffsAll++;
+
+    if (hasZoneColumn) {
+      const zone = parseInt(r.zone, 10);
+      const isOutside = [11, 12, 13, 14].includes(zone);
+      if (isOutside) {
+        outsidePitches++;
+        if (isSwing) outsideSwings++;
+      }
+    }
+
+    if (hasPitchNumberColumn) {
+      const pitchNum = parseInt(r.pitch_number, 10);
+      if (pitchNum === 1) {
+        firstPitches++;
+        if (isStrike) firstStrikes++;
+      }
+    }
+
+    if (hasLaunchSpeedAngleColumn) {
+      const lsa = parseInt(r.launch_speed_angle, 10);
+      const ev  = parseFloat(r.launch_speed);
+      if (!isNaN(lsa) && lsa >= 1 && lsa <= 6) {
+        battedBalls++;
+        if (lsa === 6) barrels++;
+        if (!isNaN(ev) && ev >= 95) hardHits++;
+      }
+    }
+
+    if (hasBbTypeColumn) {
+      if (r.bb_type === "fly_ball") flyBalls++;
+      if (r.bb_type === "popup") popups++;
+    }
+
+    if (hasWobaDenomColumn) {
+      const wobaDen = parseFloat(r.woba_denom);
+      if (!isNaN(wobaDen) && wobaDen === 1) {
+        xwobaDenom++;
+        const xwoba = hasXwOBAColumn ? parseFloat(r.estimated_woba_using_speedangle) : NaN;
+        const wobaV = parseFloat(r.woba_value);
+        xwobaNumer += !isNaN(xwoba) ? xwoba : (!isNaN(wobaV) ? wobaV : 0);
+      }
+    }
+  });
+
+  const vsLeft  = hasStandColumn
+    ? computeHandSplit(rows.filter(r => (r.stand || "").toUpperCase() === "L"),
+      hasLaunchSpeedAngleColumn, hasBbTypeColumn, hasEventsColumn)
+    : null;
+  const vsRight = hasStandColumn
+    ? computeHandSplit(rows.filter(r => (r.stand || "").toUpperCase() === "R"),
+      hasLaunchSpeedAngleColumn, hasBbTypeColumn, hasEventsColumn)
+    : null;
+
+  const pitcherStats = {
+    swStrPct: totalPitchesAll > 0 ? Math.round((totalWhiffsAll / totalPitchesAll) * 1000) / 10 : null,
+    oSwingPct: hasZoneColumn && outsidePitches > 0 ? Math.round((outsideSwings / outsidePitches) * 1000) / 10 : null,
+    fStrikePct: hasPitchNumberColumn && firstPitches > 0 ? Math.round((firstStrikes / firstPitches) * 1000) / 10 : null,
+    barrelPct: hasLaunchSpeedAngleColumn && battedBalls > 0 ? Math.round((barrels / battedBalls) * 1000) / 10 : null,
+    hardHitPct: hasLaunchSpeedAngleColumn && battedBalls > 0 ? Math.round((hardHits / battedBalls) * 1000) / 10 : null,
+    flyBallPct: hasBbTypeColumn && battedBalls > 0 ? Math.round((flyBalls / battedBalls) * 1000) / 10 : null,
+    flyBallPctInclPopup: hasBbTypeColumn && battedBalls > 0 ? Math.round(((flyBalls + popups) / battedBalls) * 1000) / 10 : null,
+    xwOBAAllowed: hasWobaDenomColumn && xwobaDenom >= 10
+      ? Math.round((xwobaNumer / xwobaDenom) * 1000) / 1000
+      : null,
+    vsLeft,
+    vsRight,
+  };
+
+  return arsenal.length ? { arsenal, pitcherStats } : null;
 }
 
 function buildPrevVeloMap(rows) {
@@ -173,21 +307,14 @@ function buildPrevVeloMap(rows) {
   );
 }
 
-// ─────────────────────────────────────────────
-// ROUTE: GET /api/arsenal/:pitcherId
-// ─────────────────────────────────────────────
-router.get("/:pitcherId", async (req, res) => {
-  const { pitcherId } = req.params;
-  const year     = parseInt(req.query.year ?? SEASON, 10);
+async function buildArsenalPayload(pitcherId, year = SEASON) {
   const cacheKey = `arsenal:pitcher:${pitcherId}:${year}`;
 
   const cached = cache.get(cacheKey);
-  if (cached) {
-    res.setHeader("X-Cache", "HIT");
-    return res.json(cached);
-  }
+  if (cached) return { result: cached, cacheHit: true };
 
   let arsenal = null;
+  let pitcherStats = null;
   let source  = null;
   let resolvedYear = year;
   const yearsToTry = year > 2008 ? [year, year - 1] : [year];
@@ -195,8 +322,10 @@ router.get("/:pitcherId", async (req, res) => {
   for (const candidateYear of yearsToTry) {
     try {
       const rows = await fetchCSVRows(pitcherId, candidateYear);
-      arsenal = rows ? buildArsenalFromRows(rows) : null;
-      if (arsenal) {
+      const built = rows ? buildArsenalFromRows(rows) : null;
+      arsenal = built?.arsenal ?? null;
+      pitcherStats = built?.pitcherStats ?? null;
+      if (arsenal?.length) {
         resolvedYear = candidateYear;
         source = candidateYear === year ? "statcast_csv" : "statcast_csv_prev_season";
         break;
@@ -207,7 +336,7 @@ router.get("/:pitcherId", async (req, res) => {
   }
 
   if (!arsenal) {
-    return res.status(502).json({ error: "Baseball Savant unavailable", pitcherId });
+    throw new Error("Baseball Savant unavailable");
   }
 
   const prevCacheKey = `arsenal:${pitcherId}:prev`;
@@ -233,11 +362,34 @@ router.get("/:pitcherId", async (req, res) => {
     prevVelo: prevVeloMap?.[pitch.abbr] ?? null,
   }));
 
-  const result = { pitcherId: parseInt(pitcherId), season: resolvedYear, source, arsenal };
+  const result = { pitcherId: parseInt(pitcherId, 10), season: resolvedYear, source, arsenal, pitcherStats };
   cache.set(cacheKey, result, SAVANT_TTL);
-  res.setHeader("X-Cache", "MISS");
   console.log(`  ✓ Arsenal cached  pitcherId=${pitcherId} source=${source} season=${resolvedYear} pitches=${arsenal.length}`);
-  res.json(result);
+  return { result, cacheHit: false };
+}
+
+// ─────────────────────────────────────────────
+// ROUTE: GET /api/arsenal/:pitcherId
+// ─────────────────────────────────────────────
+router.get("/:pitcherId", async (req, res) => {
+  const { pitcherId } = req.params;
+  const year = parseInt(req.query.year ?? SEASON, 10);
+
+  try {
+    const { result, cacheHit } = await buildArsenalPayload(pitcherId, year);
+    res.setHeader("X-Cache", cacheHit ? "HIT" : "MISS");
+    res.json(result);
+  } catch (err) {
+    if (String(err.message).includes("Baseball Savant unavailable")) {
+      return res.status(502).json({ error: "Baseball Savant unavailable", pitcherId });
+    }
+    console.error(`  ✗ Savant CSV failed for ${pitcherId}: ${err.message}`);
+    return res.status(502).json({ error: "Baseball Savant unavailable", pitcherId });
+  }
 });
 
 module.exports = router;
+module.exports.buildArsenalPayloadForJob = async (pitcherId, year = SEASON) => {
+  const { result } = await buildArsenalPayload(pitcherId, year);
+  return result;
+};

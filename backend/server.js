@@ -43,13 +43,16 @@ app.use("/api/trends",   require("./routes/trends"));    // Anthropic: AI-genera
 app.use("/api/odds",         require("./routes/odds"));         // Odds API: h2h + totals + spreads for all MLB games (shared 20-min cache)
 app.use("/api/props",        require("./routes/props"));        // Anthropic: AI-generated prop recommendations per game
 app.use("/api/player-props", require("./routes/playerProps")); // Odds API: sportsbook player prop lines per game (shared 10-min cache)
+app.use("/api/team-stats", require("./routes/teamStats"));
 app.use("/api/auth",       authRouter);
 app.use("/api/picks",     picksRouter);
 app.use("/api/notes",     notesRouter);
 app.use("/api/digest",    digestRouter);
 app.use("/api/daily-card", dailyCardRouter); // Full-slate AI card
 app.use("/api/scout", require("./routes/scout"));
+app.use("/api/hr-scout", require("./routes/hrScout"));
 app.use("/api/chat", require("./routes/chat"));
+app.use("/api/advisor", require("./routes/advisor"));
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {

@@ -4,6 +4,7 @@ const OpenAI = require("openai");
 const mlb = require("../services/mlbApi");
 const requireAuth = require("../middleware/auth");
 const { query, isConnected } = require("../services/db");
+const { buildArsenalPayloadForJob } = require("./arsenal");
 
 const router = express.Router();
 
@@ -102,6 +103,10 @@ function fmtSignedOdds(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
   return n > 0 ? `+${n}` : String(n);
+}
+
+function fmtPctMetric(value) {
+  return value == null ? "—" : `${value}%`;
 }
 
 function windDescription(windDeg, windSpd, stadiumOrientation) {
@@ -213,6 +218,14 @@ async function fetchPitcherProfile(pitcherId) {
   const l3AvgK = recentGames.reduce((sum, g) => sum + Number(g.stat?.strikeOuts ?? 0), 0) / l3Count;
   const l3AvgIP = recentGames.reduce((sum, g) => sum + ipStringToFloat(g.stat?.inningsPitched ?? 0), 0) / l3Count;
   const l3AvgER = recentGames.reduce((sum, g) => sum + Number(g.stat?.earnedRuns ?? 0), 0) / l3Count;
+  let arsenalPitcherStats = null;
+
+  try {
+    const arsenalData = await buildArsenalPayloadForJob(pitcherId, SEASON);
+    arsenalPitcherStats = arsenalData?.pitcherStats ?? null;
+  } catch {
+    arsenalPitcherStats = null;
+  }
 
   return {
     era: Number.parseFloat(seasonStat.era ?? 0) || 0,
@@ -225,6 +238,7 @@ async function fetchPitcherProfile(pitcherId) {
     l3AvgIP,
     l3AvgER,
     hand: seasonStat.pitchHand?.code ?? null,
+    pitcherStats: arsenalPitcherStats,
   };
 }
 
@@ -245,7 +259,7 @@ function getPitcherLine(propsPayload, pitcherName, market) {
   };
 }
 
-function getGameTotalLine(rawOdds) {
+function getGameTotalLine(rawOdds, openingTotal = null) {
   const bookmakers = rawOdds?.bookmakers ?? [];
   const dk = bookmakers.find((book) => book.key === "draftkings") ?? bookmakers[0] ?? null;
   if (!dk) return null;
@@ -254,12 +268,16 @@ function getGameTotalLine(rawOdds) {
   const over = totals.outcomes?.find((o) => o.name === "Over");
   const under = totals.outcomes?.find((o) => o.name === "Under");
   if (!over?.point) return null;
+  const currentLine = Number(over.point);
+  const openLine = openingTotal ?? currentLine;
+  const delta = Math.round((currentLine - openLine) * 10) / 10;
+  const moveDir = delta > 0 ? "up" : delta < 0 ? "down" : "flat";
   return {
-    line: Number(over.point),
+    line: currentLine,
     overOdds: fmtSignedOdds(over.price),
     underOdds: fmtSignedOdds(under?.price),
-    openLine: Number(over.point),
-    moveDir: "flat",
+    openLine,
+    moveDir,
   };
 }
 
@@ -397,6 +415,7 @@ async function generateScoutPicks(date, generationsUsed) {
 
   let propsByGamePk = new Map();
   let oddsByGameKey = new Map();
+  let openingTotalsMap = new Map();
   let umpByGamePk = new Map();
   let injuries = [];
 
@@ -407,7 +426,7 @@ async function generateScoutPicks(date, generationsUsed) {
         [date, gamePks]
       ),
       query(
-        "SELECT game_key, odds FROM odds_snapshots WHERE slate_date = $1 AND game_key = ANY($2)",
+        "SELECT game_key, odds, opening_total FROM odds_snapshots WHERE slate_date = $1 AND game_key = ANY($2)",
         [date, gameKeys]
       ),
       query(
@@ -421,10 +440,27 @@ async function generateScoutPicks(date, generationsUsed) {
     ]);
     propsByGamePk = new Map((propsRows?.rows ?? []).map((row) => [Number(row.game_pk), { props: row.props ?? [], reason: row.reason ?? "ok" }]));
     oddsByGameKey = new Map((oddsRows?.rows ?? []).map((row) => [row.game_key, row.odds]));
+    openingTotalsMap = new Map((oddsRows?.rows ?? []).map((row) => [row.game_key, row.opening_total != null ? Number(row.opening_total) : null]));
     umpByGamePk   = new Map((umpRows?.rows ?? []).map((row) => [Number(row.game_pk), row.data]));
     injuries = injuriesRow?.rows?.[0]?.injuries?.injuries
       ?? injuriesRow?.rows?.[0]?.injuries
       ?? [];
+  }
+
+  let priorImprovementFlags = [];
+  if (isConnected()) {
+    try {
+      const prevDate = new Date(date + "T12:00:00Z");
+      prevDate.setDate(prevDate.getDate() - 1);
+      const yesterdayStr = prevDate.toISOString().slice(0, 10);
+      const evalRow = await query(
+        "SELECT improvement_flags FROM scout_evaluations WHERE slate_date = $1",
+        [yesterdayStr]
+      );
+      priorImprovementFlags = evalRow?.rows?.[0]?.improvement_flags ?? [];
+    } catch (err) {
+      console.warn("  · scout: could not load prior improvement flags:", err.message);
+    }
   }
 
   const profileCache = new Map();
@@ -464,7 +500,7 @@ async function generateScoutPicks(date, generationsUsed) {
     const homeOutsLine = getPitcherLine(propsPayload, homePitcher.name, "pitcher_outs");
     const awayKLine = getPitcherLine(propsPayload, awayPitcher.name, "pitcher_strikeouts");
     const awayOutsLine = getPitcherLine(propsPayload, awayPitcher.name, "pitcher_outs");
-    const totalLine = getGameTotalLine(oddsPayload);
+    const totalLine = getGameTotalLine(oddsPayload, openingTotalsMap.get(`${game.away?.name}|${game.home?.name}`) ?? null);
     const hpStats = umpPayload?.homePlate?.stats ?? {};
     const umpName = umpPayload?.homePlate?.name ?? "TBD";
     const umpDelta = hpStats.k_rate_delta ?? hpStats.kRateDelta ?? hpStats.weightedScore ?? null;
@@ -483,6 +519,7 @@ async function generateScoutPicks(date, generationsUsed) {
       [
         `PITCHER: ${homePitcher.name} (${game.home?.abbr}) vs ${game.away?.abbr}  ${formatGameTime(game.gameTime)}`,
         `ERA: ${homeProfile.era.toFixed(2)} | K/9: ${homeProfile.k9.toFixed(1)} | WHIP: ${homeProfile.whip.toFixed(2)} | BB/9: ${homeProfile.bb9.toFixed(1)} | avgIP: ${homeProfile.avgIP.toFixed(1)}`,
+        `SwStr%: ${fmtPctMetric(homeProfile.pitcherStats?.swStrPct)} | O-Swing%: ${fmtPctMetric(homeProfile.pitcherStats?.oSwingPct)} | F-Strike%: ${fmtPctMetric(homeProfile.pitcherStats?.fStrikePct)} | xwOBA: ${homeProfile.pitcherStats?.xwOBAAllowed ?? "n/a"}`,
         `L3 avg K: ${homeProfile.l3AvgK.toFixed(1)} | L3 avg IP: ${homeProfile.l3AvgIP.toFixed(1)} | L3 avg ER: ${homeProfile.l3AvgER.toFixed(1)}`,
         homeKLine || homeOutsLine
           ? `DK K line: ${homeKLine ? `${homeKLine.line} (${homeKLine.overOdds ?? "—"} over)` : "none"} | DK Outs line: ${homeOutsLine ? `${homeOutsLine.line} (${homeOutsLine.overOdds ?? "—"} over)` : "none"}`
@@ -494,6 +531,7 @@ async function generateScoutPicks(date, generationsUsed) {
         "",
         `PITCHER: ${awayPitcher.name} (${game.away?.abbr}) vs ${game.home?.abbr}  ${formatGameTime(game.gameTime)}`,
         `ERA: ${awayProfile.era.toFixed(2)} | K/9: ${awayProfile.k9.toFixed(1)} | WHIP: ${awayProfile.whip.toFixed(2)} | BB/9: ${awayProfile.bb9.toFixed(1)} | avgIP: ${awayProfile.avgIP.toFixed(1)}`,
+        `SwStr%: ${fmtPctMetric(awayProfile.pitcherStats?.swStrPct)} | O-Swing%: ${fmtPctMetric(awayProfile.pitcherStats?.oSwingPct)} | F-Strike%: ${fmtPctMetric(awayProfile.pitcherStats?.fStrikePct)} | xwOBA: ${awayProfile.pitcherStats?.xwOBAAllowed ?? "n/a"}`,
         `L3 avg K: ${awayProfile.l3AvgK.toFixed(1)} | L3 avg IP: ${awayProfile.l3AvgIP.toFixed(1)} | L3 avg ER: ${awayProfile.l3AvgER.toFixed(1)}`,
         awayKLine || awayOutsLine
           ? `DK K line: ${awayKLine ? `${awayKLine.line} (${awayKLine.overOdds ?? "—"} over)` : "none"} | DK Outs line: ${awayOutsLine ? `${awayOutsLine.line} (${awayOutsLine.overOdds ?? "—"} over)` : "none"}`
@@ -510,7 +548,11 @@ async function generateScoutPicks(date, generationsUsed) {
     );
   }
 
-  const systemPrompt = `You are The Scout — a sharp professional sports bettor with 15 years of experience beating closing lines. You are data-obsessed, value-focused, and direct. You only recommend a prop when at least two independent signals point the same direction. You always cite specific numbers. You speak in first person, present tense. Each reasoning is 2–4 sentences max. Be selective — quality over quantity. Only make picks you genuinely believe in.`;
+  const priorFlagsBlock = priorImprovementFlags.length > 0
+    ? `\n\nYesterday's self-evaluation flagged these areas for improvement:\n${priorImprovementFlags.map((f, i) => `${i + 1}. ${f}`).join("\n")}\nFactor these into today's analysis where relevant.`
+    : "";
+
+  const systemPrompt = `You are The Scout — a sharp professional sports bettor with 15 years of experience beating closing lines. You are data-obsessed, value-focused, and direct. You only recommend a prop when at least two independent signals point the same direction. You always cite specific numbers. You speak in first person, present tense. Each reasoning is 2–4 sentences max. Be selective — quality over quantity. Only make picks you genuinely believe in.${priorFlagsBlock}`;
 
   const userPrompt = `Today's slate data is below. Make your best picks for K props, Outs props, and Game Totals.
 Only pick markets where DK has posted a line (skip any with no line data).

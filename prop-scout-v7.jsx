@@ -1394,7 +1394,9 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
   const homeSpread    = liveOdds?.homeSpread    ?? game.odds.homeSpread;
   const homeSprdOdds  = liveOdds?.homeSpreadOdds ?? game.odds.homeSpreadOdds;
   const isLive        = !!liveOdds;
-  const lineMove      = game.odds.lineMove; // "over" | "under" | "none"
+  const lineMove      = liveOdds?.totalMoveDir === "up" ? "over"
+                     : liveOdds?.totalMoveDir === "down" ? "under"
+                     : game.odds.lineMove ?? "none";
   const gameStatus    = game.status ?? "Scheduled";
   const isInProgress  = gameStatus === "In Progress" || gameStatus === "Warmup";
   const isFinal       = gameStatus === "Final" || gameStatus === "Game Over";
@@ -1777,7 +1779,7 @@ const hitBoardScore = (hlog, order, pitcherHand, pf, sd) => {
 
 // kBoardScore: 0–95 composite for K prop attractiveness.
 // Inputs: season pitcher stats obj, pitching gamelog, park factor, umpire obj
-const kBoardScore = (pStats, gamelog, pf, umpire) => {
+const kBoardScore = (pStats, gamelog, pf, umpire, oppTeamStats) => {
   if (!pStats) return null;
   let s = 40;
   const k9   = parseFloat(pStats.kPer9  ?? pStats.k9)  || 0;
@@ -1799,6 +1801,21 @@ const kBoardScore = (pStats, gamelog, pf, umpire) => {
   else s += 3;
   // WHIP bonus — low WHIP = pitcher in control (10 pts)
   if (whip > 0) s += whip <= 1.05 ? 10 : whip <= 1.20 ? 6 : whip <= 1.35 ? 2 : 0;
+  const oppKPct = oppTeamStats?.kPct ?? null;
+  if (oppKPct !== null) {
+    if      (oppKPct >= 24) { s += 4; }
+    else if (oppKPct >= 21) { s += 2; }
+    else if (oppKPct <= 17) { s -= 4; }
+    else if (oppKPct <= 19) { s -= 2; }
+  }
+  const xwOBA = pStats?.pitcherStats?.xwOBAAllowed ?? null;
+  if (xwOBA !== null) {
+    if      (xwOBA <= 0.270) { s += 5; }
+    else if (xwOBA <= 0.290) { s += 3; }
+    else if (xwOBA <= 0.310) { s += 1; }
+    else if (xwOBA >= 0.350) { s -= 4; }
+    else if (xwOBA >= 0.330) { s -= 2; }
+  }
   return Math.round(Math.max(10, Math.min(95, s)));
 };
 
@@ -1831,13 +1848,27 @@ const outsBoardScore = (pStats, gamelog, pf) => {
     const recentEra = totalOuts > 0 ? (totalER * 27) / totalOuts : seasonEra;
     s += recentEra < seasonEra - 0.5 ? 12 : recentEra < seasonEra ? 7 : recentEra < seasonEra + 1 ? 3 : 0;
   }
+  const lastStart = recentStarts[0];
+  if (lastStart?.pc != null && lastStart?.date) {
+    const daysSince = Math.floor((Date.now() - new Date(lastStart.date).getTime()) / (24 * 60 * 60 * 1000));
+    const pitchCount = parseInt(lastStart.pc, 10);
+    if (Number.isFinite(daysSince) && Number.isFinite(pitchCount) && daysSince <= 4) {
+      if (pitchCount >= 100) s -= 6;
+      else if (pitchCount >= 85) s -= 3;
+    }
+  }
+  const xwOBA = pStats?.pitcherStats?.xwOBAAllowed ?? null;
+  if (xwOBA !== null) {
+    if      (xwOBA <= 0.280) s += 4;
+    else if (xwOBA >= 0.345) s -= 3;
+  }
   // Park hit suppression — pitcher parks allow deeper outings (10 pts)
   s += (1.0 - pf.hit) * 50;
   return Math.round(Math.max(10, Math.min(95, s)));
 };
 
 // computePitcherBoard: returns top-20 SP candidates sorted by score.
-const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps) => {
+const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats) => {
   const candidates = [];
   (liveSlate ?? []).forEach(game => {
     [
@@ -1851,8 +1882,9 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
       const pf      = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
       const umpire  = liveUmpires[game.gamePk];
       const merged  = { ...(p ?? {}), ...(pStats ?? {}) };
+      const oppTeamStats = liveTeamStats?.[facingTeam];
       const score   = type === "k"
-        ? kBoardScore(merged, gamelog, pf, umpire)
+        ? kBoardScore(merged, gamelog, pf, umpire, oppTeamStats)
         : outsBoardScore(merged, gamelog, pf);
       if (score === null) return;
 
@@ -1867,6 +1899,22 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
         ? recentStarts.reduce((s, g) => s + (g.k ?? 0), 0) / recentStarts.length
         : null;
       const avgK3 = avgK3Raw !== null ? avgK3Raw.toFixed(1) : null;
+      const signals = [];
+      const oppKPct = oppTeamStats?.kPct ?? null;
+      if (type === "k" && oppKPct !== null) {
+        if (oppKPct >= 24) signals.push(`Opp K% ${oppKPct}% (high-K lineup)`);
+        else if (oppKPct <= 17) signals.push(`Opp K% ${oppKPct}% (low-K lineup)`);
+      }
+      if (type === "outs") {
+        const lastStart = recentStarts[0];
+        const pitchCount = parseInt(lastStart?.pc, 10);
+        const daysSince = lastStart?.date
+          ? Math.floor((Date.now() - new Date(lastStart.date).getTime()) / (24 * 60 * 60 * 1000))
+          : null;
+        if (Number.isFinite(daysSince) && Number.isFinite(pitchCount) && daysSince <= 4 && pitchCount >= 85) {
+          signals.push(`${pitchCount}p last start (${daysSince}d rest)`);
+        }
+      }
 
       // Synthetic suggested line — same math as Best Bets Today (fallback when Odds API has no line)
       const avgIPNum = (() => {
@@ -1902,6 +1950,7 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
         umpireRating: umpire?.rating ?? null,
         propLine,
         suggestedLine,
+        signals,
       });
     });
   });
@@ -2133,6 +2182,41 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
         factors.push({ label: "Market Total", pts: linePts, max: 5,
           value: `O/U ${totalLine}`, detail: totalLine >= 9.5 ? "High total — market expects big scoring, slight over lean" : totalLine <= 7.5 ? "Low total — pitching dominance priced in" : "Average total line" });
       }
+      // Bullpen Quality — weak pen = more late-inning runs (OVER); strong fresh pen = UNDER
+      const awayBp = game.bullpen?.away;
+      const homeBp = game.bullpen?.home;
+      if (awayBp?.grade || homeBp?.grade) {
+        const gradeToEra = { "A": 2.8, "B+": 3.25, "B": 3.75, "B-": 4.25, "C+": 4.75, "C": 5.5 };
+        const awayBpEra = gradeToEra[awayBp?.grade] ?? 4.25;
+        const homeBpEra = gradeToEra[homeBp?.grade] ?? 4.25;
+        const avgBpEra  = (awayBpEra + homeBpEra) / 2;
+
+        // ERA-based pts (±8 max)
+        const bpPts = avgBpEra > 4.75 ? 8 : avgBpEra > 4.25 ? 4 : avgBpEra < 3.25 ? -8 : avgBpEra < 3.75 ? -4 : 0;
+
+        // Fatigue overlay — tired arms give up more runs
+        const eitherHigh = awayBp?.fatigueLevel === "HIGH" || homeBp?.fatigueLevel === "HIGH";
+        const bothLow    = awayBp?.fatigueLevel === "LOW"  && homeBp?.fatigueLevel === "LOW";
+        const fatiguePts = eitherHigh ? 4 : bothLow ? -3 : 0;
+
+        const totalBpPts = bpPts + fatiguePts;
+        score += totalBpPts;
+
+        const bpDetail = avgBpEra > 4.5
+          ? `Weak bullpens (avg ~${avgBpEra.toFixed(1)} ERA) — late-inning scoring risk`
+          : avgBpEra < 3.5
+          ? `Strong bullpens (avg ~${avgBpEra.toFixed(1)} ERA) — hold leads late`
+          : "Average bullpen strength";
+        const fatigueNote = eitherHigh ? " · fatigue risk" : bothLow ? " · fresh arms" : "";
+
+        factors.push({
+          label:  "Bullpen Quality",
+          pts:    totalBpPts,
+          max:    8,
+          value:  `${awayBp?.grade ?? "?"} / ${homeBp?.grade ?? "?"} (Away / Home)${eitherHigh ? " — HIGH fatigue" : ""}`,
+          detail: bpDetail + fatigueNote,
+        });
+      }
       score = Math.round(Math.max(30, Math.min(78, score)));
       const lean = score >= 50 ? "OVER" : "UNDER";
       games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
@@ -2295,6 +2379,48 @@ function computeLiveProps({
         else if (dW < -4) { score -= 6; projK -= 0.6; kR.push(`Low arsenal whiff (${Math.round(wAvgWhiff)}%)`); }
         const bestP = [...pitcher.arsenal].sort((a, b) => (parseFloat(b.whiffPct) || 0) - (parseFloat(a.whiffPct) || 0))[0];
         if (bestP && parseFloat(bestP.whiffPct) >= 35) kR.push(`${bestP.type}: ${bestP.whiffPct}% whiff`);
+      }
+
+      const swStr = pitcher.pitcherStats?.swStrPct ?? null;
+      if (swStr !== null) {
+        if      (swStr >= 14) { score += 5; projK += 0.4; kR.push(`SwStr% ${swStr}% (elite)`); }
+        else if (swStr >= 12) { score += 3; projK += 0.2; kR.push(`SwStr% ${swStr}% (above avg)`); }
+        else if (swStr <= 8)  { score -= 3; projK -= 0.2; kR.push(`SwStr% ${swStr}% (below avg)`); }
+      }
+
+      const oSwing = pitcher.pitcherStats?.oSwingPct ?? null;
+      if (oSwing !== null) {
+        if      (oSwing >= 33) { score += 3; projK += 0.2; kR.push(`Chase rate ${oSwing}% (high)`); }
+        else if (oSwing <= 26) { score -= 2; kR.push(`Chase rate ${oSwing}% (low)`); }
+      }
+
+      const fStrike = pitcher.pitcherStats?.fStrikePct ?? null;
+      if (fStrike !== null) {
+        if      (fStrike >= 65) { score += 2; kR.push(`F-Strike% ${fStrike}% (elite command)`); }
+        else if (fStrike <= 57) { score -= 2; kR.push(`F-Strike% ${fStrike}% (poor command)`); }
+      }
+
+      const barrelPct = pitcher.pitcherStats?.barrelPct ?? null;
+      if (barrelPct !== null) {
+        if      (barrelPct <= 5)  { score += 3; kR.push(`Barrel% ${barrelPct}% (elite suppression)`); }
+        else if (barrelPct <= 7)  { score += 1; kR.push(`Barrel% ${barrelPct}% (above avg)`); }
+        else if (barrelPct >= 12) { score -= 3; kR.push(`Barrel% ${barrelPct}% (high contact risk)`); }
+        else if (barrelPct >= 10) { score -= 1; kR.push(`Barrel% ${barrelPct}% (elevated)`); }
+      }
+
+      const hardHitPct = pitcher.pitcherStats?.hardHitPct ?? null;
+      if (hardHitPct !== null) {
+        if      (hardHitPct <= 32) { score += 2; kR.push(`HH% ${hardHitPct}% (elite)`); }
+        else if (hardHitPct >= 42) { score -= 2; kR.push(`HH% ${hardHitPct}% (elevated)`); }
+      }
+
+      const xwOBA = pitcher.pitcherStats?.xwOBAAllowed ?? null;
+      if (xwOBA !== null) {
+        if      (xwOBA <= 0.270) { score += 5; kR.push(`xwOBA ${xwOBA} (elite contact suppression)`); }
+        else if (xwOBA <= 0.290) { score += 3; kR.push(`xwOBA ${xwOBA} (above avg)`); }
+        else if (xwOBA <= 0.310) { score += 1; kR.push(`xwOBA ${xwOBA} (solid)`); }
+        else if (xwOBA >= 0.350) { score -= 4; kR.push(`xwOBA ${xwOBA} (poor contact suppression)`); }
+        else if (xwOBA >= 0.330) { score -= 2; kR.push(`xwOBA ${xwOBA} (below avg)`); }
       }
 
       const umpK = parseFloat(umpire?.kRate) || 22.5;
@@ -2783,11 +2909,23 @@ export default function App() {
   const [scoutExpanded, setScoutExpanded] = useState(null);
   const [scoutEvalExpanded, setScoutEvalExpanded] = useState(null);
   const [scoutGenerationsLeft, setScoutGenerationsLeft] = useState(3);
+  const [hrScoutPicks, setHrScoutPicks] = useState(null);       // null = not yet loaded
+  const [hrScoutLoading, setHrScoutLoading] = useState(false);
+  const [hrScoutError, setHrScoutError] = useState(null);
+  const [hrScoutGenerationsLeft, setHrScoutGenerationsLeft] = useState(3);
+  const [hrScoutExpanded, setHrScoutExpanded] = useState(null); // index of expanded card
+  const [hrScoutGeneratedAt, setHrScoutGeneratedAt] = useState(null);
   const [chatHistory, setChatHistory] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState(null);
   const [chatMessagesLeft, setChatMessagesLeft] = useState(30);
+  const [advisorPersona, setAdvisorPersona] = useState("pro");
+  const [advisorHistory, setAdvisorHistory] = useState([]);
+  const [advisorInput, setAdvisorInput] = useState("");
+  const [advisorLoading, setAdvisorLoading] = useState(false);
+  const [advisorError, setAdvisorError] = useState(null);
+  const [advisorMessagesLeft, setAdvisorMessagesLeft] = useState(20);
   // Prop result tracker — persisted to localStorage
   const [propLog, setPropLog] = useState(() => {
     try { return JSON.parse(localStorage.getItem("propscout_log") || "[]"); }
@@ -2819,8 +2957,9 @@ export default function App() {
   const [liveUmpires, setLiveUmpires] = useState({});
   const [livePitcherStats, setLivePitcherStats] = useState({});
   const [liveGameLog, setLiveGameLog] = useState({});
+  const [liveTeamStats, setLiveTeamStats] = useState({});
   // Baseball Savant data — keyed by MLB player ID
-  const [pitcherArsenal, setPitcherArsenal] = useState({}); // pitcherId → arsenal array
+  const [pitcherArsenal, setPitcherArsenal] = useState({}); // pitcherId → { arsenal, pitcherStats, ... }
   const [batterSplits, setBatterSplits] = useState({});     // batterId  → splits object
   const [liveHittingLog, setLiveHittingLog] = useState({});
   const [liveH2H, setLiveH2H] = useState({});               // `${batterId}_${pitcherId}` → h2h object
@@ -2852,6 +2991,7 @@ export default function App() {
   const [liveBoardResults, setLiveBoardResults] = useState({}); // playerId → { h, hr, ab, live }
   const boardBoxFetched = useRef(new Set());                  // gamePks already fetched for Board results
   const chatBottomRef = useRef(null);
+  const advisorBottomRef = useRef(null);
 
   // Fetch weather when a game card is opened
   useEffect(() => {
@@ -3164,8 +3304,27 @@ export default function App() {
   }, [view, currentUser, scoutPicks, scoutLoading]);
 
   useEffect(() => {
+    if (view !== "hr-scout" || !currentUser || hrScoutPicks !== null || hrScoutLoading || hrScoutError) return;
+
+    setHrScoutLoading(true);
+    setHrScoutError(null);
+    apiFetch("/api/hr-scout/picks")
+      .then((data) => {
+        setHrScoutPicks(data.picks ?? []);
+        setHrScoutGeneratedAt(data.generatedAt ?? null);
+        setHrScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
+      })
+      .catch((err) => setHrScoutError(err.message ?? "Failed to load HR Scout picks"))
+      .finally(() => setHrScoutLoading(false));
+  }, [view, currentUser, hrScoutPicks, hrScoutLoading, hrScoutError]);
+
+  useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [chatHistory, chatLoading]);
+
+  useEffect(() => {
+    advisorBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [advisorHistory, advisorLoading]);
 
   // Background prefetch: home + away pitcher stats + lineups for ALL slate games
   // so the cross-slate Best Bets card and Games board can compute and update reactively.
@@ -3400,7 +3559,7 @@ export default function App() {
     }
     if (!IS_SAVANT_SANDBOX && pitcherId && !pitcherArsenal[pitcherId]) {
       apiFetch(`/api/arsenal/${pitcherId}`)
-        .then(data => { if (data?.arsenal?.length) setPitcherArsenal(prev => ({ ...prev, [pitcherId]: data.arsenal })); })
+        .then(data => { if (data?.arsenal?.length || data?.pitcherStats) setPitcherArsenal(prev => ({ ...prev, [pitcherId]: data })); })
         .catch(err => console.error("Home arsenal fetch:", err));
     }
     // Away pitcher stats + arsenal
@@ -3416,7 +3575,7 @@ export default function App() {
     }
     if (!IS_SAVANT_SANDBOX && awayPitcherId && !pitcherArsenal[awayPitcherId]) {
       apiFetch(`/api/arsenal/${awayPitcherId}`)
-        .then(data => { if (data?.arsenal?.length) setPitcherArsenal(prev => ({ ...prev, [awayPitcherId]: data.arsenal })); })
+        .then(data => { if (data?.arsenal?.length || data?.pitcherStats) setPitcherArsenal(prev => ({ ...prev, [awayPitcherId]: data })); })
         .catch(err => console.error("Away arsenal fetch:", err));
     }
     // Fetch bullpen data via gamePk — one call returns both away + home
@@ -3431,6 +3590,18 @@ export default function App() {
         .then(data => setLiveNrfiData(prev => ({ ...prev, [gamePk]: data })))
         .catch(err => console.error("NRFI:", err));
     }
+    [
+      { id: sg.away?.id, abbr: sg.away?.abbr },
+      { id: sg.home?.id, abbr: sg.home?.abbr },
+    ].forEach(({ id, abbr }) => {
+      if (id && abbr && !liveTeamStats[abbr]) {
+        apiFetch(`/api/team-stats/${id}`)
+          .then(data => {
+            if (data?.kPct != null) setLiveTeamStats(prev => ({ ...prev, [abbr]: data }));
+          })
+          .catch(() => {});
+      }
+    });
   }, [selectedId, view, liveSlate]);
 
 
@@ -3504,7 +3675,7 @@ export default function App() {
     pitcher: (() => {
       const ps  = livePitcherStats[baseGame.pitcher?.id];
       const pid = baseGame.pitcher?.id;
-      const liveArsenal = pid ? pitcherArsenal[pid] : null;
+      const liveArsenalData = pid ? pitcherArsenal[pid] : null;
       return {
         ...baseGame.pitcher,
         ...(ps ? {
@@ -3516,15 +3687,16 @@ export default function App() {
           k:      ps.k,     bb:     ps.bb,    ip: ps.ip,
         } : {}),
         // Overlay real Savant arsenal when available (preserves mock arsenal as fallback)
-        arsenal: liveArsenal ?? baseGame.pitcher.arsenal ?? [],
-        arsenalLive: !!liveArsenal,
+        arsenal: liveArsenalData?.arsenal ?? baseGame.pitcher.arsenal ?? [],
+        pitcherStats: liveArsenalData?.pitcherStats ?? baseGame.pitcher.pitcherStats ?? null,
+        arsenalLive: !!liveArsenalData,
       };
     })(),
     // Away pitcher stats + arsenal overlay
     awayPitcher: (() => {
       const ap = baseGame.awayPitcher ?? { name: "TBD", team: "—", hand: "?", number: "—", era: "—", whip: "—", kPer9: "—", bbPer9: "—", avgIP: "—", arsenal: [], arsenalLive: false };
       const ps = livePitcherStats[ap?.id];
-      const liveArsenal = ap?.id ? pitcherArsenal[ap.id] : null;
+      const liveArsenalData = ap?.id ? pitcherArsenal[ap.id] : null;
       return {
         ...ap,
         ...(ps ? {
@@ -3535,8 +3707,9 @@ export default function App() {
           wins:   ps.wins,  losses: ps.losses,
           k:      ps.k,     bb:     ps.bb,    ip: ps.ip,
         } : {}),
-        arsenal:     liveArsenal ?? ap.arsenal ?? [],
-        arsenalLive: !!liveArsenal,
+        arsenal:     liveArsenalData?.arsenal ?? ap.arsenal ?? [],
+        pitcherStats: liveArsenalData?.pitcherStats ?? ap.pitcherStats ?? null,
+        arsenalLive: !!liveArsenalData,
       };
     })(),
     // Bullpen: overlay live data (keyed by gamePk, shape { away, home })
@@ -3582,6 +3755,8 @@ export default function App() {
       awaySpreadOdds: live.awaySpreadOdds ?? g.odds.awaySpreadOdds,
       homeSpread:     live.homeSpread     ?? g.odds.homeSpread,
       homeSpreadOdds: live.homeSpreadOdds ?? g.odds.homeSpreadOdds,
+      lineMove:       live.totalMoveDir === "up" ? "over" : live.totalMoveDir === "down" ? "under" : g.odds.lineMove ?? "none",
+      movement:       live.movementText ?? g.odds.movement ?? "No movement data.",
       live:      true,
       book:      live.book,
       books:     live.books ?? {},
@@ -3783,11 +3958,36 @@ export default function App() {
     return match.books?.[preferredBook]?.line != null;
   };
 
+  const parseOddsInt = (str) => {
+    if (!str) return -115;
+    const n = parseInt(String(str).replace("+", ""), 10);
+    return Number.isFinite(n) ? n : -115;
+  };
+
+  const getPreferredOdds = (pick) => {
+    const props = livePlayerProps[String(pick.gamePk)]?.props ?? [];
+    const lastName = (pick.fullName ?? "").split(" ").pop().toLowerCase();
+    const match = props.find(p =>
+      p.market === pick.market &&
+      (p.player ?? "").toLowerCase().includes(lastName)
+    );
+    const book = match?.books?.[preferredBook];
+    const oddsStr = pick.lean === "OVER" ? book?.overOdds : book?.underOdds;
+    return parseOddsInt(oddsStr);
+  };
+
   const rawSlatePicks = !IS_STATS_SANDBOX && liveSlate?.length
     ? computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeather, livePlayerProps)
     : [];
   const topSlatePicks = preferredBook
-    ? rawSlatePicks.filter(isAvailableAtPreferredBook)
+    ? rawSlatePicks
+        .filter(isAvailableAtPreferredBook)
+        .sort((a, b) => {
+          // Primary: confidence (higher = better)
+          if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+          // Secondary: odds value at preferred book (more positive = better value)
+          return getPreferredOdds(b) - getPreferredOdds(a);
+        })
     : rawSlatePicks;
 
   // Group model picks by tier for display
@@ -3807,6 +4007,8 @@ export default function App() {
     "NRFI leans",
     "Any injury alerts?",
   ];
+  const ADVISOR_PRO_CHIPS = ["Give me your best plays today", "Best K props with value", "Any fade spots?", "Show me the chalk plays"];
+  const ADVISOR_LOTTO_CHIPS = ["Build me a parlay", "Best HR props today", "High-ceiling K plays", "Max upside plays"];
 
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); };
 
@@ -3823,6 +4025,23 @@ export default function App() {
       setScoutError(err.message);
     } finally {
       setScoutLoading(false);
+    }
+  };
+
+  const handleHRScoutRegenerate = async () => {
+    if (hrScoutGenerationsLeft <= 0) return;
+    setHrScoutLoading(true);
+    setHrScoutError(null);
+    try {
+      const data = await apiMutate("/api/hr-scout/regenerate", "POST", {});
+      setHrScoutPicks(data.picks ?? []);
+      setHrScoutExpanded(null);
+      setHrScoutGeneratedAt(data.generatedAt ?? null);
+      setHrScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
+    } catch (err) {
+      setHrScoutError(err.message ?? "Regeneration failed");
+    } finally {
+      setHrScoutLoading(false);
     }
   };
 
@@ -3858,6 +4077,55 @@ export default function App() {
       setChatLoading(false);
     }
   };
+
+  async function handleAdvisorSend(messageOverride) {
+    const message = messageOverride ?? advisorInput.trim();
+    if (!message || advisorLoading || advisorMessagesLeft <= 0) return;
+    setAdvisorInput("");
+    setAdvisorLoading(true);
+    setAdvisorError(null);
+
+    const userMsg = { role: "user", content: message };
+    const newHistory = [...advisorHistory, userMsg];
+    setAdvisorHistory(newHistory);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/advisor`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        body: JSON.stringify({
+          persona: advisorPersona,
+          messages: newHistory.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content : "[picks]" })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Advisor error");
+      if (data.messagesUsedToday != null) setAdvisorMessagesLeft(data.maxMessagesPerDay - data.messagesUsedToday);
+
+      const assistantMsg = {
+        role: "assistant",
+        type: data.type,
+        content: data.content ?? null,
+        picks: data.picks ?? null,
+        parlay: data.parlay ?? null,
+      };
+      setAdvisorHistory(prev => [...prev, assistantMsg]);
+    } catch (err) {
+      setAdvisorError(err.message);
+    } finally {
+      setAdvisorLoading(false);
+    }
+  }
+
+  function handleAdvisorPersonaSwitch(newPersona) {
+    if (newPersona === advisorPersona) return;
+    setAdvisorPersona(newPersona);
+    setAdvisorHistory([]);
+    setAdvisorError(null);
+  }
 
   // ── Pick tracker helpers ──────────────────────────────────────────────────
   const logPick = (prop) => {
@@ -4250,6 +4518,17 @@ export default function App() {
                   <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>{p.label}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
                     <span style={{ fontSize: 9, color: "#6b7280" }}>{p.game}</span>
+                    <span style={{
+                      fontSize: 7,
+                      fontWeight: 800,
+                      color: "#94a3b8",
+                      background: "rgba(148,163,184,0.08)",
+                      border: "1px solid rgba(148,163,184,0.2)",
+                      borderRadius: 4,
+                      padding: "1px 5px",
+                      fontFamily: "monospace",
+                      letterSpacing: "0.04em",
+                    }} title="Algorithmic pick — generated by the scoring model using Statcast + sportsbook data. No AI/LLM involved.">⚙ ALGO</span>
                     {p.lineupConfirmed && <span style={{ fontSize: 8, color: "#22c55e", fontWeight: 700 }}>✓ LINEUP</span>}
                     {gameStatus === "LIVE" && (
                       <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
@@ -4499,6 +4778,31 @@ export default function App() {
             <button onClick={() => setView("model")} style={{ background: view === "model" ? "#fbbf24" : "#161827", border: `1px solid ${view === "model" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "model" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Model</button>
             {isScoutUser && (
               <button onClick={() => setView("scout")} style={{ background: view === "scout" ? "#38bdf8" : "#161827", border: `1px solid ${view === "scout" ? "#38bdf8" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "scout" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Scout</button>
+            )}
+            {isScoutUser && (
+              <button
+                onClick={() => setView("hr-scout")}
+                style={{
+                  background: view === "hr-scout" ? "#fb923c" : "#161827",
+                  border: `1px solid ${view === "hr-scout" ? "#fb923c" : "#1f2437"}`,
+                  borderRadius: 8,
+                  padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+                  fontSize: isNarrowPhone ? 9 : 10,
+                  color: view === "hr-scout" ? "#000" : "#9ca3af",
+                  fontFamily: "monospace",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  textTransform: "uppercase",
+                }}
+              >
+                ⚾ HR Scout
+              </button>
+            )}
+            {isScoutUser && (
+              <button onClick={() => setView("advisor")}
+                style={{ background: view === "advisor" ? "#f59e0b" : "#161827", border: `1px solid ${view === "advisor" ? "#f59e0b" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "advisor" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
+                🧠 Advisor
+              </button>
             )}
             {isChatUser && (
               <button onClick={() => setView("chat")} style={{ background: view === "chat" ? "#a78bfa" : "#161827", border: `1px solid ${view === "chat" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>💬 Chat</button>
@@ -5021,6 +5325,160 @@ export default function App() {
           </div>
         )}
 
+        {view === "advisor" && isScoutUser && (
+          <div style={{ height: "calc(100vh - 120px)", display: "flex", flexDirection: "column", gap: 10 }}>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🧠 ADVISOR</div>
+                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>Pick your persona · Ask for plays or research</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
+                  {advisorMessagesLeft} left today
+                </div>
+                <button onClick={() => { setAdvisorHistory([]); setAdvisorError(null); }}
+                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 8, padding: "6px 10px", fontSize: 9, color: "#9ca3af", fontFamily: "monospace", cursor: "pointer" }}>
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 6 }}>
+              {[["pro", "🎯 The Pro", "#f59e0b"], ["lotto", "🎲 The Lotto Guy", "#22c55e"]].map(([p, label, color]) => (
+                <button key={p} onClick={() => handleAdvisorPersonaSwitch(p)}
+                  style={{ flex: 1, background: advisorPersona === p ? `${color}18` : "#161827", border: `1px solid ${advisorPersona === p ? color : "#1f2437"}`, borderRadius: 10, padding: "8px 10px", fontSize: 10, color: advisorPersona === p ? color : "#6b7280", fontFamily: "monospace", fontWeight: 700, cursor: "pointer" }}>
+                  {label}
+                  {advisorPersona === p && <span style={{ fontSize: 8, marginLeft: 5, opacity: 0.7 }}>ACTIVE</span>}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ fontSize: 9, color: "#6b7280", fontStyle: "italic", padding: "0 2px" }}>
+              {advisorPersona === "pro"
+                ? "Singles only · -200 to +150 odds · 3+ aligned signals required · Would rather pass than force it"
+                : "High-upside props · +200 or better · 2–4 leg parlays · Finds situations where data beats the line"}
+            </div>
+
+            {advisorHistory.length === 0 && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {(advisorPersona === "pro" ? ADVISOR_PRO_CHIPS : ADVISOR_LOTTO_CHIPS).map(chip => (
+                  <button key={chip} onClick={() => handleAdvisorSend(chip)}
+                    disabled={advisorLoading || advisorMessagesLeft <= 0}
+                    style={{ background: advisorPersona === "pro" ? "rgba(245,158,11,0.10)" : "rgba(34,197,94,0.10)", border: `1px solid ${advisorPersona === "pro" ? "rgba(245,158,11,0.30)" : "rgba(34,197,94,0.30)"}`, borderRadius: 999, padding: "7px 10px", fontSize: 9, color: advisorPersona === "pro" ? "#fcd34d" : "#86efac", fontFamily: "monospace", fontWeight: 700, cursor: advisorLoading ? "default" : "pointer" }}>
+                    {chip}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {advisorError && (
+              <div style={{ background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.30)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+                {advisorError}
+              </div>
+            )}
+
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "#101220", border: "1px solid #1f2437", borderRadius: 14, padding: "12px", display: "flex", flexDirection: "column", gap: 10 }}>
+              {advisorHistory.length === 0 ? (
+                <div style={{ margin: "auto 0", textAlign: "center", color: "#6b7280", fontSize: 11, lineHeight: 1.7 }}>
+                  {advisorPersona === "pro"
+                    ? "Ask The Pro for disciplined single-bet plays backed by data."
+                    : "Ask The Lotto Guy for high-upside props and parlay ideas."}
+                </div>
+              ) : (
+                advisorHistory.map((msg, idx) => (
+                  <div key={idx} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
+                    {msg.role === "user" ? (
+                      <div style={{ maxWidth: "85%", background: advisorPersona === "pro" ? "rgba(245,158,11,0.15)" : "rgba(34,197,94,0.15)", border: `1px solid ${advisorPersona === "pro" ? "rgba(245,158,11,0.30)" : "rgba(34,197,94,0.30)"}`, borderRadius: 12, padding: "10px 12px" }}>
+                        <div style={{ fontSize: 11, color: "#f3f4f6", lineHeight: 1.6 }}>{msg.content}</div>
+                      </div>
+                    ) : msg.type === "message" ? (
+                      <div style={{ maxWidth: "90%", background: "#171a2b", border: "1px solid #232840", borderRadius: 12, padding: "10px 12px" }}>
+                        <div style={{ fontSize: 11, color: "#f3f4f6", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{msg.content}</div>
+                      </div>
+                    ) : (
+                      <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 8 }}>
+                        {(msg.picks ?? []).map((pick, pi) => {
+                          const accentColor = advisorPersona === "pro" ? "#f59e0b" : "#22c55e";
+                          const confColor = pick.confidence === "HIGH" ? "#22c55e" : pick.confidence === "MEDIUM" ? "#f59e0b" : "#94a3b8";
+                          return (
+                            <div key={pi} style={{ background: "#161827", border: `1px solid ${accentColor}33`, borderRadius: 12, padding: "12px 14px" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                                <div>
+                                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{pick.player}</div>
+                                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>{pick.team} vs {pick.opponent} · {pick.marketLabel}</div>
+                                </div>
+                                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                                  <div style={{ background: `${accentColor}22`, border: `1px solid ${accentColor}55`, borderRadius: 8, padding: "4px 10px", fontSize: 11, fontWeight: 800, color: accentColor, fontFamily: "monospace" }}>
+                                    {pick.lean} {pick.line}
+                                  </div>
+                                  <div style={{ fontSize: 10, fontWeight: 700, color: "#f9fafb", fontFamily: "monospace" }}>{pick.odds}</div>
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 6 }}>
+                                <span style={{ background: `${confColor}18`, border: `1px solid ${confColor}44`, borderRadius: 999, padding: "2px 7px", fontSize: 8, color: confColor, fontFamily: "monospace", fontWeight: 800 }}>
+                                  {pick.confidence}
+                                </span>
+                                {(pick.signals ?? []).map((sig, si) => (
+                                  <span key={si} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                    {sig}
+                                  </span>
+                                ))}
+                              </div>
+                              <div style={{ fontSize: 10, color: "#d1d5db", lineHeight: 1.5 }}>{pick.reasoning}</div>
+                            </div>
+                          );
+                        })}
+
+                        {msg.parlay && (
+                          <div style={{ background: "rgba(34,197,94,0.06)", border: "2px solid rgba(34,197,94,0.30)", borderRadius: 12, padding: "12px 14px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                              <div style={{ fontSize: 11, fontWeight: 800, color: "#22c55e", fontFamily: "monospace", letterSpacing: "0.06em" }}>🎲 PARLAY CARD</div>
+                              <div style={{ background: "rgba(34,197,94,0.20)", border: "1px solid rgba(34,197,94,0.50)", borderRadius: 8, padding: "4px 10px", fontSize: 13, fontWeight: 800, color: "#22c55e", fontFamily: "monospace" }}>
+                                {msg.parlay.combinedOdds}
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
+                              {(msg.parlay.legs ?? []).map((leg, li) => (
+                                <div key={li} style={{ fontSize: 10, color: "#86efac", fontFamily: "monospace" }}>• {leg}</div>
+                              ))}
+                            </div>
+                            <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>{msg.parlay.reasoning}</div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+              {advisorLoading && (
+                <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                  <div style={{ background: "#171a2b", border: "1px solid #232840", borderRadius: 12, padding: "10px 12px", fontSize: 10, color: "#6b7280" }}>
+                    {advisorPersona === "pro" ? "Crunching the numbers…" : "Finding the angles…"}
+                  </div>
+                </div>
+              )}
+              <div ref={advisorBottomRef} />
+            </div>
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center", background: "#161827", border: "1px solid #1f2437", borderRadius: 14, padding: "10px" }}>
+              <input
+                value={advisorInput}
+                onChange={e => setAdvisorInput(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAdvisorSend(); }}}
+                placeholder={advisorMessagesLeft > 0 ? `Ask ${advisorPersona === "pro" ? "The Pro" : "The Lotto Guy"}…` : "Daily limit reached"}
+                disabled={advisorLoading || advisorMessagesLeft <= 0}
+                style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#f9fafb", fontSize: 12, fontFamily: "monospace" }}
+              />
+              <button onClick={() => handleAdvisorSend()}
+                disabled={advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0}
+                style={{ background: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "#1f2437" : advisorPersona === "pro" ? "#f59e0b" : "#22c55e", border: "1px solid transparent", borderRadius: 10, padding: "8px 12px", color: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "#4b5563" : "#000", fontSize: 10, fontFamily: "monospace", fontWeight: 800, cursor: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "default" : "pointer" }}>
+                Send
+              </button>
+            </div>
+          </div>
+        )}
+
         {view === "scout" && isScoutUser && (
           <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -5208,6 +5666,204 @@ export default function App() {
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {view === "hr-scout" && isScoutUser && (
+          <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+
+            {/* ── Header row ── */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>⚾ HR SCOUT</div>
+                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
+                  Algorithm + AI · HR prop research · Not financial advice
+                  {hrScoutGeneratedAt && (
+                    <span style={{ marginLeft: 8, color: "#374151" }}>
+                      · {new Date(hrScoutGeneratedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={handleHRScoutRegenerate}
+                disabled={hrScoutLoading || hrScoutGenerationsLeft <= 0}
+                style={{
+                  background: hrScoutGenerationsLeft > 0 ? "rgba(251,146,60,0.15)" : "rgba(255,255,255,0.04)",
+                  border: `1px solid ${hrScoutGenerationsLeft > 0 ? "rgba(251,146,60,0.4)" : "#2d3148"}`,
+                  borderRadius: 8,
+                  padding: "6px 12px",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: hrScoutGenerationsLeft > 0 ? "#fdba74" : "#4b5563",
+                  cursor: hrScoutGenerationsLeft > 0 ? "pointer" : "not-allowed",
+                  fontFamily: "monospace",
+                }}
+              >
+                {hrScoutLoading ? "..." : `↺ Regenerate (${hrScoutGenerationsLeft} left)`}
+              </button>
+            </div>
+
+            {/* ── Error ── */}
+            {hrScoutError && (
+              <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+                {hrScoutError}
+              </div>
+            )}
+
+            {/* ── Loading ── */}
+            {hrScoutLoading && !hrScoutPicks && (
+              <Card>
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
+                  HR Scout is analyzing today's slate...
+                </div>
+              </Card>
+            )}
+
+            {/* ── Pick cards by tier ── */}
+            {hrScoutPicks && hrScoutPicks.length > 0 && (() => {
+              const tier1 = hrScoutPicks.filter(p => p.tier === 1);
+              const tier2 = hrScoutPicks.filter(p => p.tier === 2);
+              const tier3 = hrScoutPicks.filter(p => p.tier === 3);
+
+              const tierConfig = [
+                { picks: tier1, label: "TIER 1 — STRONG PLAYS", color: "#fb923c" },
+                { picks: tier2, label: "TIER 2 — SOLID PLAYS", color: "#fbbf24" },
+                { picks: tier3, label: "TIER 3 — SPECULATIVE", color: "#9ca3af" },
+              ];
+
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                  {tierConfig.map(({ picks, label, color }) => picks.length > 0 && (
+                    <div key={label} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <div style={{ fontSize: 9, fontWeight: 700, color, fontFamily: "monospace", letterSpacing: "0.1em" }}>
+                        {label} — {picks.length} pick{picks.length !== 1 ? "s" : ""}
+                      </div>
+                      {picks.map((pick, idx) => {
+                        const globalIdx = hrScoutPicks.indexOf(pick);
+                        const expanded = hrScoutExpanded === globalIdx;
+                        const confColor = pick.confidence === "HIGH" ? "#22c55e" : pick.confidence === "MEDIUM" ? "#fbbf24" : "#9ca3af";
+
+                        return (
+                          <div
+                            key={`hr-pick-${globalIdx}`}
+                            onClick={() => setHrScoutExpanded(expanded ? null : globalIdx)}
+                            style={{
+                              background: expanded ? "#1a1c2e" : "#161827",
+                              border: `1px solid ${expanded ? "#2d3148" : "#1f2437"}`,
+                              borderRadius: 10,
+                              padding: "12px 14px",
+                              cursor: "pointer",
+                              transition: "background 0.15s",
+                            }}
+                          >
+                            {/* ── Collapsed row ── */}
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
+                                {/* HR Score badge */}
+                                <div style={{
+                                  background: `${color}18`,
+                                  border: `1px solid ${color}40`,
+                                  borderRadius: 5,
+                                  padding: "2px 7px",
+                                  fontSize: 9,
+                                  fontWeight: 700,
+                                  color,
+                                  fontFamily: "monospace",
+                                }}>
+                                  HR {pick.hrScore ?? "–"}
+                                </div>
+                                {/* Batter name */}
+                                <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>
+                                  {pick.batter}
+                                </div>
+                                {/* Team + pitcher context */}
+                                <div style={{ fontSize: 10, color: "#6b7280" }}>
+                                  {pick.team} vs {pick.pitcher} ({pick.pitcherTeam})
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: confColor, fontFamily: "monospace" }}>
+                                  {pick.confidence}
+                                </div>
+                                <div style={{ fontSize: 10, color: "#4b5563" }}>{expanded ? "▲" : "▼"}</div>
+                              </div>
+                            </div>
+
+                            {/* ── Expanded detail ── */}
+                            {expanded && (
+                              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                                {/* Game context */}
+                                <div style={{ fontSize: 10, color: "#9ca3af" }}>
+                                  {pick.game}
+                                </div>
+
+                                {/* Key signals chips */}
+                                {pick.keySignals?.length > 0 && (
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                                    {pick.keySignals.map((sig, sigIdx) => (
+                                      <div key={sigIdx} style={{
+                                        background: "rgba(251,146,60,0.08)",
+                                        border: "1px solid rgba(251,146,60,0.25)",
+                                        borderRadius: 4,
+                                        padding: "2px 7px",
+                                        fontSize: 9,
+                                        color: "#fdba74",
+                                        fontFamily: "monospace",
+                                      }}>
+                                        {sig}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {/* AI reasoning */}
+                                {pick.reasoning && (
+                                  <div style={{
+                                    fontSize: 11,
+                                    color: "#d1d5db",
+                                    lineHeight: 1.6,
+                                    fontStyle: "italic",
+                                    borderLeft: "2px solid #2d3148",
+                                    paddingLeft: 10,
+                                  }}>
+                                    "{pick.reasoning}"
+                                  </div>
+                                )}
+
+                                {/* Caution flag */}
+                                {pick.caution && (
+                                  <div style={{
+                                    background: "rgba(251,191,36,0.08)",
+                                    border: "1px solid rgba(251,191,36,0.25)",
+                                    borderRadius: 6,
+                                    padding: "6px 10px",
+                                    fontSize: 10,
+                                    color: "#fde68a",
+                                  }}>
+                                    ⚠ {pick.caution}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+
+            {/* ── Empty state ── */}
+            {hrScoutPicks && hrScoutPicks.length === 0 && (
+              <Card>
+                <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>
+                  No HR picks generated yet — lineups may not be posted. Try regenerating closer to game time.
+                </div>
+              </Card>
+            )}
+
           </div>
         )}
 
@@ -5461,6 +6117,56 @@ export default function App() {
                       </span>
                     )}
                   </div>
+
+                  {(() => {
+                    const stats = activePitcher.pitcherStats ?? null;
+                    if (!stats) return null;
+                    const hasAny = stats.swStrPct != null || stats.oSwingPct != null || stats.fStrikePct != null || stats.barrelPct != null || stats.hardHitPct != null || stats.xwOBAAllowed != null || stats.flyBallPctInclPopup != null;
+                    if (!hasAny) return null;
+                    const xwOBAColor = stats.xwOBAAllowed == null
+                      ? "#f9fafb"
+                      : stats.xwOBAAllowed < 0.290
+                        ? "#4ade80"
+                        : stats.xwOBAAllowed >= 0.350
+                          ? "#ef4444"
+                          : stats.xwOBAAllowed >= 0.330
+                            ? "#f97316"
+                            : "#f9fafb";
+                    return (
+                      <>
+                        <div style={{ background: "#0e0f1a", borderRadius: 8, padding: "6px 10px", marginBottom: 8, fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>
+                          SwStr%: <span style={{ color: "#f9fafb" }}>{stats.swStrPct != null ? `${stats.swStrPct}%` : "—"}</span>
+                          <span style={{ color: "#374151" }}> · </span>
+                          Chase: <span style={{ color: "#f9fafb" }}>{stats.oSwingPct != null ? `${stats.oSwingPct}%` : "—"}</span>
+                          <span style={{ color: "#374151" }}> · </span>
+                          F-Str%: <span style={{ color: "#f9fafb" }}>{stats.fStrikePct != null ? `${stats.fStrikePct}%` : "—"}</span>
+                          <span style={{ color: "#374151" }}> · </span>
+                          Barrel%: <span style={{ color: "#f9fafb" }}>{stats.barrelPct != null ? `${stats.barrelPct}%` : "—"}</span>
+                          <span style={{ color: "#374151" }}> · </span>
+                          HH%: <span style={{ color: "#f9fafb" }}>{stats.hardHitPct != null ? `${stats.hardHitPct}%` : "—"}</span>
+                          <span style={{ color: "#374151" }}> · </span>
+                          xwOBA: <span style={{ color: xwOBAColor }}>{stats.xwOBAAllowed != null ? stats.xwOBAAllowed.toFixed(3) : "—"}</span>
+                          <span style={{ color: "#374151" }}> · </span>
+                          FB%: <span style={{ color: "#f59e0b" }}>{stats.flyBallPctInclPopup != null ? `${stats.flyBallPctInclPopup}%` : "—"}</span>
+                        </div>
+                        {(stats.vsLeft || stats.vsRight) && (
+                          <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                            {["vsLeft", "vsRight"].map(side => {
+                              const split = stats[side];
+                              if (!split) return null;
+                              const label = side === "vsLeft" ? "vs LHH" : "vs RHH";
+                              const color = "#94a3b8";
+                              return (
+                                <div key={side} style={{ background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 5, padding: "3px 8px", fontSize: 9, color, fontFamily: "monospace" }}>
+                                  {label} · {split.hrAllowed} HR · {split.barrelPct}% Brl · {split.hardHitPct}% HH{split.flyBallPct != null ? ` · ${split.flyBallPct}% FB` : ""}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
 
                   {/* ERA sparkline */}
                   {recentStarts.length >= 2 && (() => {
@@ -5867,6 +6573,27 @@ export default function App() {
                             <StatMini label="Avg TB" value={b.tb} color="#fbbf24" />
                             <StatMini label="L5 Hits" value={`${recentHits}/5`} color={recentHits >= 4 ? "#22c55e" : recentHits >= 2 ? "#f59e0b" : "#ef4444"} />
                           </div>
+                          {(() => {
+                            const rev = b.powerProfile?.recentEv;
+                            if (!rev) return null;
+                            const deltaColor = rev.evDelta >= 4  ? "#22c55e"
+                              : rev.evDelta >= 2  ? "#86efac"
+                                : rev.evDelta <= -3 ? "#ef4444"
+                                  : "#6b7280";
+                            const deltaStr = rev.evDelta != null
+                              ? `${rev.evDelta >= 0 ? "+" : ""}${rev.evDelta} vs szn`
+                              : null;
+                            return (
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, background: "#1a1b2e", borderRadius: 8, padding: "6px 10px" }}>
+                                <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>L7 EV</span>
+                                <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{rev.evL7} mph</span>
+                                {deltaStr && <span style={{ fontSize: 10, fontWeight: 700, color: deltaColor, fontFamily: "monospace" }}>{deltaStr}</span>}
+                                <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>HH {rev.hardHitPctL7}%</span>
+                                <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>Brl {rev.barrelPctL7}%</span>
+                                <span style={{ fontSize: 8, color: "#4b5563", marginLeft: "auto", flexShrink: 0 }}>{rev.bbL7} BB</span>
+                              </div>
+                            );
+                          })()}
 
                           {/* Career H2H vs opposing pitcher */}
                           {(() => {
@@ -6061,6 +6788,20 @@ export default function App() {
                                 <div style={{ background: "#1e2030", borderRadius: 3, height: 5, marginBottom: note ? 4 : 0 }}>
                                   <div style={{ width: `${pctWidth}%`, height: "100%", background: color, borderRadius: 3 }} />
                                 </div>
+                                {(() => {
+                                  const s = b.powerProfile?.pitchTypeSplits?.[a.abbr];
+                                  if (!s || s.battedBalls < 15) return null;
+                                  const brlColor = s.barrelPct >= 12 ? "#fb923c" : s.barrelPct >= 7 ? "#f59e0b" : "#6b7280";
+                                  const hhColor  = s.hardHitPct >= 45 ? "#22c55e" : s.hardHitPct >= 35 ? "#f59e0b" : "#6b7280";
+                                  return (
+                                    <div style={{ display: "flex", gap: 8, marginTop: 3 }}>
+                                      <span style={{ fontSize: 8, color: brlColor, fontFamily: "monospace" }}>Brl {s.barrelPct}%</span>
+                                      <span style={{ fontSize: 8, color: hhColor,  fontFamily: "monospace" }}>HH {s.hardHitPct}%</span>
+                                      {s.flyBallPct != null && <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>FB {s.flyBallPct}%</span>}
+                                      <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>{s.hrCount} HR · {s.battedBalls} BB</span>
+                                    </div>
+                                  );
+                                })()}
                                 {note && (
                                   <div style={{ fontSize: 9, color: "#6b7280", fontStyle: "italic", marginTop: 2 }}>{note}</div>
                                 )}
@@ -6561,7 +7302,21 @@ export default function App() {
                 return (
                   <Card key={i} style={inParlay ? { borderColor: "rgba(251,191,36,0.4)" } : {}}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", flex: 1, paddingRight: 8, lineHeight: 1.4 }}>{p.label}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, flex: 1, paddingRight: 8, minWidth: 0 }}>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", lineHeight: 1.4 }}>{p.label}</span>
+                        <span style={{
+                          fontSize: 7,
+                          fontWeight: 800,
+                          color: "#818cf8",
+                          background: "rgba(129,140,248,0.08)",
+                          border: "1px solid rgba(129,140,248,0.2)",
+                          borderRadius: 4,
+                          padding: "1px 5px",
+                          fontFamily: "monospace",
+                          letterSpacing: "0.04em",
+                          flexShrink: 0,
+                        }} title="AI-powered pick — generated by Claude analyzing pitcher stats, lineup matchups, and park factors.">✦ AI</span>
+                      </div>
                       <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
                         <LeanBadge label={p.lean} positive={p.positive} small />
                         {/* Parlay toggle */}
@@ -7790,8 +8545,8 @@ export default function App() {
           const boardCandidatesByType = {
             hr:   computeBatterBoard("hr", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
             hits: computeBatterBoard("hits", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
-            k:    computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps),
-            outs: computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps),
+            k:    computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats),
+            outs: computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats),
           };
           // Game board candidates computed on-the-fly for the active sub-tab
           const gameBoardCandidates = isGameBoard
