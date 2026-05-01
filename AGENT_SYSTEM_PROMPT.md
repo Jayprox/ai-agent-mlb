@@ -8708,3 +8708,683 @@ const histGradedGames = useRef(new Set()); // gamePks already processed by the h
 
 - Phase B (backend settlement worker) remains on hold — this frontend catch-up is the stopgap
 - `F5` picks will still not grade (no `F5` branch in `computeGrade`) — acceptable since F5 props were removed from the app
+
+---
+
+## BACKLOG TASK 55 — Auto-Grading Phase B: Backend Settlement Worker
+
+**Status:** COMPLETED ✅
+**LOE:** Small–Medium
+**Type:** Backend only
+**Dependencies:** None
+
+Nightly backend job that settles pending picks from `backend/data/picks.json` without requiring the user to open the app. Ports `computeGrade` to Node.js, fetches MLB Stats API boxscores directly, writes `result: "hit"/"miss"` back to `picks.json`.
+
+---
+
+## CODEX TASK 56 — Auto-Grading Phase B: Backend Settlement Worker
+
+### Goal
+
+Add a nightly backend job that settles pending picks from `backend/data/picks.json` regardless of whether the app is open. The frontend Phase A catch-up (Task 55) handles the case when the user opens the Picks tab; Phase B ensures picks settle even if they never do.
+
+### Files to create/edit
+
+- **Create** `backend/jobs/gradePicksJob.js`
+- **Edit** `backend/jobs/scheduler.js` — add cron trigger
+- **Edit** `backend/server.js` — add admin endpoint
+
+---
+
+### Step 1 — Create `backend/jobs/gradePicksJob.js`
+
+```js
+const fs   = require("fs");
+const path = require("path");
+const axios = require("axios");
+
+const PICKS_FILE = path.join(__dirname, "..", "data", "picks.json");
+const MLB_BASE   = "https://statsapi.mlb.com/api/v1";
+
+function readPicks() {
+  try {
+    const raw = fs.readFileSync(PICKS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.picks) ? parsed.picks : [];
+  } catch (_) { return []; }
+}
+
+function writePicks(picks) {
+  const current = (() => {
+    try { return JSON.parse(fs.readFileSync(PICKS_FILE, "utf8")); } catch (_) { return { picks: [] }; }
+  })();
+  fs.writeFileSync(PICKS_FILE, JSON.stringify({ ...current, picks }, null, 2));
+}
+
+function parseIpToOuts(ip) {
+  if (!ip) return 0;
+  const [inn, thirds] = String(ip).split(".").map(Number);
+  return (inn || 0) * 3 + (thirds || 0);
+}
+
+// Ported from prop-scout-v7.jsx computeGrade — keep in sync
+function computeGrade(pick, box) {
+  if (!box?.isFinal) return null;
+  const label = (pick.label ?? "").toUpperCase();
+  const lean  = (pick.lean  ?? "").toUpperCase();
+  const innings   = box.linescore?.innings ?? [];
+  const awayRuns  = box.linescore?.away?.runs ?? 0;
+  const homeRuns  = box.linescore?.home?.runs ?? 0;
+  const totalRuns = awayRuns + homeRuns;
+  const allBatters = [...(box.batting?.away ?? []), ...(box.batting?.home ?? [])];
+
+  const findBatter = () => {
+    const storedId = pick.playerId != null ? String(pick.playerId) : null;
+    if (storedId) {
+      const byId = allBatters.find(b => String(b.id) === storedId);
+      if (byId) return byId;
+    }
+    const storedName = (pick.playerName ?? "").toUpperCase();
+    if (storedName) {
+      const byName = allBatters.find(b =>
+        b.name.toUpperCase().includes(storedName) ||
+        storedName.includes(b.name.toUpperCase().split(" ").pop())
+      );
+      if (byName) return byName;
+    }
+    const lastName = label.split(" ")[0];
+    return allBatters.find(b => b.name.toUpperCase().includes(lastName)) ?? null;
+  };
+
+  if (label.startsWith("NRFI")) {
+    const first = innings[0];
+    return first ? (((first.away ?? 0) + (first.home ?? 0)) > 0 ? "miss" : "hit") : null;
+  }
+  if (label.startsWith("YRFI")) {
+    const first = innings[0];
+    return first ? (((first.away ?? 0) + (first.home ?? 0)) > 0 ? "hit" : "miss") : null;
+  }
+  if (label.includes("GAME TOTAL") || (label.includes("TOTAL") && (label.includes("OVER") || label.includes("UNDER") || label.includes("O/U")))) {
+    const m = label.match(/(\d+\.?\d*)/);
+    if (!m) return null;
+    const line = parseFloat(m[1]);
+    if (lean === "OVER")  return totalRuns > line  ? "hit" : "miss";
+    if (lean === "UNDER") return totalRuns < line  ? "hit" : "miss";
+    return null;
+  }
+  if (label.includes("RUN LINE") || label.includes("RL -") || label.includes("RL +")) {
+    const margin = awayRuns - homeRuns;
+    if (label.includes("AWAY")) return lean === "OVER" ? (margin >= 2 ? "hit" : "miss") : (margin < 2 ? "hit" : "miss");
+    if (label.includes("HOME")) return lean === "OVER" ? (homeRuns - awayRuns >= 2 ? "hit" : "miss") : (homeRuns - awayRuns < 2 ? "hit" : "miss");
+    return null;
+  }
+  if (label.includes("MONEYLINE") || /\bML\b/.test(label)) {
+    if (lean === "HOME") return homeRuns > awayRuns ? "hit" : "miss";
+    if (lean === "AWAY") return awayRuns > homeRuns ? "hit" : "miss";
+    return null;
+  }
+  if (label.includes("K'S") || label.includes("STRIKEOUT") || (label.includes(" K ") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
+    const m = label.match(/(\d+\.?\d*)/);
+    if (!m) return null;
+    const line = parseFloat(m[1]);
+    const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
+    const storedName = (pick.pitcherName ?? "").toUpperCase();
+    let pitcher = storedName ? allPitchers.find(p => p.name.toUpperCase().includes(storedName) || storedName.includes(p.name.toUpperCase().split(" ").pop())) : null;
+    if (!pitcher) pitcher = allPitchers.find(p => p.name.toUpperCase().includes(label.split(" ")[0]));
+    if (!pitcher) return null;
+    if (lean === "OVER")  return (pitcher.k ?? 0) > line  ? "hit" : "miss";
+    if (lean === "UNDER") return (pitcher.k ?? 0) < line  ? "hit" : "miss";
+    return null;
+  }
+  if (label.includes("OUTS") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER"))) {
+    const m = label.match(/(\d+\.?\d*)/);
+    if (!m) return null;
+    const line = parseFloat(m[1]);
+    const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
+    const storedName = (pick.pitcherName ?? "").toUpperCase();
+    let pitcher = storedName ? allPitchers.find(p => p.name.toUpperCase().includes(storedName)) : null;
+    if (!pitcher) pitcher = allPitchers.find(p => p.name.toUpperCase().includes(label.split(" ")[0]));
+    if (!pitcher) return null;
+    const outs = parseIpToOuts(pitcher.ip);
+    if (lean === "OVER")  return outs > line  ? "hit" : "miss";
+    if (lean === "UNDER") return outs < line  ? "hit" : "miss";
+    return null;
+  }
+  if (pick.propType === "Hits" || (label.includes("HITS") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
+    const m = label.match(/(\d+\.?\d*)/);
+    if (!m) return null;
+    const batter = findBatter();
+    if (!batter) return null;
+    if (lean === "OVER")  return (batter.h ?? 0) > parseFloat(m[1]) ? "hit" : "miss";
+    if (lean === "UNDER") return (batter.h ?? 0) < parseFloat(m[1]) ? "hit" : "miss";
+    return null;
+  }
+  if (pick.propType === "TB" || label.includes("TOTAL BASES") || (/\bTB\b/.test(label) && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
+    const m = label.match(/(\d+\.?\d*)/);
+    if (!m) return null;
+    const batter = findBatter();
+    if (!batter || batter.tb === undefined) return null;
+    if (lean === "OVER")  return (batter.tb ?? 0) > parseFloat(m[1]) ? "hit" : "miss";
+    if (lean === "UNDER") return (batter.tb ?? 0) < parseFloat(m[1]) ? "hit" : "miss";
+    return null;
+  }
+  if (pick.propType === "HR" || label.includes(" HR ")) {
+    const m = label.match(/(\d+\.?\d*)/);
+    if (!m) return null;
+    const batter = findBatter();
+    if (!batter) return null;
+    if (lean === "OVER"  || lean === "YES") return (batter.hr ?? 0) > parseFloat(m[1]) ? "hit" : "miss";
+    if (lean === "UNDER" || lean === "NO")  return (batter.hr ?? 0) < parseFloat(m[1]) ? "hit" : "miss";
+    return null;
+  }
+  if (pick.propType === "RBI" || label.includes("RBI")) {
+    const m = label.match(/(\d+\.?\d*)/);
+    if (!m) return null;
+    const batter = findBatter();
+    if (!batter) return null;
+    if (lean === "OVER")  return (batter.rbi ?? 0) > parseFloat(m[1]) ? "hit" : "miss";
+    if (lean === "UNDER") return (batter.rbi ?? 0) < parseFloat(m[1]) ? "hit" : "miss";
+    return null;
+  }
+  return null;
+}
+
+async function fetchBoxForGrading(gamePk) {
+  try {
+    const [bsRes, lsRes] = await Promise.all([
+      axios.get(`${MLB_BASE}/game/${gamePk}/boxscore`, { timeout: 10000 }),
+      axios.get(`${MLB_BASE}/game/${gamePk}/linescore`, { timeout: 10000 }),
+    ]);
+    const bs = bsRes.data;
+    const ls = lsRes.data;
+    const inningsPlayed = (ls.innings ?? []).length;
+    const isFinal = inningsPlayed > 0 && !ls.currentInning;
+    if (!isFinal) return null;
+
+    const parseBatters = (players) => Object.values(players ?? {})
+      .filter(p => p.stats?.batting)
+      .map(p => {
+        const s = p.stats.batting;
+        return { id: p.person?.id, name: p.person?.fullName ?? "", h: s.hits ?? 0, hr: s.homeRuns ?? 0, rbi: s.rbi ?? 0, ab: s.atBats ?? 0, tb: s.totalBases ?? undefined };
+      })
+      .filter(b => b.ab > 0 || b.h > 0);
+
+    const parsePitchers = (players) => Object.values(players ?? {})
+      .filter(p => p.stats?.pitching?.inningsPitched)
+      .map(p => {
+        const s = p.stats.pitching;
+        return { name: p.person?.fullName ?? "", k: s.strikeOuts ?? 0, ip: s.inningsPitched ?? "0.0" };
+      });
+
+    return {
+      isFinal: true,
+      linescore: {
+        innings: (ls.innings ?? []).map(i => ({ away: i.away?.runs ?? 0, home: i.home?.runs ?? 0 })),
+        away: { runs: ls.teams?.away?.runs ?? 0 },
+        home: { runs: ls.teams?.home?.runs ?? 0 },
+      },
+      batting: {
+        away: parseBatters(bs.teams?.away?.players),
+        home: parseBatters(bs.teams?.home?.players),
+      },
+      pitching: {
+        away: parsePitchers(bs.teams?.away?.players),
+        home: parsePitchers(bs.teams?.home?.players),
+      },
+    };
+  } catch (_) { return null; }
+}
+
+async function gradePendingPicks() {
+  const picks = readPicks();
+  const pending = picks.filter(p => p.result === null || p.result === undefined);
+  if (!pending.length) {
+    console.log("  · Grade job: no pending picks");
+    return { graded: 0, total: 0 };
+  }
+
+  const byGame = {};
+  pending.forEach(p => {
+    const key = String(p.gamePk);
+    if (!byGame[key]) byGame[key] = [];
+    byGame[key].push(p);
+  });
+
+  let gradedCount = 0;
+  const updates = {};
+
+  await Promise.all(
+    Object.entries(byGame).map(async ([gamePkStr, gamePicks]) => {
+      const box = await fetchBoxForGrading(gamePkStr);
+      if (!box) return;
+      gamePicks.forEach(pick => {
+        const grade = computeGrade(pick, box);
+        if (grade !== null) { updates[pick.id] = grade; gradedCount++; }
+      });
+    })
+  );
+
+  if (gradedCount > 0) {
+    const updated = picks.map(p => updates[p.id] !== undefined ? { ...p, result: updates[p.id] } : p);
+    writePicks(updated);
+    console.log(`  ✓ Grade job: settled ${gradedCount} pick(s)`);
+  }
+
+  return { graded: gradedCount, total: pending.length };
+}
+
+module.exports = { gradePendingPicks };
+```
+
+---
+
+### Step 2 — Edit `backend/jobs/scheduler.js`
+
+At the top of the file, add to the existing requires:
+
+```js
+const { gradePendingPicks } = require("./gradePicksJob");
+```
+
+Inside `startScheduler()`, add after the existing cron lines:
+
+```js
+// Grade pending picks nightly at 4 AM Honolulu (after all west coast games finish)
+cron.schedule("0 4 * * *", () => gradePendingPicks(), { timezone: "Pacific/Honolulu" });
+```
+
+---
+
+### Step 3 — Edit `backend/server.js`
+
+After the existing `GET /api/admin/daily-card/regenerate` block, add:
+
+```js
+app.get("/api/admin/jobs/grade-picks", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    const result = await require("./jobs/gradePicksJob").gradePendingPicks();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+```
+
+---
+
+### Constraints
+
+- Do NOT change `picks.js` route, `computeGrade` in `prop-scout-v7.jsx`, or any frontend files
+- `writePicks` must read-merge-write — never overwrite the whole file with only the pending subset
+- All `gamePk` comparisons use `String()` coercion — they may be number or string in localStorage-originated picks
+- `gradePendingPicks` must not crash if `picks.json` does not exist yet
+- `npm run build` must still pass (no frontend changes)
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 56 handoff note in the same format as prior tasks
+
+### Completion note
+
+- Added `backend/jobs/gradePicksJob.js` to settle unresolved picks from `backend/data/picks.json` using nightly MLB boxscore + linescore fetches.
+- Added a `0 4 * * *` Honolulu cron in `backend/jobs/scheduler.js` so picks settle after late west coast finals.
+- Added manual admin trigger `GET /api/admin/jobs/grade-picks` in `backend/server.js`.
+- Worker uses read-merge-write semantics for `picks.json` and keeps frontend `computeGrade(...)` logic mirrored in Node for supported prop types.
+
+---
+
+## HANDOFF NOTE — 2026-05-01 — CODEX TASK 56 COMPLETED (Auto-Grading Phase B: Backend Settlement Worker)
+
+Implemented the backend settlement worker for unresolved logged picks.
+
+### Files changed
+
+- `backend/jobs/gradePicksJob.js` (new)
+- `backend/jobs/scheduler.js`
+- `backend/server.js`
+
+### What changed
+
+- Added `gradePendingPicks()` job that:
+  - reads `backend/data/picks.json`
+  - groups pending picks by `gamePk`
+  - fetches MLB boxscore + linescore directly
+  - reconstructs a grading-friendly box object
+  - applies a Node port of `computeGrade(...)`
+  - writes `result: "hit"` / `"miss"` back to `picks.json`
+- Added nightly scheduler run at `4 AM` Honolulu to settle picks after late west coast games finish.
+- Added admin trigger endpoint:
+  - `GET /api/admin/jobs/grade-picks`
+  - protected by `x-admin-secret`
+
+### Scope / constraints preserved
+
+- No frontend changes.
+- No changes to `picks.js` route.
+- `writePicks()` uses read-merge-write so the whole file is not overwritten with only the pending subset.
+- Worker safely handles missing `picks.json` by treating it as no picks.
+- `gamePk` grouping/coercion uses `String(...)` for number/string consistency.
+
+### Verification
+
+- `node --check backend/jobs/gradePicksJob.js`
+- `node --check backend/jobs/scheduler.js`
+- `node --check backend/server.js`
+- `npm run build`
+
+### Notes for Cowork
+
+- This is the first true backend settlement path; it no longer depends on the app being open.
+- It complements Task 55’s frontend historical catch-up effect rather than replacing it.
+- Historic `F5` picks are still unsupported here for the same reason they are unsupported in the frontend grader: the mirrored `computeGrade(...)` does not include an F5 branch.
+
+---
+
+## BACKLOG TASK 56 — Task 27 Phase B: Merged Algo + AI Props View
+
+**Status:** COMPLETED ✅
+**LOE:** Medium
+**Type:** Frontend only
+**Dependencies:** None — `/api/props/:gamePk` backend already exists and is mounted
+
+Wire the existing GPT-4o mini `/api/props/:gamePk` endpoint to actually fire when the Props tab opens, and merge its picks with the local algorithmic `computeLiveProps` output into a single card list with dual confidence bars and convergence signals.
+
+---
+
+## CODEX TASK 57 — Task 27 Phase B: Merged Algo + AI Props View
+
+### Goal
+
+Wire the existing `/api/props/:gamePk` GPT-4o mini backend to the Props tab and render algo picks and AI picks as a **merged card list** — dual confidence bars when both systems pick the same prop type, single-source cards otherwise. Algo picks appear immediately (synchronous); AI picks load async and slot in once ready.
+
+**Important context:** `computeLiveProps` (the function powering the current "Prop Confidence Meters") is a pure algorithmic JS function — no GPT, no network call. The `✦ AI` badge currently on those cards is mislabeled. This task fixes that and actually wires the real AI endpoint.
+
+### File to edit
+
+`prop-scout-v7.jsx` only. No backend changes.
+
+---
+
+### Step 1 — Add `buildPropsContext` at module level
+
+Place immediately after `buildTrendsContext` (search for `const buildTrendsContext`):
+
+```js
+const buildPropsContext = (game, odds, parkFactors, pitcher, umpire, playerPropsData) => {
+  const lines = [];
+  lines.push(`Game: ${game.away.abbr} @ ${game.home.abbr} at ${game.stadium ?? "Unknown Stadium"}`);
+
+  if (pitcher) {
+    lines.push(`Away SP: ${game.awayPitcher?.name ?? "TBD"} (${game.awayPitcher?.hand ?? "?"}HP) — ERA ${game.awayPitcher?.era ?? "—"}, K/9 ${game.awayPitcher?.k9 ?? "—"}, WHIP ${game.awayPitcher?.whip ?? "—"}, avgIP ${game.awayPitcher?.avgIP ?? "—"}`);
+    lines.push(`Home SP: ${pitcher.name ?? "TBD"} (${pitcher.hand ?? "?"}HP) — ERA ${pitcher.era ?? "—"}, K/9 ${pitcher.kPer9 ?? pitcher.k9 ?? "—"}, WHIP ${pitcher.whip ?? "—"}, avgIP ${pitcher.avgIP ?? "—"}`);
+  }
+
+  if (umpire?.name && umpire.name !== "TBD") {
+    const parts = [`Umpire: ${umpire.name}`];
+    if (umpire.tendency) parts.push(umpire.tendency);
+    if (umpire.kRate)    parts.push(`K Rate ${umpire.kRate}`);
+    lines.push(parts.join(" — "));
+  }
+
+  if (game.weather) {
+    const w = game.weather;
+    lines.push(w.roof
+      ? "Weather: Dome — controlled environment"
+      : `Weather: ${w.temp ?? "?"}°F, ${w.wind ?? "calm"}${w.hrFavorable ? " — HR-favorable wind" : ""}`
+    );
+  }
+
+  if (game.bullpen?.away) lines.push(`Away Bullpen: Grade ${game.bullpen.away.grade ?? "?"}, ${game.bullpen.away.fatigueLevel ?? "?"} fatigue`);
+  if (game.bullpen?.home) lines.push(`Home Bullpen: Grade ${game.bullpen.home.grade ?? "?"}, ${game.bullpen.home.fatigueLevel ?? "?"} fatigue`);
+
+  if (game.nrfi?.lean) lines.push(`NRFI lean: ${game.nrfi.lean} at ${game.nrfi.confidence ?? "?"}% confidence`);
+
+  const pf = parkFactors?.[game.home?.abbr];
+  if (pf) lines.push(`Park: ${game.stadium ?? game.home.abbr} — ${pf.label} (HR ${pf.hr}x, Hit ${pf.hit}x)`);
+
+  if (odds?.total) {
+    const ml = odds.awayML && odds.homeML ? ` | ML: ${game.away.abbr} ${odds.awayML} / ${game.home.abbr} ${odds.homeML}` : "";
+    lines.push(`Total: O/U ${odds.total}${ml}`);
+  }
+
+  if (Array.isArray(playerPropsData?.props)) {
+    const lastName = (pitcher?.name ?? "").split(" ").pop().toLowerCase();
+    const kLine   = playerPropsData.props.find(p => p.market === "pitcher_strikeouts" && (p.player ?? "").toLowerCase().includes(lastName));
+    const outLine = playerPropsData.props.find(p => p.market === "pitcher_outs"        && (p.player ?? "").toLowerCase().includes(lastName));
+    if (kLine?.line)   lines.push(`Market K line: ${kLine.line}`);
+    if (outLine?.line) lines.push(`Market Outs line: ${outLine.line}`);
+  }
+
+  return lines.filter(Boolean).join("\n");
+};
+```
+
+---
+
+### Step 2 — Add state + ref
+
+Near `const [liveTrends, setLiveTrends]`, add:
+
+```js
+const [liveAiProps, setLiveAiProps] = useState({});   // gamePk → { props: [] } | "loading" | null
+const aiPropsFetched = useRef(new Set());              // prevents repeat fetches per gamePk
+```
+
+---
+
+### Step 3 — Add the AI props fetch useEffect
+
+Insert after the useEffect that fetches sportsbook player props (search for `tab !== "props"` to find the right effect, then insert after its closing `}, [...]`):
+
+```js
+// Fetch AI prop recommendations when Props tab opens
+useEffect(() => {
+  if (IS_STATS_SANDBOX || view !== "game" || !selectedId || tab !== "props") return;
+  const key = String(selectedId);
+  if (aiPropsFetched.current.has(key)) return;
+
+  const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
+  if (!game) return;
+
+  aiPropsFetched.current.add(key);
+  setLiveAiProps(prev => ({ ...prev, [key]: "loading" }));
+
+  const playerPropsData = livePlayerProps[key];
+  const odds = getGameOdds(game);
+  const context = buildPropsContext(game, odds, PARK_FACTORS, pitcher, umpire, playerPropsData);
+
+  apiMutate(`/api/props/${selectedId}`, "POST", { context })
+    .then(data => {
+      const props = Array.isArray(data?.props) ? data.props : [];
+      setLiveAiProps(prev => ({ ...prev, [key]: { props } }));
+      if (!props.length) aiPropsFetched.current.delete(key);
+    })
+    .catch(() => {
+      aiPropsFetched.current.delete(key);
+      setLiveAiProps(prev => ({ ...prev, [key]: null }));
+    });
+}, [view, selectedId, tab]); // eslint-disable-line react-hooks/exhaustive-deps
+```
+
+---
+
+### Step 4 — Add pick-matching helper
+
+Place immediately before the `{tab === "props" && (<>` block:
+
+```js
+const propTypeKey = (p) => {
+  const t = (p.propType ?? "").toUpperCase();
+  if (["HITS", "HR", "TB", "RBI"].includes(t)) return `${t}:${(p.label ?? "").split(" ")[0].toUpperCase()}`;
+  if (t) return t;
+  const lbl = (p.label ?? "").toUpperCase();
+  if (lbl.startsWith("NRFI")) return "NRFI";
+  if (lbl.startsWith("YRFI")) return "YRFI";
+  return lbl.slice(0, 12);
+};
+```
+
+---
+
+### Step 5 — Replace the props card loop
+
+Find the block `{displayProps.map((p, i) => {` through its closing `})}`. Replace only that loop (keep the parlay slip, empty state card, and all surrounding JSX unchanged) with:
+
+```jsx
+{(() => {
+  const key = String(selectedId);
+  const aiData = liveAiProps[key];
+  const aiLoading = aiData === "loading";
+  const aiPicks = (aiData && aiData !== "loading" && Array.isArray(aiData.props)) ? aiData.props : [];
+
+  const aiMatched = new Set();
+  const merged = displayProps.map(algo => {
+    const algoKey = propTypeKey(algo);
+    const matchIdx = aiPicks.findIndex((ai, i) => !aiMatched.has(i) && propTypeKey(ai) === algoKey);
+    if (matchIdx >= 0) { aiMatched.add(matchIdx); return { kind: "dual", algo, ai: aiPicks[matchIdx] }; }
+    return { kind: "algo", algo };
+  });
+  aiPicks.forEach((ai, i) => { if (!aiMatched.has(i)) merged.push({ kind: "ai", ai }); });
+
+  return merged.map((entry, i) => {
+    const p = entry.kind === "ai" ? entry.ai : entry.algo;
+    const logged    = isLogged(p);
+    const inParlay  = parlayLabels.includes(p.label);
+    const parlayFull = parlayLabels.length >= 3 && !inParlay;
+    const bothAgree  = entry.kind === "dual" && entry.algo.lean === entry.ai.lean;
+
+    return (
+      <Card key={i} style={inParlay ? { borderColor: "rgba(251,191,36,0.4)" } : {}}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, flex: 1, paddingRight: 8, minWidth: 0, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", lineHeight: 1.4 }}>{p.label}</span>
+            {entry.kind === "algo" && (
+              <span style={{ fontSize: 7, fontWeight: 800, color: "#94a3b8", background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em", flexShrink: 0 }}
+                title="Algorithmic pick — generated by the scoring model using Statcast + sportsbook data. No AI/LLM involved.">⚙ ALGO</span>
+            )}
+            {entry.kind === "ai" && (
+              <span style={{ fontSize: 7, fontWeight: 800, color: "#818cf8", background: "rgba(129,140,248,0.08)", border: "1px solid rgba(129,140,248,0.2)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em", flexShrink: 0 }}
+                title="AI-powered pick — generated by Claude analyzing pitcher stats, lineup matchups, and park factors.">✦ AI</span>
+            )}
+            {bothAgree && (
+              <span style={{ fontSize: 7, fontWeight: 800, color: "#818cf8", background: "rgba(129,140,248,0.12)", border: "1px solid rgba(129,140,248,0.4)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", flexShrink: 0 }}
+                title="Both the algorithmic model and AI analysis agree on this pick.">✦ BOTH AGREE</span>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+            <LeanBadge label={p.lean} positive={p.positive} small />
+            <button
+              onClick={() => { if (parlayFull) return; setParlayLabels(prev => inParlay ? prev.filter(l => l !== p.label) : [...prev, p.label]); }}
+              title={parlayFull ? "Max 3 legs" : inParlay ? "Remove from parlay" : "Add to parlay"}
+              style={{ fontSize: 10, fontWeight: 700, background: inParlay ? "rgba(251,191,36,0.15)" : "rgba(255,255,255,0.04)", border: `1px solid ${inParlay ? "rgba(251,191,36,0.5)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 6px", cursor: parlayFull ? "default" : "pointer", color: inParlay ? "#fbbf24" : "#4b5563", opacity: parlayFull ? 0.35 : 1, lineHeight: 1 }}>🔗</button>
+            <button
+              onClick={() => !logged && logPick(p)}
+              title={logged ? "Already logged" : "Log this pick"}
+              style={{ fontSize: 13, background: logged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)", border: `1px solid ${logged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 7px", cursor: logged ? "default" : "pointer", color: logged ? "#22c55e" : "#6b7280", transition: "all 0.15s", lineHeight: 1 }}>
+              {logged ? "✓" : "＋"}
+            </button>
+          </div>
+        </div>
+
+        {entry.kind === "dual" ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 7, fontWeight: 800, color: "#94a3b8", fontFamily: "monospace", width: 18, flexShrink: 0 }}>⚙</span>
+              <ConfBar pct={entry.algo.confidence} positive={entry.algo.positive} />
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 7, fontWeight: 800, color: "#818cf8", fontFamily: "monospace", width: 18, flexShrink: 0 }}>✦</span>
+              <ConfBar pct={entry.ai.confidence} positive={entry.ai.positive} />
+            </div>
+          </div>
+        ) : (
+          <ConfBar pct={p.confidence} positive={p.positive} />
+        )}
+
+        <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, lineHeight: 1.4 }}>{p.reason}</div>
+        {entry.kind === "dual" && entry.ai.reason !== entry.algo.reason && (
+          <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4, lineHeight: 1.4, borderTop: "1px solid rgba(255,255,255,0.04)", paddingTop: 4 }}>
+            <span style={{ color: "#818cf8", fontFamily: "monospace", fontSize: 9 }}>✦</span> {entry.ai.reason}
+          </div>
+        )}
+      </Card>
+    );
+  });
+})()}
+
+{(() => {
+  const key = String(selectedId);
+  if (liveAiProps[key] !== "loading") return null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 4px" }}>
+      <span style={{ fontSize: 9, color: "#818cf8", fontFamily: "monospace" }}>✦</span>
+      <span style={{ fontSize: 10, color: "#4b5563" }}>AI analysis loading…</span>
+    </div>
+  );
+})()}
+```
+
+---
+
+### Constraints
+
+- Keep all existing parlay slip logic and the empty-state card (`displayProps.length === 0`) **unchanged**
+- The `LIVE` / `DEMO` badge in the props tab header row stays unchanged
+- Do not change `computeLiveProps`, `buildTrendsContext`, or any other tab
+- `aiPropsFetched` ref entry is deleted on empty result or error to allow retry
+- `npm run build` must pass with zero new warnings
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 57 handoff note
+
+### Completion note
+
+- Added module-level `buildPropsContext(...)` so the Props tab can send structured slate/pitcher/odds/ump/weather context to the existing `/api/props/:gamePk` backend.
+- Added `liveAiProps` state plus `aiPropsFetched` ref and a new Props-tab-only AI fetch effect.
+- Added `propTypeKey(...)` matching helper and replaced the old single-source Props cards with a merged renderer that supports algo-only, AI-only, and dual-source cards.
+- Dual-source cards now show stacked confidence bars and a `✦ BOTH AGREE` badge when the lean matches.
+
+---
+
+## HANDOFF NOTE — 2026-05-01 — CODEX TASK 57 COMPLETED (Task 27 Phase B: Merged Algo + AI Props View)
+
+Implemented the frontend merge layer for algorithmic props + AI props in the game-level Props tab.
+
+### Files changed
+
+- `prop-scout-v7.jsx`
+
+### What changed
+
+- Added module-level `buildPropsContext(...)` immediately after `buildTrendsContext(...)`.
+- Added:
+  - `liveAiProps`
+  - `aiPropsFetched`
+- Added Props-tab AI fetch effect that calls:
+  - `POST /api/props/:gamePk`
+  with generated game context and stores the result by `gamePk`.
+- Added `propTypeKey(...)` helper in component scope near `displayProps`.
+- Replaced the old Props card loop with a merged renderer that:
+  - shows algo-only cards with `⚙ ALGO`
+  - shows AI-only cards with `✦ AI`
+  - merges matched prop types into dual-source cards
+  - renders stacked confidence bars for dual cards
+  - shows `✦ BOTH AGREE` when both systems lean the same way
+  - preserves existing parlay toggle + log-pick behavior
+- Added lightweight `AI analysis loading…` row while async AI props are in flight.
+
+### Scope / constraints preserved
+
+- No backend changes.
+- Existing parlay slip logic and Props empty-state card were left intact.
+- Existing `computeLiveProps(...)` algorithm was not changed.
+- Existing Trends flow and other tabs were not modified.
+- `aiPropsFetched` is cleared on empty AI result or error so retries remain possible.
+
+### Verification
+
+- `npm run build` passed
+
+### Notes for Cowork
+
+- The previous `✦ AI` badge on algorithmic props was misleading; this task makes the Props tab genuinely dual-source.
+- Algo props still render immediately, so the tab feels fast even before the async AI response returns.
+- The AI response is merged by prop-type key rather than raw label string, so aligned picks can share a single card even if their labels are not identical.

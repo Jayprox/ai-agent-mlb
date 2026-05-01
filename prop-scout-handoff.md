@@ -3094,3 +3094,36 @@ No code changes needed. Task 27 Phase A is fully shipped.
 **Status:** COMPLETED ✅ (Codex TASK 55 — approved 2026-05-01)
 
 *Updated 2026-05-01 — Session 51 complete · Task 27 confirmed shipped · Auto-Grading Phase A shipped*
+
+---
+
+## 🔲 Session 52 — Auto-Grading Phase B Spec + Task 27 Phase B Design
+
+**Files changed:** None (spec + design session)
+
+### Important discovery — Props tab is algorithmic, not AI
+
+`computeLiveProps` (the function powering the Props tab "Prop Confidence Meters") is a **pure algorithmic JS function** — no GPT, no network call. The `✦ AI` badge on those cards is technically mislabeled. The backend `/api/props/:gamePk` (GPT-4o mini via OpenAI + Tavily) exists in `backend/routes/props.js` and is mounted in `server.js`, but is **never called from the frontend**. Task 27 Phase B will wire that endpoint to actually fire when the Props tab opens.
+
+### Auto-Grading Phase B — Backend Settlement Worker (CODEX TASK 56)
+
+**Problem:** Phase A (frontend catch-up) settles pending picks when the user opens the Picks tab. But if a user never reopens the app after a game finishes, picks stay pending forever. Phase B moves settlement to a nightly backend job so picks settle regardless of app usage.
+
+**Implementation:**
+- New file: `backend/jobs/gradePicksJob.js` — ports `computeGrade` logic to Node.js, reads `picks.json`, fetches MLB Stats API boxscores for unresolved games, writes `result: "hit"` / `"miss"` back
+- `scheduler.js` — add cron at 4:00 AM Honolulu (after all west coast games finish)
+- `server.js` — expose `GET /api/admin/jobs/grade-picks` for manual trigger (same `x-admin-secret` pattern)
+
+**Status:** Spec written — pending Codex (CODEX TASK 56)
+
+### Task 27 Phase B — Hybrid AI Props (design pending)
+
+Two systems exist for the Props tab:
+1. `computeLiveProps` — algorithmic, synchronous, currently displayed
+2. `/api/props/:gamePk` (GPT-4o mini) — wired on backend but never called from frontend
+
+**Design decision: merged card view.** Algo picks display immediately. AI picks load async. Cards are merged by prop type key — when both systems have a pick for the same prop, a dual confidence bar renders (⚙ row + ✦ row) with a `✦ BOTH AGREE` convergence badge if they share the same direction. AI-only or algo-only picks get a single bar with their source badge. AI reasoning shown as a secondary line beneath the algo reason on dual cards.
+
+**Spec written as CODEX TASK 57 — pending Codex.**
+
+*Updated 2026-05-01 — Session 52 complete · Phase B specs · Props tab AI discovery · merged card design finalized*

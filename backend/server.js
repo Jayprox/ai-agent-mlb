@@ -97,6 +97,18 @@ app.get("/api/admin/daily-card/regenerate", async (req, res) => {
   res.json({ ok: true, message: "Daily Card regeneration started" });
 });
 
+app.get("/api/admin/jobs/grade-picks", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    const result = await require("./jobs/gradePicksJob").gradePendingPicks();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Static frontend (production only) ────────────────────────
 if (process.env.NODE_ENV === "production") {
   const distPath = path.join(__dirname, "..", "dist");

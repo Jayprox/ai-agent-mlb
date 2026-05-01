@@ -241,6 +241,54 @@ const buildTrendsContext = (game, odds, parkFactors) => {
   return lines.filter(Boolean).join("\n");
 };
 
+const buildPropsContext = (game, odds, parkFactors, pitcher, umpire, playerPropsData) => {
+  const lines = [];
+  lines.push(`Game: ${game.away.abbr} @ ${game.home.abbr} at ${game.stadium ?? "Unknown Stadium"}`);
+
+  if (pitcher) {
+    lines.push(`Away SP: ${game.awayPitcher?.name ?? "TBD"} (${game.awayPitcher?.hand ?? "?"}HP) — ERA ${game.awayPitcher?.era ?? "—"}, K/9 ${game.awayPitcher?.k9 ?? "—"}, WHIP ${game.awayPitcher?.whip ?? "—"}, avgIP ${game.awayPitcher?.avgIP ?? "—"}`);
+    lines.push(`Home SP: ${pitcher.name ?? "TBD"} (${pitcher.hand ?? "?"}HP) — ERA ${pitcher.era ?? "—"}, K/9 ${pitcher.kPer9 ?? pitcher.k9 ?? "—"}, WHIP ${pitcher.whip ?? "—"}, avgIP ${pitcher.avgIP ?? "—"}`);
+  }
+
+  if (umpire?.name && umpire.name !== "TBD") {
+    const parts = [`Umpire: ${umpire.name}`];
+    if (umpire.tendency) parts.push(umpire.tendency);
+    if (umpire.kRate) parts.push(`K Rate ${umpire.kRate}`);
+    lines.push(parts.join(" — "));
+  }
+
+  if (game.weather) {
+    const w = game.weather;
+    lines.push(w.roof
+      ? "Weather: Dome — controlled environment"
+      : `Weather: ${w.temp ?? "?"}°F, ${w.wind ?? "calm"}${w.hrFavorable ? " — HR-favorable wind" : ""}`
+    );
+  }
+
+  if (game.bullpen?.away) lines.push(`Away Bullpen: Grade ${game.bullpen.away.grade ?? "?"}, ${game.bullpen.away.fatigueLevel ?? "?"} fatigue`);
+  if (game.bullpen?.home) lines.push(`Home Bullpen: Grade ${game.bullpen.home.grade ?? "?"}, ${game.bullpen.home.fatigueLevel ?? "?"} fatigue`);
+
+  if (game.nrfi?.lean) lines.push(`NRFI lean: ${game.nrfi.lean} at ${game.nrfi.confidence ?? "?"}% confidence`);
+
+  const pf = parkFactors?.[game.home?.abbr];
+  if (pf) lines.push(`Park: ${game.stadium ?? game.home.abbr} — ${pf.label} (HR ${pf.hr}x, Hit ${pf.hit}x)`);
+
+  if (odds?.total) {
+    const ml = odds.awayML && odds.homeML ? ` | ML: ${game.away.abbr} ${odds.awayML} / ${game.home.abbr} ${odds.homeML}` : "";
+    lines.push(`Total: O/U ${odds.total}${ml}`);
+  }
+
+  if (Array.isArray(playerPropsData?.props)) {
+    const lastName = (pitcher?.name ?? "").split(" ").pop().toLowerCase();
+    const kLine = playerPropsData.props.find((p) => p.market === "pitcher_strikeouts" && (p.player ?? "").toLowerCase().includes(lastName));
+    const outLine = playerPropsData.props.find((p) => p.market === "pitcher_outs" && (p.player ?? "").toLowerCase().includes(lastName));
+    if (kLine?.line) lines.push(`Market K line: ${kLine.line}`);
+    if (outLine?.line) lines.push(`Market Outs line: ${outLine.line}`);
+  }
+
+  return lines.filter(Boolean).join("\n");
+};
+
 // ─────────────────────────────────────────────────────────────
 // PLAYER PROPS — routed through backend (shared server-side 10-min cache)
 // Passes the Odds API eventId (from oddsCache) to the backend so it can skip
@@ -2970,7 +3018,9 @@ export default function App() {
   const [liveInjuries, setLiveInjuries] = useState([]);
   const [gameNotes,    setGameNotes]    = useState({});     // gamePk → note string
   const [liveTrends,   setLiveTrends]   = useState({});     // gamePk → summary string | "loading" | null
+  const [liveAiProps,  setLiveAiProps]  = useState({});     // gamePk → { props: [] } | "loading" | null
   const trendsFetched  = useRef(new Set());                  // tracks gamePks already fetched (avoids stale-closure re-fetch)
+  const aiPropsFetched = useRef(new Set());                  // prevents repeat fetches per gamePk
   const [livePlayerProps, setLivePlayerProps] = useState({}); // gamePk → { props: [] } | "loading" | null
   const [dailyCard,      setDailyCard]      = useState(null);  // null | "loading" | { card, date, gamesAnalyzed, cap, ... }
   const [dailyCardOpen,  setDailyCardOpen]  = useState(false); // controls panel visibility
@@ -3107,6 +3157,34 @@ export default function App() {
         setLivePlayerProps(prev => ({ ...prev, [key]: { props: [], error: true } }));
       });
   }, [view, selectedId, tab]);
+
+  // Fetch AI prop recommendations when Props tab opens
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || view !== "game" || !selectedId || tab !== "props") return;
+    const key = String(selectedId);
+    if (aiPropsFetched.current.has(key)) return;
+
+    const game = activeSlate.find(g => (g.gamePk ?? g.id) === selectedId);
+    if (!game) return;
+
+    aiPropsFetched.current.add(key);
+    setLiveAiProps(prev => ({ ...prev, [key]: "loading" }));
+
+    const playerPropsData = livePlayerProps[key];
+    const odds = getGameOdds(game);
+    const context = buildPropsContext(game, odds, PARK_FACTORS, pitcher, umpire, playerPropsData);
+
+    apiMutate(`/api/props/${selectedId}`, "POST", { context })
+      .then(data => {
+        const props = Array.isArray(data?.props) ? data.props : [];
+        setLiveAiProps(prev => ({ ...prev, [key]: { props } }));
+        if (!props.length) aiPropsFetched.current.delete(key);
+      })
+      .catch(() => {
+        aiPropsFetched.current.delete(key);
+        setLiveAiProps(prev => ({ ...prev, [key]: null }));
+      });
+  }, [view, selectedId, tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Pre-fetch all data needed by the Board + Model views when opened
   useEffect(() => {
@@ -3990,6 +4068,15 @@ export default function App() {
 
   // Use live props when available; fall back to mock SLATE props
   const displayProps = liveProps.length > 0 ? liveProps : mockProps;
+  const propTypeKey = (p) => {
+    const t = (p.propType ?? "").toUpperCase();
+    if (["HITS", "HR", "TB", "RBI"].includes(t)) return `${t}:${(p.label ?? "").split(" ")[0].toUpperCase()}`;
+    if (t) return t;
+    const lbl = (p.label ?? "").toUpperCase();
+    if (lbl.startsWith("NRFI")) return "NRFI";
+    if (lbl.startsWith("YRFI")) return "YRFI";
+    return lbl.slice(0, 12);
+  };
 
   // ── Live NRFI from API ───────────────────────────────────────────────────
   // Prefers real first-inning scoring data from /api/nrfi/:gamePk.
@@ -7255,7 +7342,7 @@ export default function App() {
             </Card>
 
             {/* AI Trends Summary */}
-            {(() => {
+          {(() => {
               const key = String(selectedId);
               const trendsState = liveTrends[key];
               const isLoading = trendsState === "loading";
@@ -7368,54 +7455,98 @@ export default function App() {
               })()}
 
               {/* Prop cards */}
-              {displayProps.map((p, i) => {
-                const logged = isLogged(p);
-                const inParlay = parlayLabels.includes(p.label);
-                const parlayFull = parlayLabels.length >= 3 && !inParlay;
+              {(() => {
+                const key = String(selectedId);
+                const aiData = liveAiProps[key];
+                const aiPicks = (aiData && aiData !== "loading" && Array.isArray(aiData.props)) ? aiData.props : [];
+                const aiMatched = new Set();
+                const merged = displayProps.map(algo => {
+                  const algoKey = propTypeKey(algo);
+                  const matchIdx = aiPicks.findIndex((ai, i) => !aiMatched.has(i) && propTypeKey(ai) === algoKey);
+                  if (matchIdx >= 0) {
+                    aiMatched.add(matchIdx);
+                    return { kind: "dual", algo, ai: aiPicks[matchIdx] };
+                  }
+                  return { kind: "algo", algo };
+                });
+                aiPicks.forEach((ai, i) => { if (!aiMatched.has(i)) merged.push({ kind: "ai", ai }); });
+
+                return merged.map((entry, i) => {
+                  const p = entry.kind === "ai" ? entry.ai : entry.algo;
+                  const logged = isLogged(p);
+                  const inParlay = parlayLabels.includes(p.label);
+                  const parlayFull = parlayLabels.length >= 3 && !inParlay;
+                  const bothAgree = entry.kind === "dual" && entry.algo.lean === entry.ai.lean;
+
+                  return (
+                    <Card key={i} style={inParlay ? { borderColor: "rgba(251,191,36,0.4)" } : {}}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 5, flex: 1, paddingRight: 8, minWidth: 0, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", lineHeight: 1.4 }}>{p.label}</span>
+                          {entry.kind === "algo" && (
+                            <span style={{ fontSize: 7, fontWeight: 800, color: "#94a3b8", background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em", flexShrink: 0 }}
+                              title="Algorithmic pick — generated by the scoring model using Statcast + sportsbook data. No AI/LLM involved.">⚙ ALGO</span>
+                          )}
+                          {entry.kind === "ai" && (
+                            <span style={{ fontSize: 7, fontWeight: 800, color: "#818cf8", background: "rgba(129,140,248,0.08)", border: "1px solid rgba(129,140,248,0.2)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em", flexShrink: 0 }}
+                              title="AI-powered pick — generated by Claude analyzing pitcher stats, lineup matchups, and park factors.">✦ AI</span>
+                          )}
+                          {bothAgree && (
+                            <span style={{ fontSize: 7, fontWeight: 800, color: "#818cf8", background: "rgba(129,140,248,0.12)", border: "1px solid rgba(129,140,248,0.4)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", flexShrink: 0 }}
+                              title="Both the algorithmic model and AI analysis agree on this pick.">✦ BOTH AGREE</span>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                          <LeanBadge label={p.lean} positive={p.positive} small />
+                          <button
+                            onClick={() => { if (parlayFull) return; setParlayLabels(prev => inParlay ? prev.filter(l => l !== p.label) : [...prev, p.label]); }}
+                            title={parlayFull ? "Max 3 legs" : inParlay ? "Remove from parlay" : "Add to parlay"}
+                            style={{ fontSize: 10, fontWeight: 700, background: inParlay ? "rgba(251,191,36,0.15)" : "rgba(255,255,255,0.04)", border: `1px solid ${inParlay ? "rgba(251,191,36,0.5)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 6px", cursor: parlayFull ? "default" : "pointer", color: inParlay ? "#fbbf24" : "#4b5563", opacity: parlayFull ? 0.35 : 1, lineHeight: 1 }}>🔗</button>
+                          <button
+                            onClick={() => !logged && logPick(p)}
+                            title={logged ? "Already logged" : "Log this pick"}
+                            style={{ fontSize: 13, background: logged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)", border: `1px solid ${logged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 7px", cursor: logged ? "default" : "pointer", color: logged ? "#22c55e" : "#6b7280", transition: "all 0.15s", lineHeight: 1 }}>
+                            {logged ? "✓" : "＋"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {entry.kind === "dual" ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontSize: 7, fontWeight: 800, color: "#94a3b8", fontFamily: "monospace", width: 18, flexShrink: 0 }}>⚙</span>
+                            <ConfBar pct={entry.algo.confidence} positive={entry.algo.positive} />
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span style={{ fontSize: 7, fontWeight: 800, color: "#818cf8", fontFamily: "monospace", width: 18, flexShrink: 0 }}>✦</span>
+                            <ConfBar pct={entry.ai.confidence} positive={entry.ai.positive} />
+                          </div>
+                        </div>
+                      ) : (
+                        <ConfBar pct={p.confidence} positive={p.positive} />
+                      )}
+
+                      <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, lineHeight: 1.4 }}>{p.reason}</div>
+                      {entry.kind === "dual" && entry.ai.reason !== entry.algo.reason && (
+                        <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4, lineHeight: 1.4, borderTop: "1px solid rgba(255,255,255,0.04)", paddingTop: 4 }}>
+                          <span style={{ color: "#818cf8", fontFamily: "monospace", fontSize: 9 }}>✦</span> {entry.ai.reason}
+                        </div>
+                      )}
+                    </Card>
+                  );
+                });
+              })()}
+
+              {(() => {
+                const key = String(selectedId);
+                if (liveAiProps[key] !== "loading") return null;
                 return (
-                  <Card key={i} style={inParlay ? { borderColor: "rgba(251,191,36,0.4)" } : {}}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 5, flex: 1, paddingRight: 8, minWidth: 0 }}>
-                        <span style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", lineHeight: 1.4 }}>{p.label}</span>
-                        <span style={{
-                          fontSize: 7,
-                          fontWeight: 800,
-                          color: "#818cf8",
-                          background: "rgba(129,140,248,0.08)",
-                          border: "1px solid rgba(129,140,248,0.2)",
-                          borderRadius: 4,
-                          padding: "1px 5px",
-                          fontFamily: "monospace",
-                          letterSpacing: "0.04em",
-                          flexShrink: 0,
-                        }} title="AI-powered pick — generated by Claude analyzing pitcher stats, lineup matchups, and park factors.">✦ AI</span>
-                      </div>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                        <LeanBadge label={p.lean} positive={p.positive} small />
-                        {/* Parlay toggle */}
-                        <button
-                          onClick={() => {
-                            if (parlayFull) return;
-                            setParlayLabels(prev => inParlay ? prev.filter(l => l !== p.label) : [...prev, p.label]);
-                          }}
-                          title={parlayFull ? "Max 3 legs" : inParlay ? "Remove from parlay" : "Add to parlay"}
-                          style={{ fontSize: 10, fontWeight: 700, background: inParlay ? "rgba(251,191,36,0.15)" : "rgba(255,255,255,0.04)", border: `1px solid ${inParlay ? "rgba(251,191,36,0.5)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 6px", cursor: parlayFull ? "default" : "pointer", color: inParlay ? "#fbbf24" : "#4b5563", opacity: parlayFull ? 0.35 : 1, lineHeight: 1 }}>
-                          🔗
-                        </button>
-                        {/* Log pick */}
-                        <button
-                          onClick={() => !logged && logPick(p)}
-                          title={logged ? "Already logged" : "Log this pick"}
-                          style={{ fontSize: 13, background: logged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)", border: `1px solid ${logged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 7px", cursor: logged ? "default" : "pointer", color: logged ? "#22c55e" : "#6b7280", transition: "all 0.15s", lineHeight: 1 }}>
-                          {logged ? "✓" : "＋"}
-                        </button>
-                      </div>
-                    </div>
-                    <ConfBar pct={p.confidence} positive={p.positive} />
-                    <div style={{ fontSize: 11, color: "#6b7280", marginTop: 8, lineHeight: 1.4 }}>{p.reason}</div>
-                  </Card>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 4px" }}>
+                    <span style={{ fontSize: 9, color: "#818cf8", fontFamily: "monospace" }}>✦</span>
+                    <span style={{ fontSize: 10, color: "#4b5563" }}>AI analysis loading…</span>
+                  </div>
                 );
-              })}
+              })()}
 
               {/* ── SPORTSBOOK LINES section ─────────────────── */}
               {!IS_ODDS_SANDBOX && !IS_STATS_SANDBOX && (() => {
