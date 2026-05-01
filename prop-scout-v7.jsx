@@ -2122,7 +2122,7 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
       const lean = score >= 50 ? "NRFI" : "YRFI";
       games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
         gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
-        score, lean, leanLabel: lean, line: null,
+        score, lean, leanAbbr: null, leanLabel: lean, line: null, odds,
         factors, homeSP, awaySP, weather: wx, nrfi: apiNrfi,
         stadium: game.stadium });
 
@@ -2221,7 +2221,7 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
       const lean = score >= 50 ? "OVER" : "UNDER";
       games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
         gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
-        score, lean, leanLabel: `${lean} ${totalLine ?? "?"}`, line: totalLine,
+        score, lean, leanAbbr: null, leanLabel: `${lean} ${totalLine ?? "?"}`, line: totalLine, odds,
         factors, homeSP, awaySP, weather: wx, stadium: game.stadium });
 
     // ── RUN LINE / SPREAD ─────────────────────────────────────────────────────
@@ -2275,7 +2275,7 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
       const spreadLine = score >= 50 ? homeSpread : awaySpread;
       games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
         gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
-        score, lean, leanLabel: `${lean === "HOME" ? game.home.abbr : game.away.abbr} ${spreadLine ?? "?"}`, line: spreadLine,
+        score, lean, leanAbbr: lean === "HOME" ? game.home.abbr : game.away.abbr, leanLabel: `${lean === "HOME" ? game.home.abbr : game.away.abbr} ${spreadLine ?? "?"}`, line: spreadLine, odds,
         factors, homeSP, awaySP, weather: wx, stadium: game.stadium });
 
     // ── MONEYLINE ─────────────────────────────────────────────────────────────
@@ -2325,10 +2325,10 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
       score = Math.round(Math.max(30, Math.min(78, score)));
       const lean = score >= 50 ? "HOME" : "AWAY";
       const mlLine = score >= 50 ? (homeMl ?? "—") : (awayMl ?? "—");
-      const leanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr;
+      const mlLeanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr;
       games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
         gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
-        score, lean, leanLabel: `${leanAbbr} ML ${mlLine}`, line: mlLine,
+        score, lean, leanAbbr: mlLeanAbbr, leanLabel: `${mlLeanAbbr} ML ${mlLine}`, line: mlLine, odds,
         factors, homeSP, awaySP, weather: wx, stadium: game.stadium });
     }
   });
@@ -2988,6 +2988,7 @@ export default function App() {
   const [boxSide,       setBoxSide]       = useState("away");// batting + pitching toggle: "away" | "home"
   const boxscoreFetched = useRef(new Set());                  // gamePks whose final boxscore is cached
   const gradedGames     = useRef(new Set());                  // idempotency: gamePks already auto-graded
+  const histGradedGames = useRef(new Set());                  // gamePks already processed by the historical catch-up grader
   const [liveBoardResults, setLiveBoardResults] = useState({}); // playerId → { h, hr, ab, live }
   const boardBoxFetched = useRef(new Set());                  // gamePks already fetched for Board results
   const chatBottomRef = useRef(null);
@@ -3147,13 +3148,26 @@ export default function App() {
     if (!IS_ODDS_SANDBOX && ODDS_API_KEY) {
       (liveSlate ?? []).forEach(game => {
         const key = String(game.gamePk);
-        if (livePlayerProps[key] || boardPropsFetched.current.has(key)) return;
+        if (livePlayerProps[key] === "loading") return;
+        const hasBatterProps = Array.isArray(livePlayerProps[key]?.props) &&
+          livePlayerProps[key].props.some(p =>
+            p.market === "batter_home_runs" || p.market === "batter_hits"
+          );
+        if (hasBatterProps) return;
+        if (boardPropsFetched.current.has(key)) return;
         boardPropsFetched.current.add(key);
         setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
         fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "", game.gamePk)
           .then(result => {
             const normalized = result?.props ? result : { props: result ?? [], reason: "ok" };
             setLivePlayerProps(prev => ({ ...prev, [key]: normalized }));
+            const gotBatterProps = normalized.props?.some(p =>
+              p.market === "batter_home_runs" || p.market === "batter_hits"
+            );
+            if (!gotBatterProps) {
+              boardPropsFetched.current.delete(key);
+              delete playerPropsCache[key];
+            }
           })
           .catch(() => {
             boardPropsFetched.current.delete(key);
@@ -3498,6 +3512,65 @@ export default function App() {
       if (anyGraded) gradedGames.current.add(gamePk);
     });
   }, [liveSlate, liveScores, liveBoxscores, propLog]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Historical pick catch-up: grade pending picks from prior days ─────────
+  // Fires when the user opens the Picks tab. Finds pending picks whose gamePk
+  // is not in today's liveSlate (i.e. from a previous day), fetches their
+  // final boxscores, and grades them with computeGrade.
+  useEffect(() => {
+    if (IS_STATS_SANDBOX || view !== "picks") return;
+
+    const todayGamePks = new Set((liveSlate ?? []).map(g => String(g.gamePk)));
+
+    const historicalPending = propLog.filter(p =>
+      p.result === null &&
+      p.gamePk != null &&
+      !todayGamePks.has(String(p.gamePk))
+    );
+    if (!historicalPending.length) return;
+
+    const byGame = {};
+    historicalPending.forEach(p => {
+      const key = String(p.gamePk);
+      if (!byGame[key]) byGame[key] = [];
+      byGame[key].push(p);
+    });
+
+    Object.entries(byGame).forEach(([gamePkStr, picks]) => {
+      if (histGradedGames.current.has(gamePkStr)) return;
+      histGradedGames.current.add(gamePkStr);
+
+      const cached = liveBoxscores[gamePkStr];
+      if (cached?.isFinal) {
+        let anyGraded = false;
+        picks.forEach(pick => {
+          const grade = computeGrade(pick, cached);
+          if (grade !== null) { markResult(pick.id, grade); anyGraded = true; }
+        });
+        if (!anyGraded) histGradedGames.current.delete(gamePkStr);
+        return;
+      }
+
+      apiFetch(`/api/boxscore/${gamePkStr}`)
+        .then(data => {
+          if (!data?.isFinal) {
+            histGradedGames.current.delete(gamePkStr);
+            return;
+          }
+          setLiveBoxscores(prev => ({ ...prev, [gamePkStr]: data }));
+          boxscoreFetched.current.add(gamePkStr);
+          let anyGraded = false;
+          picks.forEach(pick => {
+            const grade = computeGrade(pick, data);
+            if (grade !== null) { markResult(pick.id, grade); anyGraded = true; }
+          });
+          if (!anyGraded) histGradedGames.current.delete(gamePkStr);
+        })
+        .catch(() => {
+          histGradedGames.current.delete(gamePkStr);
+        });
+    });
+  }, [view, propLog]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch boxscores for live/final games on the Board + Model views to show today's results
   useEffect(() => {
@@ -8837,11 +8910,48 @@ export default function App() {
                                   </span>
                                 )}
                               </div>
+                              {c.odds?.books && gameSubTab !== "nrfi" && (() => {
+                                const BOOK_COLORS = { DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa" };
+                                const isAwayLean = c.leanAbbr != null && c.leanAbbr === c.away?.abbr;
+                                const chips = Object.entries(BOOK_COLORS)
+                                  .map(([bk, color]) => {
+                                    const bd = c.odds.books[bk];
+                                    if (!bd) return null;
+                                    let lineText = null;
+                                    if (gameSubTab === "total") {
+                                      if (bd.total) lineText = `O/U ${bd.total} ${bd.overOdds ?? "—"}/${bd.underOdds ?? "—"}`;
+                                    } else if (gameSubTab === "spread") {
+                                      const sp   = isAwayLean ? bd.awaySpread     : bd.homeSpread;
+                                      const spOd = isAwayLean ? bd.awaySpreadOdds : bd.homeSpreadOdds;
+                                      if (sp) lineText = `${sp}${spOd ? ` ${spOd}` : ""}`;
+                                    } else if (gameSubTab === "ml") {
+                                      const ml = isAwayLean ? bd.awayML : bd.homeML;
+                                      if (ml) lineText = ml;
+                                    }
+                                    if (!lineText) return null;
+                                    return { bk, color, lineText };
+                                  })
+                                  .filter(Boolean);
+                                if (!chips.length) return null;
+                                return (
+                                  <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
+                                    {chips.map(({ bk, color, lineText }) => (
+                                      <span key={bk} style={{
+                                        fontSize: 8, fontWeight: 700, color,
+                                        background: `${color}15`, border: `1px solid ${color}33`,
+                                        borderRadius: 4, padding: "2px 6px", fontFamily: "monospace",
+                                      }}>
+                                        {bk === preferredBook ? `★ ${bk}` : bk} {lineText}
+                                      </span>
+                                    ))}
+                                  </div>
+                                );
+                              })()}
                             </div>
                             {/* Lean badge */}
                             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
                               <div style={{ background: `${lc}18`, border: `1px solid ${lc}55`, borderRadius: 6, padding: "4px 8px", textAlign: "center" }}>
-                                <div style={{ fontSize: 12, fontWeight: 900, color: lc, fontFamily: "monospace", lineHeight: 1 }}>{c.lean}</div>
+                                <div style={{ fontSize: 12, fontWeight: 900, color: lc, fontFamily: "monospace", lineHeight: 1 }}>{c.leanAbbr ?? c.lean}</div>
                                 {c.line && <div style={{ fontSize: 8, color: lc, fontFamily: "monospace", marginTop: 1, opacity: 0.8 }}>{c.line}</div>}
                               </div>
                               <span style={{ fontSize: 8, color: "#4b5563" }}>tap for why</span>

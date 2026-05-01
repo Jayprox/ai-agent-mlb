@@ -8250,3 +8250,461 @@ All passed cleanly.
 - No new routes were added
 - No cache keys or payload signatures changed outside the new nullable `vsLeft` / `vsRight` fields on `pitcherStats`
 - Existing aggregate pitcher metrics were preserved exactly as before
+
+---
+
+## HANDOFF NOTE — 2026-05-01 — Pick Auto-Grading Audit / Pending Picks Investigation
+
+Codex investigated why production can still show older logged picks as `pending` after the games have finished.
+
+### Key finding
+
+The current auto-grading path is **frontend-driven**, not backend-driven.
+
+In `prop-scout-v7.jsx`, the grading effect:
+
+- watches the currently loaded `liveSlate`
+- detects games that become `Final`
+- fetches final boxscore data
+- runs `computeGrade(...)`
+- writes `hit` / `miss` back to the pick log
+
+This means grading is reliable only when:
+
+- the app is open at some point after the game finishes, and
+- the finished game is part of the currently loaded slate
+
+### Why old picks can stay pending
+
+#### 1. Historical picks are not revisited once they fall off the active slate
+
+The grading effect iterates over `liveSlate`, which is normally today's schedule. Older unresolved picks from prior days are not proactively scanned by `gamePk`, so they can remain pending indefinitely.
+
+Example:
+
+- a pick from `Apr 29` can still be pending on `May 1`
+- because `May 1`'s `liveSlate` will not include that historical game
+- therefore the auto-grade effect never revisits it
+
+#### 2. `F5` is not currently gradeable
+
+The current `computeGrade(...)` implementation no longer includes an `F5 / First 5` grading branch.
+
+Result:
+
+- old `F5` picks can remain `pending` forever under the current logic
+
+#### 3. Older picks may be metadata-fragile
+
+`computeGrade(...)` depends on saved metadata to match the correct player or pitcher:
+
+- pitcher props prefer `pick.pitcherName`
+- batter props prefer `pick.playerId` / `pick.playerName`
+
+Recent `logPick(...)` writes these fields much more consistently, but older picks logged before those schema improvements may still fail the matcher and return `null`.
+
+### Prop types currently supported by the frontend grader
+
+Supported now:
+
+- `NRFI`
+- `YRFI`
+- `Game Total / O/U Total`
+- `Run Line`
+- `Moneyline`
+- pitcher `Strikeouts`
+- pitcher `Outs`
+- batter `Hits`
+- batter `Total Bases`
+- batter `Home Runs`
+- batter `RBI`
+
+Not currently supported in the live grader:
+
+- `F5 / First 5`
+
+### Recommended fix path
+
+Codex recommended moving pick settlement to the backend.
+
+#### Preferred architecture
+
+1. Extract grading logic into a backend grading service
+2. Run a scheduled unresolved-picks job on the backend
+3. Query all picks where `result IS NULL`
+4. Group by `gamePk`
+5. Fetch final boxscore for each game
+6. Grade all unresolved picks and persist `hit` / `miss`
+
+Benefits:
+
+- historical picks get settled even if nobody opens the app
+- grading no longer depends on today's active slate
+- production stops accumulating stale `pending` picks
+
+#### Optional interim fix
+
+As a smaller stopgap, the frontend Picks view could backfill unresolved picks by:
+
+- scanning `propLog.filter(p => p.result === null)`
+- fetching historical boxscores by `gamePk`
+- running the same grading logic on view open
+
+This would improve catch-up behavior, but it would still be browser-dependent and less reliable than backend settlement.
+
+### Important implementation notes for future work
+
+- if historic `F5` picks still matter, an `F5` grading branch needs to be restored
+- grading should key off unresolved picks' `gamePk`, not today's schedule
+- backend grader should preserve multiple player/pitcher matching fallbacks for older pick records
+
+### Scope of this audit
+
+- investigation only
+- no grading logic was changed
+- no backend settlement worker was built yet
+
+---
+
+## HANDOFF NOTE — 2026-05-01 — CODEX TASK 55 COMPLETED (Pick Auto-Grading Phase A: Historical Catch-Up)
+
+Implemented the first practical follow-up to the pending-picks audit in the frontend only.
+
+### Files changed
+
+- `prop-scout-v7.jsx`
+
+### What changed
+
+- Added `histGradedGames` ref near the existing `gradedGames` ref.
+- Added a second grading `useEffect` immediately after the existing today-slate auto-grader.
+- New effect only runs when `view === "picks"`.
+- It identifies pending picks whose `gamePk` is not part of today’s `liveSlate`, groups them by `gamePk`, and attempts a historical catch-up grade by fetching `/api/boxscore/:gamePk`.
+- If a final boxscore is already present in `liveBoxscores`, it grades from cache without refetching.
+- Uses the existing `computeGrade(...)` and `markResult(...)` functions unchanged.
+- If a game is not final yet, fetch fails, or no picks could be graded, the game key is removed from `histGradedGames` so it can retry the next time the user opens Picks.
+
+### Scope / constraints preserved
+
+- No backend changes.
+- No changes to `computeGrade`, `markResult`, or the existing today-slate grading effect.
+- New effect dependency array is exactly `[view, propLog]`.
+- Historical detection uses string coercion on `gamePk` so localStorage/API number-vs-string mismatches do not block grading.
+
+### Verification
+
+- `npm run build` passed
+
+### Notes for Cowork
+
+- This is still a frontend-driven catch-up pass, not a true backend settlement worker.
+- It should clear many old `pending` picks as soon as the user opens the Picks tab, as long as the prop type is still supported by `computeGrade(...)`.
+- Historic `F5` picks remain unsupported unless `computeGrade(...)` gets an F5 branch restored in a future task.
+
+---
+
+## BACKLOG TASK 52 — Batter Board Props Retry (HR / Hits Chips)
+
+**Status:** COMPLETED ✅
+**LOE:** Small
+**Type:** Frontend only
+**Dependencies:** None
+
+### Problem
+
+The multi-book prop chips (DK/FD/CZR/MGM/BOV) are already rendered in the batter board card code (lines 9110-9141 of `prop-scout-v7.jsx`) via `{c.propLine?.books && ...}`. The rendering is structurally identical to the pitcher board chips (lines 8978-9009).
+
+The chips don't appear on HR/Hits tabs because of a caching gap: when the Board view opens early in the day, `fetchPlayerPropsDirect` is called for each game. All 5 markets (pitcher K, pitcher Outs, batter HR, batter H, batter TB) are fetched in one Odds API call. However, books typically post pitcher K/Outs lines first (hours before game time) and batter HR/H lines much later (~1-2 hours before first pitch).
+
+When props fetch with only pitcher markets populated, the result is stored in both `playerPropsCache` and `livePlayerProps[key]`. The board useEffect guard (`if (livePlayerProps[key] || boardPropsFetched.current.has(key)) return`) then blocks all retries. So even after books post batter lines, the board never re-fetches and batter chips never appear.
+
+### Fix
+
+In the board useEffect `.then()` callback: if the fetched props have no batter markets (`batter_home_runs` or `batter_hits`), delete the browser-side `playerPropsCache[key]` entry and remove the key from `boardPropsFetched.current` so the next lineup/slate update triggers a retry. No structural code changes are needed to the rendering layer.
+
+---
+
+## CODEX TASK 45 — Batter Board Props Retry (Backlog Task 52)
+
+**File:** `prop-scout-v7.jsx`
+**Backend changes:** None
+**Lines to change:** One block in the board useEffect (around line 3150-3162)
+
+### Root cause
+
+In the board props useEffect (fires when `[view, liveLineups, liveSlate]` changes), the current guard is:
+
+```js
+if (livePlayerProps[key] || boardPropsFetched.current.has(key)) return;
+boardPropsFetched.current.add(key);
+setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
+fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "", game.gamePk)
+  .then(result => {
+    const normalized = result?.props ? result : { props: result ?? [], reason: "ok" };
+    setLivePlayerProps(prev => ({ ...prev, [key]: normalized }));
+  })
+  .catch(() => {
+    boardPropsFetched.current.delete(key);
+    setLivePlayerProps(prev => ({ ...prev, [key]: { props: [] } }));
+  });
+```
+
+Once a game's props are fetched — even with zero batter lines — `livePlayerProps[key]` is set and `boardPropsFetched.current.has(key)` returns true. No retry ever happens.
+
+### Fix (drop-in replacement for the block above)
+
+Replace the block (the `if` guard + `boardPropsFetched.current.add(key)` + `setLivePlayerProps("loading")` + `fetchPlayerPropsDirect(...).then(...).catch(...)`) with:
+
+```js
+// Skip if currently fetching (avoid concurrent requests)
+if (livePlayerProps[key] === "loading") return;
+// Skip if already fetched WITH batter props — nothing left to load
+const hasBatterProps = Array.isArray(livePlayerProps[key]?.props) &&
+  livePlayerProps[key].props.some(p =>
+    p.market === "batter_home_runs" || p.market === "batter_hits"
+  );
+if (hasBatterProps) return;
+// Skip if already in-flight from this effect run (race guard)
+if (boardPropsFetched.current.has(key)) return;
+boardPropsFetched.current.add(key);
+setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
+fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "", game.gamePk)
+  .then(result => {
+    const normalized = result?.props ? result : { props: result ?? [], reason: "ok" };
+    setLivePlayerProps(prev => ({ ...prev, [key]: normalized }));
+    // If still no batter props, allow a future retry (books may post them later)
+    const gotBatterProps = normalized.props?.some(p =>
+      p.market === "batter_home_runs" || p.market === "batter_hits"
+    );
+    if (!gotBatterProps) {
+      boardPropsFetched.current.delete(key);
+      delete playerPropsCache[key]; // clear browser-side dedup cache too
+    }
+  })
+  .catch(() => {
+    boardPropsFetched.current.delete(key);
+    setLivePlayerProps(prev => ({ ...prev, [key]: { props: [] } }));
+  });
+```
+
+### What this does
+
+- If a game's props come back with pitcher lines only (no `batter_home_runs` or `batter_hits`): clears both `boardPropsFetched` and `playerPropsCache` for that game so the next lineup update (which fires the effect again) will retry
+- If a game's props come back with batter lines: marks as done and never retries (same as before)
+- Still uses the `boardPropsFetched` set to prevent concurrent duplicate requests within a single effect run
+- No backend changes required — the Odds API endpoint already fetches all 5 markets in one call; we just need to retry until batter lines arrive
+
+### Verification
+
+1. `npm run build` must pass (no JSX or syntax errors)
+2. Load the app on the Board/HR tab when batter props are not yet posted → confirm no fetch-loop (network tab should show one request per game, not continuous polling)
+3. Once batter props are available (mock by seeding `playerPropsCache[gamePk] = { props: [{ market: "batter_home_runs", books: { DK: { line: 0.5, overOdds: "+130", underOdds: "-160" } }, ... }] }`), confirm that chips appear on HR and Hits batter cards
+
+### After completing
+
+Update `AGENT_SYSTEM_PROMPT.md`: mark **BACKLOG TASK 52** as `COMPLETED ✅` and add a brief completion note under CODEX TASK 45.
+
+### Completion note
+
+- Updated the Board props prefetch guard so games with only pitcher markets no longer get stuck permanently cached.
+- If a fetch returns no `batter_home_runs` or `batter_hits`, the code now clears both `boardPropsFetched.current` and the browser-side `playerPropsCache[key]` so a later board refresh can retry.
+- Concurrent duplicate requests are still prevented while a fetch is actively in flight.
+
+---
+
+## BACKLOG TASK 53 — Games Board: Team Lean Badge + Book Odds Chips
+
+**Status:** COMPLETED ✅
+**LOE:** Small
+**Type:** Frontend only
+**Dependencies:** None
+
+### What
+
+Two UX improvements to the Games board cards (Board → Games tab):
+
+1. **Team lean badge**: Run Line and Moneyline sub-tabs currently show "HOME" or "AWAY" in the right-side badge. Replace with the actual team abbreviation (e.g., "ATL", "NYY") so the user immediately knows which team to bet without mentally mapping HOME/AWAY.
+
+2. **Book odds chips**: Add per-book odds chips below the weather/park row on each game card — similar to how batter/pitcher board cards show DK/FD/CZR/MGM chips. For Total, show the O/U line + over/under odds from each book. For Spread and ML, show the leaning team's line/odds from each book.
+
+---
+
+## CODEX TASK 46 — Games Board: Team Lean Badge + Book Odds Chips (Backlog Task 53)
+
+**File:** `prop-scout-v7.jsx` only  
+**Backend changes:** None  
+**Key functions/lines:** `computeGameBoard` (around line 2035), game board card rendering (around line 8784)
+
+---
+
+### Part A — `computeGameBoard`: Add `leanAbbr` and `odds` fields
+
+The `computeGameBoard` function currently pushes game candidates with `lean: "HOME"/"AWAY"` but doesn't include the team abbreviation or the raw odds object. Both are needed for the badge and chips.
+
+**Four `games.push(...)` calls need two new fields: `leanAbbr` and `odds`.**
+
+**NRFI push** (around line 2123):
+```js
+games.push({ ..., leanAbbr: null, odds });
+```
+
+**Total push** (around line 2222):
+```js
+games.push({ ..., leanAbbr: null, odds });
+```
+
+**Spread push** (around line 2276):
+```js
+// lean is already "HOME" or "AWAY" at this point
+games.push({ ..., lean, leanAbbr: lean === "HOME" ? game.home.abbr : game.away.abbr, line: spreadLine, ..., odds });
+```
+
+**ML push** (around line 2329):
+- Note: ML section already has a local `const leanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr` at line 2328. **Rename that local variable to `mlLeanAbbr`** (to avoid shadowing the object key), then include it:
+```js
+const mlLeanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr;
+games.push({ ..., lean, leanAbbr: mlLeanAbbr, line: mlLine, leanLabel: `${mlLeanAbbr} ML ${mlLine}`, ..., odds });
+```
+
+The `odds` variable in `computeGameBoard` is already defined at the top of the `(activeSlate ?? []).forEach(game => {...})` block as `const odds = liveOddsMap[oddsKey] ?? game.odds ?? {}`. Pass it through directly.
+
+---
+
+### Part B — Badge rendering: Show `c.leanAbbr ?? c.lean`
+
+**Find** the lean badge at approximately line 8844:
+```jsx
+<div style={{ fontSize: 12, fontWeight: 900, color: lc, fontFamily: "monospace", lineHeight: 1 }}>{c.lean}</div>
+{c.line && <div style={{ fontSize: 8, color: lc, fontFamily: "monospace", marginTop: 1, opacity: 0.8 }}>{c.line}</div>}
+```
+
+**Replace** `{c.lean}` with `{c.leanAbbr ?? c.lean}`:
+```jsx
+<div style={{ fontSize: 12, fontWeight: 900, color: lc, fontFamily: "monospace", lineHeight: 1 }}>{c.leanAbbr ?? c.lean}</div>
+{c.line && <div style={{ fontSize: 8, color: lc, fontFamily: "monospace", marginTop: 1, opacity: 0.8 }}>{c.line}</div>}
+```
+
+Result:
+- NRFI/YRFI: `leanAbbr = null` → badge still shows "NRFI" ✓
+- OVER/UNDER: `leanAbbr = null` → badge still shows "OVER" + "8.5" ✓
+- Run Line: `leanAbbr = "ATL"` → badge shows "ATL" + "-1.5" ✓
+- Moneyline: `leanAbbr = "ATL"` → badge shows "ATL" + "-135" ✓
+
+---
+
+### Part C — Book odds chips row
+
+**Insert** this block immediately before the closing `</div>` of the main flex-1 content div (the one containing the SP row and weather row — approximately after line 8839 and before the flex-1 `</div>` at line 8840):
+
+```jsx
+{/* Book odds chips — Total / Spread / ML */}
+{c.odds?.books && gameSubTab !== "nrfi" && (() => {
+  const BOOK_COLORS = { DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa" };
+  const isAwayLean = c.leanAbbr != null && c.leanAbbr === c.away?.abbr;
+  const chips = Object.entries(BOOK_COLORS)
+    .map(([bk, color]) => {
+      const bd = c.odds.books[bk];
+      if (!bd) return null;
+      let lineText = null;
+      if (gameSubTab === "total") {
+        if (bd.total) lineText = `O/U ${bd.total} ${bd.overOdds ?? "—"}/${bd.underOdds ?? "—"}`;
+      } else if (gameSubTab === "spread") {
+        const sp   = isAwayLean ? bd.awaySpread     : bd.homeSpread;
+        const spOd = isAwayLean ? bd.awaySpreadOdds : bd.homeSpreadOdds;
+        if (sp) lineText = `${sp}${spOd ? ` ${spOd}` : ""}`;
+      } else if (gameSubTab === "ml") {
+        const ml = isAwayLean ? bd.awayML : bd.homeML;
+        if (ml) lineText = ml;
+      }
+      if (!lineText) return null;
+      return { bk, color, lineText };
+    })
+    .filter(Boolean);
+  if (!chips.length) return null;
+  return (
+    <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
+      {chips.map(({ bk, color, lineText }) => (
+        <span key={bk} style={{
+          fontSize: 8, fontWeight: 700, color,
+          background: `${color}15`, border: `1px solid ${color}33`,
+          borderRadius: 4, padding: "2px 6px", fontFamily: "monospace",
+        }}>
+          {bk === preferredBook ? `★ ${bk}` : bk} {lineText}
+        </span>
+      ))}
+    </div>
+  );
+})()}
+```
+
+---
+
+### Verification
+
+1. `npm run build` must pass
+2. On the Games → Moneyline sub-tab: lean badge shows a 3-letter team abbreviation (e.g., "ATL"), not "HOME"/"AWAY"
+3. On the Games → Run Line sub-tab: same — badge shows team abbr + spread (e.g., "ATL" / "-1.5")
+4. On the Games → O/U Total sub-tab: badge still shows "OVER" or "UNDER" (leanAbbr is null for total) ✓
+5. On the Games → NRFI sub-tab: badge still shows "NRFI" or "YRFI" ✓
+6. Book chips appear on Total, Spread, and ML cards when odds are loaded; no chips on NRFI cards
+7. Preferred book chip is starred (★)
+
+### After completing
+
+Update `AGENT_SYSTEM_PROMPT.md`: mark **BACKLOG TASK 53** as `COMPLETED ✅` and add a brief completion note under CODEX TASK 46.
+
+### Completion note
+
+- `computeGameBoard` candidates now carry both `leanAbbr` and raw `odds` so the render layer can show team-specific lean badges and per-book pricing.
+- Games Board Moneyline and Run Line cards now display the team abbreviation instead of generic `HOME` / `AWAY`.
+- Added DK / FD / CZR / MGM chips for Total, Spread, and ML cards, with the preferred book starred via `★`.
+- NRFI cards remain unchanged and intentionally do not render book chips.
+
+---
+
+## BACKLOG TASK 54 — Pick Auto-Grading Phase A: Historical Catch-Up
+
+**Status:** COMPLETED ✅ (CODEX TASK 55 — 2026-05-01)
+**LOE:** Small
+**Type:** Frontend only
+**Dependencies:** None
+
+Pending picks from prior days were never graded because the existing grading effect only iterates over today's `liveSlate`. Added a second `useEffect` that fires when `view === "picks"`, scans for pending picks whose `gamePk` is not in today's slate, fetches their final boxscores, and grades them via the existing `computeGrade` / `markResult` path.
+
+---
+
+## HANDOFF NOTE — 2026-05-01 — CODEX TASK 55 COMPLETED
+
+Codex completed the historical pick catch-up grader in `prop-scout-v7.jsx`.
+
+### Files changed
+
+- `prop-scout-v7.jsx`
+
+### What was implemented
+
+**New ref** (near `gradedGames`):
+```js
+const histGradedGames = useRef(new Set()); // gamePks already processed by the historical catch-up grader
+```
+
+**New `useEffect`** (inserted after the existing today-slate grading effect):
+- Only fires when `view === "picks"` and `!IS_STATS_SANDBOX`
+- Builds `todayGamePks` from `liveSlate` for exclusion
+- Finds all `propLog` entries with `result === null` and `gamePk` not in today's slate
+- Groups by `gamePk`, fetches `/api/boxscore/${gamePk}` per game
+- Runs `computeGrade` on each pending pick, calls `markResult` for hits/misses
+- Deletes from `histGradedGames` ref if not final / error / nothing graded — allows retry on next Picks tab open
+- Dependency array: `[view, propLog]`
+
+### What was NOT changed
+
+- `computeGrade` — untouched
+- `markResult` — untouched  
+- Existing today-slate grading effect — untouched
+- No backend changes
+
+### Notes for Cowork
+
+- Phase B (backend settlement worker) remains on hold — this frontend catch-up is the stopgap
+- `F5` picks will still not grade (no `F5` branch in `computeGrade`) — acceptable since F5 props were removed from the app

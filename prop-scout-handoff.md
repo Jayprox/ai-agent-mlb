@@ -2929,3 +2929,168 @@ New flow for `GET /api/daily-card`:
 - Re-run migrations locally / on Railway so `daily_card_snapshots` exists before relying on DB-backed Daily Card persistence in production
 
 *Updated April 23 2026 — Session 47 complete · Daily Card DB-backed read model · no public token-triggered generation*
+
+---
+
+## ✅ Session 48 — Batter Power by Pitch Type + Rolling L7 Exit Velocity
+
+**Goal:** Enrich the HR Scout scoring model and batter drawer with two new Savant-derived data layers — per-pitch-type power splits and a rolling 7-day exit velocity trend — computed from the existing in-memory Savant CSV with zero new HTTP requests.
+
+**Files changed:**
+- `backend/routes/batterPower.js`
+- `backend/routes/hrScout.js`
+- `prop-scout-v7.jsx`
+
+### Part A — Pitch Type Power Splits (`batterPower.js`)
+
+Added `pitchTypeSplits` computation inside the existing batted-ball loop:
+
+- New accumulator: `pitchTypeAcc[abbr] = { battedBalls, barrels, hardHits, flyBalls, hrCount }`
+- Guard: `hasPitchType` column check before accumulating
+- Minimum threshold: 15 batted balls per pitch type before including in output
+- Output per pitch type: `{ battedBalls, hrCount, barrelPct, hardHitPct, flyBallPct }`
+- Added to returned `profile` object as `pitchTypeSplits`
+
+### Part B — Rolling 7-Day Exit Velocity (`batterPower.js`)
+
+Added `recentEv` via second pass over the same in-memory rows:
+
+- Cutoff: `today - 7 days` as ISO string (`YYYY-MM-DD` lexicographic comparison)
+- Minimum: 5 batted balls in L7 window
+- Output: `{ evL7, bbL7, hardHitPctL7, barrelPctL7, evDelta }` where `evDelta = evL7 - seasonAvgEv`
+- Added to returned `profile` object as `recentEv`
+- Console log updated: `evL7=${profile.recentEv?.evL7 ?? "n/a"}`
+
+### Part C — HR Scout scoring signals (`hrScout.js`)
+
+**arsenalMap changed to dual storage:**
+- Before: `arsenalMap.set(pitcherId, data?.pitcherStats ?? null)`
+- After: `arsenalMap.set(pitcherId, { stats: data?.pitcherStats ?? null, arsenal: data?.arsenal ?? [] })`
+- All `arsenalMap.get(...)` usages updated to use `?.stats` or `?.arsenal` accordingly
+
+**`computeHRScore` extended (5th param `pitcherArsenal = []`):**
+- Pitch-type signal: finds top pitch by `pct`, looks up `batter.powerProfile?.pitchTypeSplits?.[topPitch.abbr]`, adds `+2` if barrelPct ≥ 12, `-1` if ≤ 2
+- L7 EV signal: `+2` if evDelta ≥ 4, `+1` if ≥ 2, `-1` if ≤ -3 (guarded by `bbL7 ≥ 5`)
+
+**AI context enriched:** Added `PITCH SPLITS:` and `EV L7:` lines after the `POWER:` line in the prompt context block.
+
+### Part D — Batter drawer UI (`prop-scout-v7.jsx`)
+
+Two new display blocks added to the batter drawer:
+
+- **L7 EV block** (inserted after StatMini chips row, before Career H2H): shows evL7, evDelta (green if ≥ +2, red if ≤ -3), bbL7, hardHitPctL7, barrelPctL7
+- **Pitch-type power row** (inside `facingPitcher.arsenal.map` after progress bar): for each pitch in arsenal, if batter has `pitchTypeSplits[abbr]` with ≥15 BBs, shows barrelPct + hardHitPct inline
+
+**Verification:**
+- `npm run build` passed
+- `node --check backend/routes/batterPower.js` passed
+- `node --check backend/routes/hrScout.js` passed
+
+*Updated 2026-05-01 — Session 48 complete · pitch type power splits · rolling L7 EV · HR Scout signals*
+
+---
+
+## ✅ Session 49 — AI Betting Advisor Tab
+
+**Goal:** Build a two-persona conversational betting advisor tab. Full-slate context always pre-built. Pro persona surfaces high-confidence singles (-200 to +150). Lotto persona surfaces parlay/long-shot opportunities (+200 or better). Gated by `AI_PICKS_ALLOWLIST`.
+
+**Files changed:**
+- `backend/routes/advisor.js` (new file)
+- `backend/server.js`
+- `prop-scout-v7.jsx`
+
+### Backend — `backend/routes/advisor.js`
+
+New route `POST /api/advisor`. Key implementation details:
+
+- Auth + allowlist: copied from `chat.js` — requires valid JWT, checks `AI_PICKS_ALLOWLIST` env var against `req.user.username`
+- Rate limit: 20 messages/day per user, keyed by `userId:todayHonolulu()`, in-memory `usageMap`
+- `buildAdvisorContext(date)`: loads all games from DB + MLB API fallback, then for every game in parallel fetches injuries, props/odds/umpires, pitcher detail (ERA/K9/WHIP/L3/K-line, HR props). Returns structured text block per game: ML/total/RL, umpire K/9 delta, SP stat line, top 3 HR props
+- `PRO_SYSTEM_PROMPT`: singles-focused, -200 to +150 range, requires 3+ signals, returns `{ type: "picks", picks: [...] }`
+- `LOTTO_SYSTEM_PROMPT`: parlay/long-shot focused, +200 or better, always includes parlay card, returns `{ type: "lotto", picks: [...], parlay: {...} }`
+- Response shape: `{ type, content, picks, parlay, messagesUsedToday, maxMessagesPerDay }`
+
+### Backend — `backend/server.js`
+
+Added: `app.use("/api/advisor", require("./routes/advisor"))` after chat route.
+
+### Frontend — `prop-scout-v7.jsx`
+
+**New state (6 vars):** `advisorPersona` ("pro"), `advisorHistory` ([]), `advisorInput` (""), `advisorLoading` (false), `advisorError` (null), `advisorMessagesLeft` (20)
+
+**New ref:** `advisorBottomRef` for auto-scroll
+
+**Auto-scroll useEffect:** fires on `[advisorHistory, advisorLoading]`
+
+**`handleAdvisorSend`:** serializes structured message objects to `"[picks]"` string before sending
+
+**`handleAdvisorPersonaSwitch`:** clears history and error on switch
+
+**Quick chips:** `ADVISOR_PRO_CHIPS` and `ADVISOR_LOTTO_CHIPS` arrays
+
+**Nav tab:** Amber `🧠 Advisor` button (color `#f59e0b`), gated by `isScoutUser`
+
+**`view === "advisor"` section:** persona toggle, description line, quick chips, message window with user/assistant/picks/parlay renderers, input bar, message counter
+
+**Verification:**
+- `npm run build` passed
+- `node --check backend/routes/advisor.js` passed
+- `node --check backend/server.js` passed
+
+*Updated 2026-05-01 — Session 49 complete · AI Advisor tab · Pro + Lotto personas · full-slate context*
+
+---
+
+## ✅ Session 50 — Batter Board Props Retry + Games Board Enhancements
+
+**Files changed:** `prop-scout-v7.jsx` only
+
+### CODEX TASK 45 — Batter Board Props Retry (HR / Hits chips)
+
+**Problem:** Batter board (HR/Hits) multi-book prop chips weren't showing because props fetched early in the day (before books post batter lines) were cached and the `boardPropsFetched` guard blocked all retries.
+
+**Fix (board useEffect ~line 3150):** Replaced single `if (livePlayerProps[key] || boardPropsFetched.current.has(key)) return` guard with a three-step check:
+1. Skip if currently loading (`=== "loading"`)
+2. Skip if already has batter props (`batter_home_runs` or `batter_hits` present)
+3. Skip if in-flight (`boardPropsFetched.current.has(key)`)
+
+On fetch resolution with no batter props: `boardPropsFetched.current.delete(key)` + `delete playerPropsCache[key]` — enables retry on next lineup/slate update.
+
+### CODEX TASK 46 — Games Board: Team Lean Badge + Book Odds Chips
+
+**`computeGameBoard` changes:** Added `leanAbbr` and `odds` to all four `games.push(...)` calls. NRFI/Total get `leanAbbr: null`; Spread/ML get the leaning team's abbreviation. Local `const leanAbbr` in ML section renamed to `mlLeanAbbr` to avoid shadowing.
+
+**Badge:** `{c.leanAbbr ?? c.lean}` — Run Line and Moneyline cards now show team abbr (e.g. "ATL") instead of "HOME"/"AWAY". NRFI/YRFI and OVER/UNDER unchanged.
+
+**Book chips:** DK/FD/CZR/MGM chip row inserted after weather/park block on Total, Spread, and ML cards. Total shows `O/U line over/under`; Spread shows lean-side spread + odds; ML shows lean-side ML. NRFI gets no chips. Preferred book gets ★ prefix.
+
+**Verification:** `node --check backend/server.js` passed · all key fields confirmed in source
+
+*Updated 2026-05-01 — Session 50 complete · batter board props retry · games board team badges + book chips*
+
+---
+
+## 🔲 Session 51 — Task 27 Confirmed + Pick Auto-Grading Phase A Spec
+
+**Files changed:** None (investigation + spec session)
+
+### Task 27 — Algo vs AI Badges (confirmed complete)
+
+Audited the source. Both badges already exist from prior Codex runs:
+
+- `⚙ ALGO` — on Model Pick cards in `TierSection` (~line 4544), with tooltip: *"Algorithmic pick — generated by the scoring model using Statcast + sportsbook data. No AI/LLM involved."*
+- `✦ AI` — on Props tab pick cards (~line 7331), with tooltip: *"AI-powered pick — generated by Claude analyzing pitcher stats, lineup matchups, and park factors."*
+
+No code changes needed. Task 27 Phase A is fully shipped.
+
+### CODEX TASK 55 — Pick Auto-Grading Phase A: Historical Catch-Up (spec written, pending Codex)
+
+**Problem:** The existing grading `useEffect` only iterates over `liveSlate` (today's schedule). Pending picks from prior days never appear in today's slate so they remain `result === null` indefinitely.
+
+**Fix:** Add a second `useEffect` that fires when `view === "picks"`. It finds all pending picks whose `gamePk` is NOT in today's `liveSlate`, groups them by game, fetches `/api/boxscore/${gamePk}` for each, runs `computeGrade`, and calls `markResult`. A new `histGradedGames` ref (a `Set`) prevents duplicate fetches within the same session. If the boxscore comes back not final, the ref entry is deleted to allow a future retry.
+
+**Scope:** `prop-scout-v7.jsx` only. One new `useRef` (`histGradedGames`), one new `useEffect`. Zero changes to `computeGrade`, `markResult`, or the existing today-slate grading effect. No backend changes.
+
+**Status:** COMPLETED ✅ (Codex TASK 55 — approved 2026-05-01)
+
+*Updated 2026-05-01 — Session 51 complete · Task 27 confirmed shipped · Auto-Grading Phase A shipped*
