@@ -3070,7 +3070,7 @@ On fetch resolution with no batter props: `boardPropsFetched.current.delete(key)
 
 ---
 
-## 🔲 Session 51 — Task 27 Confirmed + Pick Auto-Grading Phase A Spec
+## ✅ Session 51 — Task 27 Confirmed + Pick Auto-Grading Phase A Spec
 
 **Files changed:** None (investigation + spec session)
 
@@ -3083,7 +3083,7 @@ Audited the source. Both badges already exist from prior Codex runs:
 
 No code changes needed. Task 27 Phase A is fully shipped.
 
-### CODEX TASK 55 — Pick Auto-Grading Phase A: Historical Catch-Up (spec written, pending Codex)
+### CODEX TASK 55 — Pick Auto-Grading Phase A: Historical Catch-Up
 
 **Problem:** The existing grading `useEffect` only iterates over `liveSlate` (today's schedule). Pending picks from prior days never appear in today's slate so they remain `result === null` indefinitely.
 
@@ -3097,7 +3097,7 @@ No code changes needed. Task 27 Phase A is fully shipped.
 
 ---
 
-## 🔲 Session 52 — Auto-Grading Phase B Spec + Task 27 Phase B Design
+## ✅ Session 52 — Auto-Grading Phase B + Task 27 Phase B (Merged Props View)
 
 **Files changed:** None (spec + design session)
 
@@ -3114,7 +3114,7 @@ No code changes needed. Task 27 Phase A is fully shipped.
 - `scheduler.js` — add cron at 4:00 AM Honolulu (after all west coast games finish)
 - `server.js` — expose `GET /api/admin/jobs/grade-picks` for manual trigger (same `x-admin-secret` pattern)
 
-**Status:** Spec written — pending Codex (CODEX TASK 56)
+**Status:** COMPLETED ✅ (Codex TASK 56 — approved 2026-05-01)
 
 ### Task 27 Phase B — Hybrid AI Props (design pending)
 
@@ -3124,6 +3124,24 @@ Two systems exist for the Props tab:
 
 **Design decision: merged card view.** Algo picks display immediately. AI picks load async. Cards are merged by prop type key — when both systems have a pick for the same prop, a dual confidence bar renders (⚙ row + ✦ row) with a `✦ BOTH AGREE` convergence badge if they share the same direction. AI-only or algo-only picks get a single bar with their source badge. AI reasoning shown as a secondary line beneath the algo reason on dual cards.
 
-**Spec written as CODEX TASK 57 — pending Codex.**
+**Status:** COMPLETED ✅ (Codex TASK 57 — approved 2026-05-01). Merged card view shipped: algo picks render immediately, AI picks load async, cards merge by `propTypeKey`, dual cards show stacked `⚙`/`✦` confidence bars with `✦ BOTH AGREE` convergence badge when both systems agree on direction.
 
-*Updated 2026-05-01 — Session 52 complete · Phase B specs · Props tab AI discovery · merged card design finalized*
+*Updated 2026-05-01 — Session 52 complete · Auto-Grading Phase B shipped · Merged Algo+AI Props view shipped*
+
+---
+
+## ✅ Session 53 — Advisor Missing Games Bug Fix
+
+**Goal:** Fix Advisor replying "that game isn't on today's slate" for real games on a full-slate day.
+
+**Root cause:** `buildAdvisorContext` in `backend/routes/advisor.js` capped the slate at 8 games via `.slice(0, 8)`. On a 15-game day, games 9+ were silently invisible to both Advisor personas.
+
+**Files changed:**
+- `backend/routes/advisor.js` — 1-line fix
+
+**What changed:**
+Removed `.slice(0, 8)` from `gameBlocks` — all games on the slate are now included in the Advisor's context.
+
+**Commit message:** `fix: remove advisor slate cap — include all games in buildAdvisorContext`
+
+*Updated 2026-05-01 — Session 53 complete · Advisor slate cap bug fixed*

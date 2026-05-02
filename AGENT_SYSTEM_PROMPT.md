@@ -9335,6 +9335,43 @@ Find the block `{displayProps.map((p, i) => {` through its closing `})}`. Replac
 - `npm run build` must pass with zero new warnings
 - After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 57 handoff note
 
+---
+
+## BACKLOG TASK 57 — Advisor Missing Games Bug
+
+**Status:** ✅ Completed — 2026-05-01
+**LOE:** XS
+**Type:** Backend only — `backend/routes/advisor.js` only
+**Priority:** High (user-facing bug)
+
+### Bug
+
+When a user asks the Advisor about a game that isn't in its context, it replies that the game isn't on today's slate — even when it is.
+
+### Root cause
+
+`buildAdvisorContext` in `backend/routes/advisor.js` caps the slate at 8 games:
+
+```js
+const gameBlocks = games.slice(0, 8).map(g => {
+```
+
+On a full MLB day (up to 15 games), any game beyond position 8 (sorted by whatever order the DB/API returns them) is silently dropped from the context. The Advisor has no knowledge of those games and correctly says it can't find them — but the real problem is the cap.
+
+### Fix
+
+Remove `slice(0, 8)` — use all games. If context length is a concern, increase to `slice(0, 15)` at minimum.
+
+```js
+// Before
+const gameBlocks = games.slice(0, 8).map(g => {
+
+// After
+const gameBlocks = games.map(g => {
+```
+
+No other changes needed.
+
 ### Completion note
 
 - Added module-level `buildPropsContext(...)` so the Props tab can send structured slate/pitcher/odds/ump/weather context to the existing `/api/props/:gamePk` backend.
@@ -9388,3 +9425,35 @@ Implemented the frontend merge layer for algorithmic props + AI props in the gam
 - The previous `✦ AI` badge on algorithmic props was misleading; this task makes the Props tab genuinely dual-source.
 - Algo props still render immediately, so the tab feels fast even before the async AI response returns.
 - The AI response is merged by prop-type key rather than raw label string, so aligned picks can share a single card even if their labels are not identical.
+
+---
+
+## HANDOFF NOTE — 2026-05-01 — BACKLOG TASK 57 COMPLETED (Advisor Missing Games Bug)
+
+Fixed the Advisor silently dropping games beyond position 8 on a full slate day.
+
+### File changed
+
+- `backend/routes/advisor.js`
+
+### What changed
+
+Removed `.slice(0, 8)` from the `gameBlocks` builder in `buildAdvisorContext`:
+
+```js
+// Before
+const gameBlocks = games.slice(0, 8).map(g => {
+
+// After
+const gameBlocks = games.map(g => {
+```
+
+All games on the slate are now included in the Advisor's context. On a 15-game day, games 9–15 (which previously produced "I don't have that game" responses) are now visible to both Pro and Lotto personas.
+
+### Verification
+
+- `node --check backend/routes/advisor.js` passes (no syntax changes; single `.slice(0, 8)` removed)
+
+### Commit message
+
+`fix: remove advisor slate cap — include all games in buildAdvisorContext`

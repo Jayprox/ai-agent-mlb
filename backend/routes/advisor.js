@@ -229,7 +229,7 @@ async function buildAdvisorContext(date) {
 
   const fmt = (v, suf = "") => v == null ? "n/a" : `${v}${suf}`;
 
-  const gameBlocks = games.slice(0, 8).map(g => {
+  const gameBlocks = games.map(g => {
     const awayP = g.probablePitchers?.away;
     const homeP = g.probablePitchers?.home;
     const awayD = awayP?.id ? pitcherDetailMap.get(awayP.id) : null;
