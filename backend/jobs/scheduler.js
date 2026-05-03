@@ -5,6 +5,7 @@ const {
   snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, runScoutEvaluation, todayHonolulu,
 } = require("./snapshotJobs");
 const { gradePendingPicks } = require("./gradePicksJob");
+const { resolveLabCalibration } = require("./resolveLabCalibrationJob");
 const { warmCache } = require("./warmCache");
 const { regenerateDailyCard } = require("../routes/dailyCard");
 
@@ -112,6 +113,9 @@ function startScheduler() {
 
   // Grade pending picks nightly at 4 AM Honolulu (after all west coast games finish)
   cron.schedule("0 4 * * *", () => gradePendingPicks(), { timezone: "Pacific/Honolulu" });
+
+  // Resolve Lab calibration entries nightly at 4:30 AM Honolulu
+  cron.schedule("30 4 * * *", () => resolveLabCalibration(), { timezone: "Pacific/Honolulu" });
 
   // Pre-warm in-memory cache every 2 hours from 9 AM – 11 PM ET
   // Keeps data hot so the first user to open each game hits cache, not cold fetches

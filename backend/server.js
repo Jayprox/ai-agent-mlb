@@ -110,6 +110,18 @@ app.get("/api/admin/jobs/grade-picks", async (req, res) => {
   }
 });
 
+app.get("/api/admin/jobs/resolve-lab-calibration", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    const result = await require("./jobs/resolveLabCalibrationJob").resolveLabCalibration();
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ error: "resolve-lab-calibration failed", detail: err.message });
+  }
+});
+
 // ── Static frontend (production only) ────────────────────────
 if (process.env.NODE_ENV === "production") {
   const distPath = path.join(__dirname, "..", "dist");

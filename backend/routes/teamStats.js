@@ -24,14 +24,18 @@ router.get("/:teamId", async (req, res) => {
     const split = data?.stats?.[0]?.splits?.[0]?.stat ?? {};
     const strikeOuts = parseFloat(split.strikeOuts ?? split.strikeouts ?? 0) || 0;
     const plateAppearances = parseFloat(split.plateAppearances ?? split.pa ?? 0) || 0;
+    const runs = parseFloat(split.runs ?? 0) || 0;
+    const gamesPlayed = parseFloat(split.gamesPlayed ?? 1) || 1;
     const kPct = plateAppearances > 0
       ? Math.round((strikeOuts / plateAppearances) * 1000) / 10
       : null;
+    const runsPerGame = Math.round((runs / gamesPlayed) * 100) / 100;
 
     const result = {
       teamId: Number(teamId),
       season,
       kPct,
+      runsPerGame,
     };
 
     cache.set(cacheKey, result, CACHE_TTL_MS);

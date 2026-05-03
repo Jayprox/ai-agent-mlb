@@ -190,7 +190,8 @@ async function fetchBoxForGrading(gamePk) {
     const bs = bsRes.data;
     const ls = lsRes.data;
     const inningsPlayed = (ls.innings ?? []).length;
-    const isFinal = inningsPlayed > 0 && !ls.currentInning;
+    const isFinal = (inningsPlayed > 0 && !ls.currentInning)
+      || ls.abstractGameState === "Final";
     if (!isFinal) return null;
 
     const parseBatters = (players) => Object.values(players ?? {})

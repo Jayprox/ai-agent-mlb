@@ -30,9 +30,32 @@ const COEFF_FG = {
   BULLPEN_ERA_DIFF: 0.13,
 };
 
+const COEFF_K = {
+  INTERCEPT: 5.5,
+  PITCHER_K9: 0.50,
+  OPP_K_PCT: 10.0,
+  UMP_K_TENDENCY: 1.5,
+  FORM_DELTA: 0.25,
+};
+
+const COEFF_TOT = {
+  INTERCEPT: 9.0,
+  HOME_RPG: 0.90,
+  AWAY_RPG: 0.90,
+  HOME_SP_ERA: 0.35,
+  AWAY_SP_ERA: 0.35,
+  BULLPEN_ERA: 0.20,
+};
+
 const todayHonolulu = () => new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
 const sigmoid = (x) => 1 / (1 + Math.exp(-x));
 const clip = (n, min, max) => Math.max(min, Math.min(max, n));
+const parseIP = (ip) => {
+  const parts = String(ip ?? "0").split(".");
+  const whole = parseInt(parts[0], 10) || 0;
+  const frac = parseInt(parts[1] ?? "0", 10) || 0;
+  return whole + frac / 3;
+};
 
 const predictHomeProb = (features, coeff = COEFF) => {
   const z = coeff.INTERCEPT
@@ -51,6 +74,23 @@ const mlToImplied = (ml) => {
   if (Number.isNaN(n)) return null;
   return n < 0 ? (-n) / (-n + 100) : 100 / (n + 100);
 };
+
+const predictKs = (features) => (
+  COEFF_K.INTERCEPT
+  + COEFF_K.PITCHER_K9 * (features.pitcherK9 - 9.0)
+  + COEFF_K.OPP_K_PCT * (features.oppKPctDecimal - 0.22)
+  + COEFF_K.UMP_K_TENDENCY * features.umpKTendency
+  + COEFF_K.FORM_DELTA * features.formDelta
+);
+
+const predictTotal = (features) => (
+  COEFF_TOT.INTERCEPT
+  + COEFF_TOT.HOME_RPG * (features.homeRPG - 4.5)
+  + COEFF_TOT.AWAY_RPG * (features.awayRPG - 4.5)
+  + COEFF_TOT.HOME_SP_ERA * (features.homeSpEra - 4.0)
+  + COEFF_TOT.AWAY_SP_ERA * (features.awaySpEra - 4.0)
+  + COEFF_TOT.BULLPEN_ERA * (features.combinedBullpenEra - 4.0)
+);
 
 function requireLabAccess(req, res, next) {
   const identities = [req.user?.email, req.user?.username, req.email, req.username]
@@ -314,18 +354,255 @@ router.get("/fullgame", async (_req, res) => {
   }
 });
 
+router.get("/kprop", async (_req, res) => {
+  const cacheKey = "model:kprop";
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    res.setHeader("X-Cache", "HIT");
+    return res.json(cached);
+  }
+
+  try {
+    const { date, slate } = await fetchSlateAndOdds();
+
+    const perGame = await Promise.allSettled(
+      slate
+        .filter(g => g?.probablePitchers?.away?.id && g?.probablePitchers?.home?.id)
+        .map(async (game) => {
+          const awayPitcher = game.probablePitchers.away;
+          const homePitcher = game.probablePitchers.home;
+          const awayTeamId = game.away?.id;
+          const homeTeamId = game.home?.id;
+
+          const settled = await Promise.allSettled([
+            api.get(`/api/players/${awayPitcher.id}/stats`, { params: { group: "pitching" } }),
+            api.get(`/api/players/${awayPitcher.id}/gamelog`, { params: { group: "pitching" } }),
+            api.get(`/api/players/${homePitcher.id}/stats`, { params: { group: "pitching" } }),
+            api.get(`/api/players/${homePitcher.id}/gamelog`, { params: { group: "pitching" } }),
+            api.get(`/api/umpires/${game.gamePk}`),
+            api.get(`/api/team-stats/${awayTeamId}`),
+            api.get(`/api/team-stats/${homeTeamId}`),
+            api.get(`/api/player-props/${game.gamePk}`),
+          ]);
+
+          const awayStats = settled[0].status === "fulfilled" ? settled[0].value.data : null;
+          const awayGamelog = settled[1].status === "fulfilled" ? settled[1].value.data : null;
+          const homeStats = settled[2].status === "fulfilled" ? settled[2].value.data : null;
+          const homeGamelog = settled[3].status === "fulfilled" ? settled[3].value.data : null;
+          const umpire = settled[4].status === "fulfilled" ? settled[4].value.data?.homePlate ?? null : null;
+          const awayTeam = settled[5].status === "fulfilled" ? settled[5].value.data : null;
+          const homeTeam = settled[6].status === "fulfilled" ? settled[6].value.data : null;
+          const propsData = settled[7].status === "fulfilled" ? settled[7].value.data : null;
+          const propsList = Array.isArray(propsData?.props) ? propsData.props : [];
+
+          const getK9 = (stats) => {
+            const k9 = parseFloat(stats?.kPer9);
+            return Number.isFinite(k9) ? k9 : null;
+          };
+
+          const getRecentK9 = (gamelog) => {
+            const games = Array.isArray(gamelog?.games) ? gamelog.games.slice(0, 3) : [];
+            const totalK = games.reduce((s, g) => s + (g?.k ?? 0), 0);
+            const totalIP = games.reduce((s, g) => s + parseIP(g?.ip ?? "0"), 0);
+            return totalIP > 0 ? (totalK / totalIP) * 9 : null;
+          };
+
+          const awayK9 = getK9(awayStats);
+          const homeK9 = getK9(homeStats);
+          const awayRecK9 = getRecentK9(awayGamelog) ?? awayK9;
+          const homeRecK9 = getRecentK9(homeGamelog) ?? homeK9;
+          const umpireRawDelta = umpire?.stats?.k_rate_delta ?? umpire?.stats?.kRateDelta ?? umpire?.stats?.kFavor ?? 0;
+          const umpKTendency = clip(parseFloat(umpireRawDelta) || 0, -0.5, 0.5);
+
+          const normalize = (s) => (s ?? "").toLowerCase().trim();
+          const nameMatch = (propPlayer, pitcherName) => {
+            const lastName = normalize(pitcherName).split(" ").pop();
+            return normalize(propPlayer).includes(lastName);
+          };
+          const findLine = (pitcherName) => {
+            const entry = propsList.find(
+              p => p.market === "pitcher_strikeouts" && nameMatch(p.player, pitcherName)
+            );
+            if (!entry) return null;
+            const line = parseFloat(entry.line);
+            return Number.isFinite(line) ? line : null;
+          };
+
+          const awayBookLine = findLine(awayPitcher.name);
+          const homeBookLine = findLine(homePitcher.name);
+
+          const buildKProp = ({ pitcherK9, recentK9, bookLine, oppTeamStats }) => {
+            if (pitcherK9 == null) return null;
+            const oppKPctDecimal = oppTeamStats?.kPct != null ? oppTeamStats.kPct / 100 : 0.22;
+            const formDelta = recentK9 != null ? recentK9 - pitcherK9 : 0;
+            const features = { pitcherK9, oppKPctDecimal, umpKTendency, formDelta };
+            const predictedKs = Math.round(predictKs(features) * 10) / 10;
+            const overUnderEdge = bookLine != null ? Math.round((predictedKs - bookLine) * 10) / 10 : null;
+            const lean = overUnderEdge == null ? null : overUnderEdge >= 0 ? "OVER" : "UNDER";
+            const leanProb = overUnderEdge != null ? sigmoid(overUnderEdge * 0.45) : null;
+            const hasEdge = overUnderEdge != null && Math.abs(overUnderEdge) >= 0.5;
+            const dataWarning = pitcherK9 == null || recentK9 == null || bookLine == null || oppTeamStats == null;
+            return { predictedKs, bookLine, overUnderEdge, lean, leanProb, hasEdge, features, dataWarning };
+          };
+
+          return {
+            gamePk: game.gamePk,
+            gameTime: game.gameTime,
+            away: buildNeutralTeam(game.away, game.away),
+            home: buildNeutralTeam(game.home, game.home),
+            awayPitcher: { id: awayPitcher.id, name: awayPitcher.name, k9: awayK9, recentK9: awayRecK9 },
+            homePitcher: { id: homePitcher.id, name: homePitcher.name, k9: homeK9, recentK9: homeRecK9 },
+            umpire: umpire ? { name: umpire.name, kTendency: umpKTendency } : null,
+            awayKProp: buildKProp({ pitcherK9: awayK9, recentK9: awayRecK9, bookLine: awayBookLine, oppTeamStats: homeTeam }),
+            homeKProp: buildKProp({ pitcherK9: homeK9, recentK9: homeRecK9, bookLine: homeBookLine, oppTeamStats: awayTeam }),
+          };
+        })
+    );
+
+    const games = perGame
+      .filter(r => r.status === "fulfilled")
+      .map(r => r.value)
+      .sort((a, b) => {
+        const aMax = Math.max(Math.abs(a.awayKProp?.overUnderEdge ?? 0), Math.abs(a.homeKProp?.overUnderEdge ?? 0));
+        const bMax = Math.max(Math.abs(b.awayKProp?.overUnderEdge ?? 0), Math.abs(b.homeKProp?.overUnderEdge ?? 0));
+        return bMax - aMax;
+      });
+
+    const result = { date, games };
+    cache.set(cacheKey, result, CACHE_TTL);
+    res.setHeader("X-Cache", "MISS");
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ error: "K prop model unavailable", detail: err.message });
+  }
+});
+
+router.get("/totals", async (_req, res) => {
+  const cacheKey = "model:totals";
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    res.setHeader("X-Cache", "HIT");
+    return res.json(cached);
+  }
+
+  try {
+    const { date, slate, oddsMap } = await fetchSlateAndOdds();
+
+    const perGame = await Promise.allSettled(
+      slate
+        .filter(g => g?.probablePitchers?.away?.id && g?.probablePitchers?.home?.id)
+        .map(async (game) => {
+          const awayPitcher = game.probablePitchers.away;
+          const homePitcher = game.probablePitchers.home;
+          const oddsKey = `${game.away?.name}|${game.home?.name}`;
+          const odds = oddsMap[oddsKey] ?? {};
+          const bookTotal = parseFloat(odds.total);
+
+          const settled = await Promise.allSettled([
+            api.get(`/api/players/${awayPitcher.id}/stats`, { params: { group: "pitching" } }),
+            api.get(`/api/players/${homePitcher.id}/stats`, { params: { group: "pitching" } }),
+            api.get(`/api/team-stats/${game.away?.id}`),
+            api.get(`/api/team-stats/${game.home?.id}`),
+            api.get(`/api/bullpen/${game.gamePk}`),
+          ]);
+
+          const awayStats = settled[0].status === "fulfilled" ? settled[0].value.data : null;
+          const homeStats = settled[1].status === "fulfilled" ? settled[1].value.data : null;
+          const awayTeam = settled[2].status === "fulfilled" ? settled[2].value.data : null;
+          const homeTeam = settled[3].status === "fulfilled" ? settled[3].value.data : null;
+          const bullpen = settled[4].status === "fulfilled" ? settled[4].value.data : null;
+
+          const awayEra = parseFloat(awayStats?.era);
+          const homeEra = parseFloat(homeStats?.era);
+          const awayRPG = awayTeam?.runsPerGame ?? 4.5;
+          const homeRPG = homeTeam?.runsPerGame ?? 4.5;
+          const bpAway = parseFloat(bullpen?.away?.era);
+          const bpHome = parseFloat(bullpen?.home?.era);
+          const combinedBullpenEra = (Number.isFinite(bpAway) && Number.isFinite(bpHome))
+            ? (bpAway + bpHome) / 2
+            : 4.0;
+
+          const features = {
+            homeRPG,
+            awayRPG,
+            homeSpEra: Number.isFinite(homeEra) ? homeEra : 4.0,
+            awaySpEra: Number.isFinite(awayEra) ? awayEra : 4.0,
+            combinedBullpenEra,
+          };
+
+          const predictedTotal = Math.round(predictTotal(features) * 10) / 10;
+          const overUnderEdge = Number.isFinite(bookTotal)
+            ? Math.round((predictedTotal - bookTotal) * 10) / 10
+            : null;
+          const lean = overUnderEdge == null ? null : overUnderEdge >= 0 ? "OVER" : "UNDER";
+          const leanProb = overUnderEdge != null ? sigmoid(overUnderEdge * 0.35) : null;
+          const hasEdge = overUnderEdge != null && Math.abs(overUnderEdge) >= 0.5;
+          const dataWarning = !Number.isFinite(awayEra) || !Number.isFinite(homeEra)
+            || awayTeam?.runsPerGame == null || homeTeam?.runsPerGame == null
+            || !Number.isFinite(bookTotal)
+            || !Number.isFinite(bpAway) || !Number.isFinite(bpHome);
+
+          return {
+            gamePk: game.gamePk,
+            gameTime: game.gameTime,
+            away: buildNeutralTeam(game.away, game.away),
+            home: buildNeutralTeam(game.home, game.home),
+            awayPitcher: { id: awayPitcher.id, name: awayPitcher.name, era: Number.isFinite(awayEra) ? awayEra : null },
+            homePitcher: { id: homePitcher.id, name: homePitcher.name, era: Number.isFinite(homeEra) ? homeEra : null },
+            teamStats: {
+              awayRPG: awayTeam?.runsPerGame ?? null,
+              homeRPG: homeTeam?.runsPerGame ?? null,
+            },
+            bullpen: {
+              awayEra: Number.isFinite(bpAway) ? bpAway : null,
+              homeEra: Number.isFinite(bpHome) ? bpHome : null,
+            },
+            model: {
+              predictedTotal,
+              bookTotal: Number.isFinite(bookTotal) ? bookTotal : null,
+              overUnderEdge,
+              lean,
+              leanProb,
+              hasEdge,
+              features,
+            },
+            dataWarning,
+          };
+        })
+    );
+
+    const games = perGame
+      .filter(r => r.status === "fulfilled")
+      .map(r => r.value)
+      .sort((a, b) => Math.abs(b.model?.overUnderEdge ?? 0) - Math.abs(a.model?.overUnderEdge ?? 0));
+
+    const result = { date, games };
+    cache.set(cacheKey, result, CACHE_TTL);
+    res.setHeader("X-Cache", "MISS");
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ error: "Totals model unavailable", detail: err.message });
+  }
+});
+
 router.post("/calibration/record", async (req, res) => {
   try {
     const body = req.body ?? {};
-    const model = body.model === "fullgame" ? "fullgame" : "f5ml";
+    const model = ["f5ml", "fullgame", "kprop", "totals"].includes(body.model) ? body.model : "f5ml";
     const date = String(body.date ?? "").trim();
     const gamePk = Number(body.gamePk);
-    const leanSide = body.leanSide === "home" ? "home" : body.leanSide === "away" ? "away" : null;
+    const leanSide = typeof body.leanSide === "string" && body.leanSide.trim() ? body.leanSide.trim() : null;
+    const subjectKey = typeof body.subjectKey === "string" && body.subjectKey.trim() ? body.subjectKey.trim() : null;
+    const bookLine = typeof body.bookLine === "number" ? body.bookLine : null;
+    const bookTotal = typeof body.bookTotal === "number" ? body.bookTotal : null;
+    const pitcherLastName = typeof body.pitcherLastName === "string" && body.pitcherLastName.trim()
+      ? body.pitcherLastName.trim()
+      : null;
     if (!date || !Number.isFinite(gamePk) || !leanSide) {
       return res.status(400).json({ error: "gamePk, date, and leanSide required" });
     }
     await appendEntry({
-      id: `${model}:${date}:${gamePk}`,
+      id: `${model}:${date}:${gamePk}${subjectKey ? `:${subjectKey}` : ""}`,
       gamePk,
       date,
       leanSide,
@@ -333,6 +610,10 @@ router.post("/calibration/record", async (req, res) => {
       leanEdge: typeof body.leanEdge === "number" ? body.leanEdge : null,
       hasEdge: body.hasEdge === true,
       model,
+      subjectKey,
+      bookLine,
+      bookTotal,
+      pitcherLastName,
       result: null,
       resolvedAt: null,
     });
@@ -345,15 +626,16 @@ router.post("/calibration/record", async (req, res) => {
 router.post("/calibration/resolve", async (req, res) => {
   try {
     const body = req.body ?? {};
-    const model = body.model === "fullgame" ? "fullgame" : "f5ml";
+    const model = ["f5ml", "fullgame", "kprop", "totals"].includes(body.model) ? body.model : "f5ml";
     const gamePk = Number(body.gamePk);
     const result = ["HIT", "MISS", "PUSH"].includes(body.result) ? body.result : null;
+    const subjectKey = typeof body.subjectKey === "string" && body.subjectKey.trim() ? body.subjectKey.trim() : null;
     if (!Number.isFinite(gamePk) || !result) {
       return res.status(400).json({ error: "gamePk and valid result required" });
     }
     const entries = await readLog();
     const unresolved = entries
-      .filter(e => e.model === model && Number(e.gamePk) === gamePk)
+      .filter(e => e.model === model && Number(e.gamePk) === gamePk && (subjectKey ? e.subjectKey === subjectKey : true))
       .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0];
     if (!unresolved) return res.json({ ok: true, skipped: true });
     await resolveEntry(unresolved.id, result);
@@ -371,6 +653,8 @@ router.get("/calibration", async (_req, res) => {
       summary: {
         f5ml: buildCalibrationSummary(entries, "f5ml"),
         fullgame: buildCalibrationSummary(entries, "fullgame"),
+        kprop: buildCalibrationSummary(entries, "kprop"),
+        totals: buildCalibrationSummary(entries, "totals"),
         combined: buildCalibrationSummary(entries, "combined"),
       },
     });

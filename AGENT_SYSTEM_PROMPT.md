@@ -9488,9 +9488,9 @@ All games on the slate are now included in the Advisor's context. On a 15-game d
 
 ## BACKLOG TASK 60 — Auto-Grade `isFinal` Detection Bug (K Props Stay Pending)
 
-**Status:** Open — root cause identified
+**Status:** ✅ COMPLETED — fix applied to both `backend/routes/boxscore.js` (Task 60) and `backend/jobs/gradePicksJob.js` (Session 66)
 **LOE:** XS
-**Type:** Backend only — `backend/routes/boxscore.js`
+**Type:** Backend only
 **Priority:** Medium
 
 ### Bug
@@ -11558,3 +11558,1070 @@ Extended the private `🔬 Lab` predictive area with a second model lane for ful
 
 - `node --check backend/routes/modelF5.js` ✓
 - `npm run build` ✓
+
+---
+
+## CODEX TASK 71 — Lab: Full-Game ML Pick Logging (XS) ✅ COMPLETED
+
+**Status:** ✅ COMPLETED (approved 2026-05-03)
+**Files:** `prop-scout-v7.jsx` only
+**LOE:** XS
+**Depends on:** Tasks 66, 67 (both ✅)
+
+### Background
+
+Task 66 wired a Log button and `computeLabF5MlGrade` for F5 ML Lab cards. Task 67 added the Full-Game ML sub-tab with its own card render loop. The full-game cards were intentionally excluded from logging in Task 67's scope. This task closes that gap.
+
+### Changes required — `prop-scout-v7.jsx`
+
+**1. Add `computeLabFgMlGrade` helper** (near `computeLabF5MlGrade`, around line ~4654):
+
+```js
+function computeLabFgMlGrade(pick, box) {
+  if (!box?.isFinal) return null;
+  const awayRuns = box?.linescore?.away?.runs;
+  const homeRuns = box?.linescore?.home?.runs;
+  if (!Number.isFinite(awayRuns) || !Number.isFinite(homeRuns)) return null;
+  if (awayRuns === homeRuns) return null; // tie — no grade
+  const winner = awayRuns > homeRuns ? "away" : "home";
+  return winner === pick.leanSide ? "hit" : "miss";
+}
+```
+
+**2. Route it through `computeGrade` dispatch** (same block as `LAB_F5ML`):
+
+```js
+if (pick.propType === "LAB_FGML") return computeLabFgMlGrade(pick, box);
+```
+
+**3. Add Log button to full-game ML card render loop** (inside `labSubTab === "fullgame"` section):
+
+Identical to the F5 Log button except `propType: "LAB_FGML"`:
+```js
+logPick({
+  gamePk: g.gamePk,
+  leanSide: g.model.leanSide,
+  leanProb: g.model.leanSide === "away" ? g.model.awayProb : g.model.homeProb,
+  leanEdge: g.model.leanEdge,
+  hasEdge: g.model.hasEdge,
+  label: `${g.away.abbr}@${g.home.abbr} FG ${g.model.leanSide.toUpperCase()}`,
+  propType: "LAB_FGML",
+  date: labFgData.date,
+});
+```
+
+Dedup key: `${g.gamePk}:LAB_FGML:${labFgData.date}` — same dedup pattern as F5.
+
+**4. Extend Lab Picks section in Picks tab** to show `LAB_FGML` picks alongside `LAB_F5ML`:
+
+Find the filter:
+```js
+p.propType === "LAB_F5ML"
+```
+Replace with:
+```js
+["LAB_F5ML", "LAB_FGML"].includes(p.propType)
+```
+
+This applies everywhere `propType === "LAB_F5ML"` is used to filter Lab picks in the Picks tab section (the `hasAnyLabPicks` check, the `labPicksFiltered` array, the render loop).
+
+No backend changes. No calibration changes (full-game calibration is already auto-recorded via the Task 68 backend flow).
+
+### Scope
+
+- No changes to Board, Props, Model Picks, Scout, HR Scout, Advisor
+- No changes to pick log schema
+- No new state variables
+- No new API calls
+
+### Verification
+
+- Log button appears on full-game cards
+- Logging to picks JSON works (dedup by game + date)
+- Full-game picks appear in Picks tab Lab Picks section
+- `computeLabFgMlGrade` returns `null` for in-progress games, `"hit"` / `"miss"` for final games
+- `npm run build` passes
+
+---
+
+## CODEX TASK 69 — Lab: K Prop Predictive Model (M-L) ✅ COMPLETED
+
+**Status:** ✅ COMPLETED (approved 2026-05-03)
+**Files:** `backend/routes/modelF5.js`, `backend/routes/teamStats.js`, `prop-scout-v7.jsx`
+**LOE:** M-L
+**Depends on:** Tasks 64–68 (all ✅), Task 71 ✅
+
+### Background
+
+The Lab currently has two sub-tabs: F5 ML and Full-Game ML, both predicting the moneyline winner. This task adds a third sub-tab — **K Prop** — which predicts each probable pitcher's strikeout total and compares it to the book line to surface OVER/UNDER edges.
+
+### Backend changes
+
+#### 1. `backend/routes/teamStats.js` — add `runsPerGame`
+
+The existing route fetches `stats: "season", group: "hitting"`. The `split` object already contains `runs` and `gamesPlayed`. Add both to the result:
+
+```js
+const runs = parseFloat(split.runs ?? 0) || 0;
+const gamesPlayed = parseFloat(split.gamesPlayed ?? 1) || 1;
+const runsPerGame = Math.round((runs / gamesPlayed) * 100) / 100;
+
+const result = {
+  teamId: Number(teamId),
+  season,
+  kPct,
+  runsPerGame,  // NEW
+};
+```
+
+Cache key and TTL unchanged.
+
+#### 2. `backend/routes/modelF5.js` — add `GET /api/model/kprop`
+
+**New constants:**
+
+```js
+const COEFF_K = {
+  INTERCEPT: 5.5,        // baseline Ks per start
+  PITCHER_K9: 0.50,      // weight on pitcher K/9 deviation from 9.0
+  OPP_K_PCT: 10.0,       // weight on opp team K% (decimal) deviation from 0.22
+  UMP_K_TENDENCY: 1.5,   // weight on ump K rate delta (range -0.5 to +0.5)
+  FORM_DELTA: 0.25,      // weight on (recentK9 - seasonK9)
+};
+```
+
+**IP parsing helper** (add near top of file):
+
+```js
+const parseIP = (ip) => {
+  const parts = String(ip ?? "0").split(".");
+  const whole = parseInt(parts[0], 10) || 0;
+  const frac  = parseInt(parts[1] ?? "0", 10) || 0;
+  return whole + frac / 3;
+};
+```
+
+**K prediction function:**
+
+```js
+function predictKs(features) {
+  return COEFF_K.INTERCEPT
+    + COEFF_K.PITCHER_K9      * (features.pitcherK9 - 9.0)
+    + COEFF_K.OPP_K_PCT       * (features.oppKPctDecimal - 0.22)
+    + COEFF_K.UMP_K_TENDENCY  * features.umpKTendency
+    + COEFF_K.FORM_DELTA      * features.formDelta;
+}
+```
+
+**`GET /api/model/kprop` route:**
+
+```js
+router.get("/kprop", async (_req, res) => {
+  const cacheKey = "model:kprop";
+  const cached = cache.get(cacheKey);
+  if (cached) { res.setHeader("X-Cache", "HIT"); return res.json(cached); }
+
+  try {
+    const { date, slate, oddsMap } = await fetchSlateAndOdds();
+
+    const perGame = await Promise.allSettled(
+      slate
+        .filter(g => g?.probablePitchers?.away?.id && g?.probablePitchers?.home?.id)
+        .map(async (game) => {
+          const awayPitcher = game.probablePitchers.away;
+          const homePitcher = game.probablePitchers.home;
+          const awayTeamId  = game.away?.id;
+          const homeTeamId  = game.home?.id;
+
+          const settled = await Promise.allSettled([
+            api.get(`/api/players/${awayPitcher.id}/stats`, { params: { group: "pitching" } }),
+            api.get(`/api/players/${awayPitcher.id}/gamelog`, { params: { group: "pitching" } }),
+            api.get(`/api/players/${homePitcher.id}/stats`, { params: { group: "pitching" } }),
+            api.get(`/api/players/${homePitcher.id}/gamelog`, { params: { group: "pitching" } }),
+            api.get(`/api/umpires/${game.gamePk}`),
+            api.get(`/api/team-stats/${awayTeamId}`),
+            api.get(`/api/team-stats/${homeTeamId}`),
+            api.get(`/api/player-props/${game.gamePk}`),
+          ]);
+
+          const awayStats   = settled[0].status === "fulfilled" ? settled[0].value.data : null;
+          const awayGamelog = settled[1].status === "fulfilled" ? settled[1].value.data : null;
+          const homeStats   = settled[2].status === "fulfilled" ? settled[2].value.data : null;
+          const homeGamelog = settled[3].status === "fulfilled" ? settled[3].value.data : null;
+          const umpire      = settled[4].status === "fulfilled" ? settled[4].value.data?.homePlate ?? null : null;
+          const awayTeam    = settled[5].status === "fulfilled" ? settled[5].value.data : null;
+          const homeTeam    = settled[6].status === "fulfilled" ? settled[6].value.data : null;
+          const propsData   = settled[7].status === "fulfilled" ? settled[7].value.data : null;
+          const propsList   = Array.isArray(propsData?.props) ? propsData.props : [];
+
+          // ── K/9 helpers ──────────────────────────────────────────────
+          const getK9 = (stats) => {
+            const k9 = parseFloat(stats?.kPer9);
+            return Number.isFinite(k9) ? k9 : null;
+          };
+
+          const getRecentK9 = (gamelog) => {
+            const games = (gamelog?.games ?? []).slice(0, 3);
+            const totalK  = games.reduce((s, g) => s + (g.k ?? 0), 0);
+            const totalIP = games.reduce((s, g) => s + parseIP(g.ip ?? "0"), 0);
+            return totalIP > 0 ? (totalK / totalIP) * 9 : null;
+          };
+
+          const awayK9     = getK9(awayStats);
+          const homeK9     = getK9(homeStats);
+          const awayRecK9  = getRecentK9(awayGamelog) ?? awayK9;
+          const homeRecK9  = getRecentK9(homeGamelog) ?? homeK9;
+
+          // ── Ump tendency ─────────────────────────────────────────────
+          const umpireRawDelta = umpire?.stats?.k_rate_delta ?? umpire?.stats?.kRateDelta ?? umpire?.stats?.kFavor ?? 0;
+          const umpKTendency   = clip(parseFloat(umpireRawDelta) || 0, -0.5, 0.5);
+
+          // ── Book line lookup ─────────────────────────────────────────
+          const normalize = (s) => (s ?? "").toLowerCase().trim();
+          const nameMatch = (propPlayer, pitcherName) => {
+            const lastName = normalize(pitcherName).split(" ").pop();
+            return normalize(propPlayer).includes(lastName);
+          };
+          const findLine = (pitcherName) => {
+            const entry = propsList.find(
+              p => p.market === "pitcher_strikeouts" && nameMatch(p.player, pitcherName)
+            );
+            return entry ? parseFloat(entry.line) : null;
+          };
+
+          const awayBookLine = findLine(awayPitcher.name);
+          const homeBookLine = findLine(homePitcher.name);
+
+          // ── Build one K prop result per pitcher ──────────────────────
+          const buildKProp = ({ pitcherK9, recentK9, bookLine, oppTeamStats }) => {
+            if (pitcherK9 == null) return null;
+            const oppKPctDecimal = oppTeamStats?.kPct != null ? oppTeamStats.kPct / 100 : 0.22;
+            const formDelta = recentK9 != null ? recentK9 - pitcherK9 : 0;
+            const features = { pitcherK9, oppKPctDecimal, umpKTendency, formDelta };
+            const predictedKs = Math.round(predictKs(features) * 10) / 10;
+            const overUnderEdge = bookLine != null ? Math.round((predictedKs - bookLine) * 10) / 10 : null;
+            const lean = overUnderEdge == null ? null : overUnderEdge >= 0 ? "OVER" : "UNDER";
+            const leanProb = overUnderEdge != null ? sigmoid(overUnderEdge * 0.45) : null;
+            const hasEdge = overUnderEdge != null && Math.abs(overUnderEdge) >= 0.5;
+            const dataWarning = pitcherK9 == null || recentK9 == null || bookLine == null || oppTeamStats == null;
+            return { predictedKs, bookLine, overUnderEdge, lean, leanProb, hasEdge, features, dataWarning };
+          };
+
+          return {
+            gamePk: game.gamePk,
+            gameTime: game.gameTime,
+            away: buildNeutralTeam(game.away, game.away),
+            home: buildNeutralTeam(game.home, game.home),
+            awayPitcher: { id: awayPitcher.id, name: awayPitcher.name, k9: awayK9, recentK9: awayRecK9 },
+            homePitcher: { id: homePitcher.id, name: homePitcher.name, k9: homeK9, recentK9: homeRecK9 },
+            umpire: umpire ? { name: umpire.name, kTendency: umpKTendency } : null,
+            awayKProp: buildKProp({ pitcherK9: awayK9, recentK9: awayRecK9, bookLine: awayBookLine, oppTeamStats: homeTeam }),
+            homeKProp: buildKProp({ pitcherK9: homeK9, recentK9: homeRecK9, bookLine: homeBookLine, oppTeamStats: awayTeam }),
+          };
+        })
+    );
+
+    const games = perGame
+      .filter(r => r.status === "fulfilled")
+      .map(r => r.value)
+      .sort((a, b) => {
+        const aMax = Math.max(Math.abs(a.awayKProp?.overUnderEdge ?? 0), Math.abs(a.homeKProp?.overUnderEdge ?? 0));
+        const bMax = Math.max(Math.abs(b.awayKProp?.overUnderEdge ?? 0), Math.abs(b.homeKProp?.overUnderEdge ?? 0));
+        return bMax - aMax;
+      });
+
+    const result = { date, games };
+    cache.set(cacheKey, result, CACHE_TTL);
+    res.setHeader("X-Cache", "MISS");
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ error: "K prop model unavailable", detail: err.message });
+  }
+});
+```
+
+### Frontend changes — `prop-scout-v7.jsx`
+
+**New state:**
+```js
+const [labKData, setLabKData] = useState(null);
+const [labKLoading, setLabKLoading] = useState(false);
+```
+
+**New fetch function** (near `fetchLabFgData`):
+```js
+async function fetchLabKData(force = false) {
+  if (!force && labKData !== null) return;
+  setLabKLoading(true);
+  try {
+    const data = await apiGet("/api/model/kprop");
+    setLabKData(data);
+  } catch (err) {
+    console.error("Lab K data error:", err);
+  } finally {
+    setLabKLoading(false);
+  }
+}
+```
+
+**Auto-load effect** (alongside the existing f5ml/fullgame load effects):
+```js
+useEffect(() => {
+  if (view !== "lab" || labSubTab !== "kprop" || !currentUser || !isScoutUser || labKData !== null || labKLoading) return;
+  fetchLabKData();
+}, [view, labSubTab, currentUser, isScoutUser, labKData, labKLoading]);
+```
+
+**Sub-tab toggle** — extend from 2 to 3 buttons:
+```js
+const LAB_SUBTABS = [
+  { key: "f5ml",     label: "F5 ML" },
+  { key: "fullgame", label: "Full-Game ML" },
+  { key: "kprop",    label: "K Prop" },
+];
+```
+
+**K Prop card layout** (inside `labSubTab === "kprop"` section):
+
+Each game in `labKData.games` produces **two cards** — one for the away pitcher's K prop, one for the home pitcher's K prop. Skip the card if `kPropData == null`.
+
+Card structure mirrors F5/FG cards:
+- Header: `[AWAY] {pitcherName} K Prop` / `[HOME] {pitcherName} K Prop` — with EDGE badge if `kProp.hasEdge`, HIT/MISS badge once graded
+- Lean chip: `OVER {kProp.bookLine}` or `UNDER {kProp.bookLine}` in green/red
+- Model probability: `${Math.round(kProp.leanProb * 100)}%`
+- Features row chips: `K/9: {pitcherK9}`, `Opp K%: {(oppKPctDecimal*100).toFixed(1)}%`, `Ump Δ: {umpKTendency > 0 ? "+" : ""}{umpKTendency.toFixed(2)}`, `Form Δ: {formDelta > 0 ? "+" : ""}{formDelta.toFixed(1)}`
+- Predicted line: `Model: {predictedKs} K vs Line: {bookLine}`
+- Log button: `propType: "LAB_KPROP"`, `leanSide: lean` ("OVER" or "UNDER"), `label: "{pitcherName} K {lean} {bookLine}"`
+- Store `pitcherLastName` (last word of pitcher name) and `bookLine` in the logged pick payload for grading
+
+**Auto-grade** for K Prop picks (`propType === "LAB_KPROP"`): when `liveBoxscores[gamePk]?.isFinal`, look up actual Ks from pitching boxscore:
+```js
+function computeLabKPropGrade(pick, box) {
+  if (!box?.isFinal) return null;
+  const pitcherSide = pick.pitcherSide; // "away" or "home"
+  const lastName = (pick.pitcherLastName ?? "").toLowerCase();
+  const pitcherBox = Object.values(box?.pitching?.[pitcherSide] ?? {})
+    .find(p => (p.name ?? "").toLowerCase().includes(lastName));
+  const actualKs = pitcherBox?.so ?? pitcherBox?.k ?? null;
+  if (actualKs == null || pick.bookLine == null) return null;
+  if (actualKs === pick.bookLine) return null; // push
+  return (pick.leanSide === "OVER" ? actualKs > pick.bookLine : actualKs < pick.bookLine) ? "hit" : "miss";
+}
+```
+
+Route through `computeGrade` dispatch:
+```js
+if (pick.propType === "LAB_KPROP") return computeLabKPropGrade(pick, box);
+```
+
+**Calibration** — auto-record on K data load (fire-and-forget, `model: "kprop"`). Auto-resolve when grade becomes non-null. Update calibration routes to accept `"kprop"` as a valid model value. Track Record section adds a K Prop row.
+
+**Lab Picks section in Picks tab** — extend filter:
+```js
+["LAB_F5ML", "LAB_FGML", "LAB_KPROP"].includes(p.propType)
+```
+
+### Scope
+
+- No changes to Board, Props, Scout, HR Scout, Advisor, Model Picks tabs
+- `teamStats.js` gets a non-breaking additive change (`runsPerGame` added)
+- Cache TTL for kprop: same 10-minute CACHE_TTL
+- `dataWarning` shown on card if pitcher K/9, book line, or oppTeamStats are missing
+
+### Verification
+
+- `node --check backend/routes/modelF5.js` ✓
+- `node --check backend/routes/teamStats.js` ✓
+- `npm run build` ✓
+- K Prop sub-tab appears in Lab, loads on tab switch
+- Two pitcher cards rendered per game
+- OVER/UNDER lean and edge badge visible
+- Log button logs pick with `propType: "LAB_KPROP"`
+- `dataWarning` shown when book line or pitcher K/9 unavailable
+
+---
+
+## CODEX TASK 70 — Lab: Game Totals Model (M) ✅ COMPLETED
+
+**Status:** ✅ COMPLETED (approved 2026-05-03)
+**Files:** `backend/routes/modelF5.js`, `prop-scout-v7.jsx`
+**LOE:** M
+**Depends on:** Tasks 64–68 ✅, Task 69 ✅ (`teamStats.js` `runsPerGame` added in Task 69)
+
+### Background
+
+This task adds a fourth Lab sub-tab — **Totals** — predicting the combined runs total for each game and surfacing OVER/UNDER edges versus the book total line. The book total (`oddsMap[key].total`) is already in the odds payload as a string like `"8.5"`. Team `runsPerGame` is added to `teamStats.js` in Task 69.
+
+### Backend changes — `backend/routes/modelF5.js`
+
+**New constants:**
+
+```js
+const COEFF_TOT = {
+  INTERCEPT: 9.0,        // baseline MLB runs total
+  HOME_RPG: 0.90,        // weight on home team RPG deviation from 4.5
+  AWAY_RPG: 0.90,        // weight on away team RPG deviation from 4.5
+  HOME_SP_ERA: 0.35,     // weight on home SP ERA deviation from 4.0
+  AWAY_SP_ERA: 0.35,     // weight on away SP ERA deviation from 4.0
+  BULLPEN_ERA: 0.20,     // weight on combined bullpen ERA deviation from 4.0
+};
+```
+
+**Total prediction function:**
+
+```js
+function predictTotal(features) {
+  return COEFF_TOT.INTERCEPT
+    + COEFF_TOT.HOME_RPG    * (features.homeRPG - 4.5)
+    + COEFF_TOT.AWAY_RPG    * (features.awayRPG - 4.5)
+    + COEFF_TOT.HOME_SP_ERA * (features.homeSpEra - 4.0)
+    + COEFF_TOT.AWAY_SP_ERA * (features.awaySpEra - 4.0)
+    + COEFF_TOT.BULLPEN_ERA * (features.combinedBullpenEra - 4.0);
+}
+```
+
+**`GET /api/model/totals` route:**
+
+Uses the existing `fetchSlateAndOdds()` helper. Per game, fetch:
+- Away + home pitcher stats (ERA) — reuse `/api/players/:id/stats` pattern
+- Away + home team stats — `/api/team-stats/:teamId` for `runsPerGame`
+- Bullpen ERAs — `/api/bullpen/:gamePk`
+- Book total from `oddsMap[key].total` (parse as float)
+
+```js
+router.get("/totals", async (_req, res) => {
+  const cacheKey = "model:totals";
+  const cached = cache.get(cacheKey);
+  if (cached) { res.setHeader("X-Cache", "HIT"); return res.json(cached); }
+
+  try {
+    const { date, slate, oddsMap } = await fetchSlateAndOdds();
+
+    const perGame = await Promise.allSettled(
+      slate
+        .filter(g => g?.probablePitchers?.away?.id && g?.probablePitchers?.home?.id)
+        .map(async (game) => {
+          const awayPitcher = game.probablePitchers.away;
+          const homePitcher = game.probablePitchers.home;
+          const oddsKey = `${game.away?.name}|${game.home?.name}`;
+          const odds = oddsMap[oddsKey] ?? {};
+          const bookTotal = parseFloat(odds.total);
+
+          const settled = await Promise.allSettled([
+            api.get(`/api/players/${awayPitcher.id}/stats`, { params: { group: "pitching" } }),
+            api.get(`/api/players/${homePitcher.id}/stats`, { params: { group: "pitching" } }),
+            api.get(`/api/team-stats/${game.away?.id}`),
+            api.get(`/api/team-stats/${game.home?.id}`),
+            api.get(`/api/bullpen/${game.gamePk}`),
+          ]);
+
+          const awayStats = settled[0].status === "fulfilled" ? settled[0].value.data : null;
+          const homeStats = settled[1].status === "fulfilled" ? settled[1].value.data : null;
+          const awayTeam  = settled[2].status === "fulfilled" ? settled[2].value.data : null;
+          const homeTeam  = settled[3].status === "fulfilled" ? settled[3].value.data : null;
+          const bullpen   = settled[4].status === "fulfilled" ? settled[4].value.data : null;
+
+          const awayEra = parseFloat(awayStats?.era);
+          const homeEra = parseFloat(homeStats?.era);
+          const awayRPG = awayTeam?.runsPerGame ?? 4.5;
+          const homeRPG = homeTeam?.runsPerGame ?? 4.5;
+          const bpAway  = parseFloat(bullpen?.away?.era);
+          const bpHome  = parseFloat(bullpen?.home?.era);
+          const combinedBullpenEra = (Number.isFinite(bpAway) && Number.isFinite(bpHome))
+            ? (bpAway + bpHome) / 2
+            : 4.0;
+
+          const features = {
+            homeRPG,
+            awayRPG,
+            homeSpEra: Number.isFinite(homeEra) ? homeEra : 4.0,
+            awaySpEra: Number.isFinite(awayEra) ? awayEra : 4.0,
+            combinedBullpenEra,
+          };
+
+          const predictedTotal = Math.round(predictTotal(features) * 10) / 10;
+          const overUnderEdge  = Number.isFinite(bookTotal)
+            ? Math.round((predictedTotal - bookTotal) * 10) / 10
+            : null;
+          const lean     = overUnderEdge == null ? null : overUnderEdge >= 0 ? "OVER" : "UNDER";
+          const leanProb = overUnderEdge != null ? sigmoid(overUnderEdge * 0.35) : null;
+          const hasEdge  = overUnderEdge != null && Math.abs(overUnderEdge) >= 0.5;
+          const dataWarning = !Number.isFinite(awayEra) || !Number.isFinite(homeEra)
+            || awayTeam?.runsPerGame == null || homeTeam?.runsPerGame == null
+            || !Number.isFinite(bookTotal)
+            || !Number.isFinite(bpAway) || !Number.isFinite(bpHome);
+
+          return {
+            gamePk: game.gamePk,
+            gameTime: game.gameTime,
+            away: buildNeutralTeam(game.away, game.away),
+            home: buildNeutralTeam(game.home, game.home),
+            awayPitcher: { id: awayPitcher.id, name: awayPitcher.name, era: Number.isFinite(awayEra) ? awayEra : null },
+            homePitcher: { id: homePitcher.id, name: homePitcher.name, era: Number.isFinite(homeEra) ? homeEra : null },
+            teamStats: {
+              awayRPG: awayTeam?.runsPerGame ?? null,
+              homeRPG: homeTeam?.runsPerGame ?? null,
+            },
+            bullpen: {
+              awayEra: Number.isFinite(bpAway) ? bpAway : null,
+              homeEra: Number.isFinite(bpHome) ? bpHome : null,
+            },
+            model: {
+              predictedTotal,
+              bookTotal: Number.isFinite(bookTotal) ? bookTotal : null,
+              overUnderEdge,
+              lean,
+              leanProb,
+              hasEdge,
+              features,
+            },
+            dataWarning,
+          };
+        })
+    );
+
+    const games = perGame
+      .filter(r => r.status === "fulfilled")
+      .map(r => r.value)
+      .sort((a, b) => Math.abs(b.model?.overUnderEdge ?? 0) - Math.abs(a.model?.overUnderEdge ?? 0));
+
+    const result = { date, games };
+    cache.set(cacheKey, result, CACHE_TTL);
+    res.setHeader("X-Cache", "MISS");
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ error: "Totals model unavailable", detail: err.message });
+  }
+});
+```
+
+### Frontend changes — `prop-scout-v7.jsx`
+
+**New state:**
+```js
+const [labTotalsData, setLabTotalsData] = useState(null);
+const [labTotalsLoading, setLabTotalsLoading] = useState(false);
+```
+
+**New fetch function** (near `fetchLabKData`):
+```js
+async function fetchLabTotalsData(force = false) {
+  if (!force && labTotalsData !== null) return;
+  setLabTotalsLoading(true);
+  try {
+    const data = await apiGet("/api/model/totals");
+    setLabTotalsData(data);
+  } catch (err) {
+    console.error("Lab totals error:", err);
+  } finally {
+    setLabTotalsLoading(false);
+  }
+}
+```
+
+**Auto-load effect:**
+```js
+useEffect(() => {
+  if (view !== "lab" || labSubTab !== "totals" || !currentUser || !isScoutUser || labTotalsData !== null || labTotalsLoading) return;
+  fetchLabTotalsData();
+}, [view, labSubTab, currentUser, isScoutUser, labTotalsData, labTotalsLoading]);
+```
+
+**Sub-tab toggle** — extend to 4 buttons (building on Task 69's 3-button toggle):
+```js
+const LAB_SUBTABS = [
+  { key: "f5ml",     label: "F5 ML" },
+  { key: "fullgame", label: "Full-Game ML" },
+  { key: "kprop",    label: "K Prop" },
+  { key: "totals",   label: "Totals" },
+];
+```
+
+**Totals card layout** (inside `labSubTab === "totals"` section):
+
+One card per game. Card structure:
+- Header: `{away.abbr} @ {home.abbr}` — EDGE badge if `model.hasEdge`, HIT/MISS badge once graded
+- Lean chip: `OVER {model.bookTotal}` or `UNDER {model.bookTotal}`
+- Model probability: `${Math.round(model.leanProb * 100)}%`
+- Features row chips: `Away RPG: {teamStats.awayRPG}`, `Home RPG: {teamStats.homeRPG}`, `Away ERA: {awayPitcher.era}`, `Home ERA: {homePitcher.era}`, `BP ERA: {combinedBullpenEraDisplay}`
+- Predicted line: `Model: {model.predictedTotal} vs Line: {model.bookTotal}`
+- Log button: `propType: "LAB_TOTALS"`, `leanSide: model.lean`, `label: "{away.abbr}@{home.abbr} Total {lean} {bookTotal}"`, also store `bookTotal` in pick payload
+
+**Auto-grade** for Totals picks (`propType === "LAB_TOTALS"`):
+```js
+function computeLabTotalsGrade(pick, box) {
+  if (!box?.isFinal) return null;
+  const awayRuns = box?.linescore?.away?.runs;
+  const homeRuns = box?.linescore?.home?.runs;
+  if (!Number.isFinite(awayRuns) || !Number.isFinite(homeRuns)) return null;
+  const actualTotal = awayRuns + homeRuns;
+  if (pick.bookTotal == null) return null;
+  if (actualTotal === pick.bookTotal) return null; // push
+  return (pick.leanSide === "OVER" ? actualTotal > pick.bookTotal : actualTotal < pick.bookTotal) ? "hit" : "miss";
+}
+```
+
+Route through `computeGrade` dispatch:
+```js
+if (pick.propType === "LAB_TOTALS") return computeLabTotalsGrade(pick, box);
+```
+
+**Calibration** — auto-record on totals data load (`model: "totals"`). Auto-resolve when grade resolves. Update calibration routes to accept `"totals"`. Track Record section adds a Totals row.
+
+**Lab Picks section filter (final):**
+```js
+["LAB_F5ML", "LAB_FGML", "LAB_KPROP", "LAB_TOTALS"].includes(p.propType)
+```
+
+### Scope
+
+- No changes to `teamStats.js` (handled in Task 69)
+- No other backend file changes
+- Cache TTL: same 10-minute CACHE_TTL
+- `dataWarning` shown when book total, RPG, or bullpen ERA unavailable
+
+### Verification
+
+- `node --check backend/routes/modelF5.js` ✓
+- `npm run build` ✓
+- Totals sub-tab appears as 4th Lab tab
+- One card per game with OVER/UNDER lean and edge badge
+- Log button with `propType: "LAB_TOTALS"` works
+- Auto-grade works for final games
+- Calibration records update correctly
+
+HANDOFF NOTE — 2026-05-02 — CODEX TASK 71 COMPLETED (Lab: Full-Game ML Pick Logging)
+
+- `prop-scout-v7.jsx`
+  - added `computeLabFgMlGrade(...)` alongside the existing F5 Lab grader
+  - wired `LAB_FGML` through the live final-game grading effect and the historical Picks catch-up effect
+  - Lab full-game cards now have the same `Log` button behavior as F5 cards
+  - shared Lab card logging now dedupes by `gamePk + propType + date`
+  - `logPick(...)` now respects an explicitly passed `prop.date` when provided, which lets Lab F5 / FG cards log against the Lab dataset date cleanly
+  - `🔬 Lab Picks` in the Picks tab now includes both `LAB_F5ML` and `LAB_FGML`
+
+- Scope
+  - no backend changes
+  - no calibration route changes
+  - no new Lab state
+
+- Verification
+- `npm run build` ✅
+
+HANDOFF NOTE — 2026-05-03 — CODEX TASK 72 COMPLETED (Lab: Nightly Calibration Resolver Job)
+
+- `backend/routes/modelF5.js`
+  - `POST /api/model/calibration/record` now accepts/stores:
+    - `bookLine`
+    - `bookTotal`
+    - `pitcherLastName`
+  - these fields are additive and primarily used for backend resolution of:
+    - `kprop`
+    - `totals`
+
+- `prop-scout-v7.jsx`
+  - K Prop calibration record payloads now include:
+    - `bookLine`
+    - `pitcherLastName`
+  - Totals calibration record payloads now include:
+    - `bookTotal`
+  - no Lab UI changes in this task
+
+- `backend/jobs/resolveLabCalibrationJob.js`
+  - new nightly sweep job
+  - loads unresolved entries from `lab-outcomes.json`
+  - groups by `gamePk`
+  - fetches final MLB boxscore + linescore once per game
+  - resolves:
+    - `f5ml`
+    - `fullgame`
+    - `kprop`
+    - `totals`
+  - skips gracefully when the game is not final or required fields are missing
+
+- `backend/jobs/scheduler.js`
+  - added nightly cron at `4:30 AM Pacific/Honolulu`:
+    - `resolveLabCalibration()`
+  - runs 30 minutes after `gradePendingPicks`
+
+- `backend/server.js`
+  - added admin trigger endpoint:
+    - `GET /api/admin/jobs/resolve-lab-calibration`
+
+- Scope
+  - no changes to Board / Props / Scout / HR Scout / Advisor / Model Picks / Lab UI
+  - existing older K/Totals calibration rows without the new fields are safely skipped rather than errored
+
+- Verification
+  - `node --check backend/jobs/resolveLabCalibrationJob.js` ✅
+  - `node --check backend/jobs/scheduler.js` ✅
+  - `node --check backend/routes/modelF5.js` ✅
+  - `npm run build` ✅
+
+HANDOFF NOTE — 2026-05-03 — CODEX TASK 70 COMPLETED (Lab: Game Totals Model)
+
+- `backend/routes/modelF5.js`
+  - added `COEFF_TOT` and `predictTotal(...)`
+  - added `GET /api/model/totals`
+    - uses team `runsPerGame`, both SP ERAs, and combined bullpen ERA
+    - compares predicted total to `odds.total`
+    - returns `lean`, `leanProb`, `overUnderEdge`, `hasEdge`, `dataWarning`
+  - calibration routes now accept `model: "totals"`
+  - calibration summary now includes `totals`
+
+- `prop-scout-v7.jsx`
+  - added Lab totals state:
+    - `labTotalsData`
+    - `labTotalsLoading`
+  - added `fetchLabTotalsData(...)` and auto-load on `labSubTab === "totals"`
+  - added `computeLabTotalsGrade(...)`
+  - routed `LAB_TOTALS` through `computeGrade(...)`
+  - Lab now has a 4th sub-tab: `Totals`
+  - Totals cards render one per game with:
+    - EDGE badge
+    - HIT/MISS badge after grading
+    - Away/Home RPG chips
+    - Away/Home SP ERA chips
+    - combined bullpen ERA chip
+    - model total vs book total
+    - Log button
+  - logged totals picks use:
+    - `propType: "LAB_TOTALS"`
+    - `leanSide`
+    - `bookTotal`
+  - Lab Picks section in Picks tab now includes `LAB_TOTALS`
+  - Track Record section now includes a `Totals` row
+
+- Calibration notes
+  - Totals uses one calibration entry per game
+  - K Prop remains one calibration entry per `gamePk + pitcherSide`
+
+- Scope
+  - no changes to `teamStats.js` in this task
+  - no route mount changes required
+
+- Verification
+  - `node --check backend/routes/modelF5.js` ✅
+  - `npm run build` ✅
+
+HANDOFF NOTE — 2026-05-03 — CODEX TASK 69 COMPLETED (Lab: K Prop Predictive Model)
+
+- `backend/routes/teamStats.js`
+  - added non-breaking `runsPerGame` to the existing team hitting stats payload
+
+- `backend/routes/modelF5.js`
+  - added `COEFF_K`, `parseIP(...)`, and `predictKs(...)`
+  - added `GET /api/model/kprop`
+    - builds two strikeout model outputs per game (away SP, home SP)
+    - uses pitcher K/9, opponent team K%, ump K tendency, and recent K/9 form delta
+    - looks up book lines from `/api/player-props/:gamePk` via last-name fuzzy match
+    - sorts games by strongest absolute K edge across the two starters
+  - calibration routes now accept `model: "kprop"`
+  - added optional `subjectKey` support in calibration record/resolve so K props can track both pitchers independently (`gamePk + pitcherSide`)
+  - calibration summary now includes `kprop`
+
+- `prop-scout-v7.jsx`
+  - added Lab K state:
+    - `labKData`
+    - `labKLoading`
+  - added `fetchLabKData(...)` and Lab auto-load on `labSubTab === "kprop"`
+  - added `computeLabKPropGrade(...)`
+  - routed `LAB_KPROP` through `computeGrade(...)`
+  - Lab now has a 3rd sub-tab: `K Prop`
+  - K Prop renders two cards per game (away SP + home SP), with:
+    - EDGE badge
+    - HIT/MISS badge after grading
+    - K/9, Opp K%, Ump Δ, Form Δ chips
+    - model K vs book line
+    - Log button
+  - logged K picks use:
+    - `propType: "LAB_KPROP"`
+    - `pitcherSide`
+    - `pitcherLastName`
+    - `bookLine`
+    - `leanSide`
+  - Lab Picks section in Picks tab now includes `LAB_KPROP`
+  - Track Record section now includes a `K Prop` row
+
+- Scope
+  - no changes to Board / Props / Scout / HR Scout / Advisor / Model Picks
+  - no route mount changes required
+
+- Verification
+  - `node --check backend/routes/modelF5.js` ✅
+  - `node --check backend/routes/teamStats.js` ✅
+  - `npm run build` ✅
+
+---
+
+## CODEX TASK 72 — Lab: Nightly Calibration Resolver Job (S)
+
+**Status:** Pending
+**Files:** `backend/jobs/resolveLabCalibrationJob.js` (new), `backend/jobs/scheduler.js`, `backend/routes/modelF5.js`, `backend/server.js`, `prop-scout-v7.jsx`
+**LOE:** S
+**Depends on:** Tasks 68–71 ✅
+
+### Background
+
+Calibration entries are currently resolved frontend-side: a `useEffect` fires `POST /api/model/calibration/resolve` when `liveBoxscores[gamePk]?.isFinal` becomes true. If the user closes the app before a game finishes, the entry stays `result: null` forever and is excluded from accuracy/Brier score calculations.
+
+This task adds a nightly backend job — analogous to `gradePicksJob.js` — that sweeps all unresolved calibration entries, fetches final boxscores, and resolves them with HIT/MISS/PUSH.
+
+Two additional issues must be fixed simultaneously:
+- `kprop` calibration records don't store `bookLine` or `pitcherLastName` — the job can't resolve them without these fields
+- `totals` calibration records don't store `bookTotal` — same problem
+
+### Changes required
+
+#### 1. `backend/routes/modelF5.js` — extend `calibration/record` route
+
+Accept and store three new optional fields on the entry: `bookLine`, `bookTotal`, `pitcherLastName`.
+
+In the `POST /calibration/record` handler, add:
+```js
+const bookLine  = typeof body.bookLine  === "number" ? body.bookLine  : null;
+const bookTotal = typeof body.bookTotal === "number" ? body.bookTotal : null;
+const pitcherLastName = typeof body.pitcherLastName === "string" && body.pitcherLastName.trim()
+  ? body.pitcherLastName.trim() : null;
+```
+
+Pass them into `appendEntry`:
+```js
+await appendEntry({
+  id: `${model}:${date}:${gamePk}${subjectKey ? `:${subjectKey}` : ""}`,
+  gamePk, date, leanSide, leanProb, leanEdge, hasEdge, model, subjectKey,
+  bookLine,       // NEW — kprop entries
+  bookTotal,      // NEW — totals entries
+  pitcherLastName, // NEW — kprop entries
+  result: null, resolvedAt: null,
+});
+```
+
+#### 2. `prop-scout-v7.jsx` — fix calibration record payloads
+
+**kprop records** (the `useEffect` that fires `apiMutate("/api/model/calibration/record", ...)` for K Prop data):
+
+Add `bookLine` and `pitcherLastName` to the payload:
+```js
+apiMutate("/api/model/calibration/record", "POST", {
+  gamePk: g.gamePk,
+  date: labKData.date,
+  leanSide: prop.lean,
+  leanProb: prop.leanProb,
+  leanEdge: prop.overUnderEdge,
+  hasEdge: prop.hasEdge === true,
+  model: "kprop",
+  subjectKey: side,
+  bookLine: prop.bookLine ?? null,                                    // NEW
+  pitcherLastName: String(pitcher?.name ?? "").split(" ").pop() || null, // NEW
+}).catch(() => {});
+```
+
+Note: the existing `useEffect` destructures `{ side, prop }` from the `forEach` — add `pitcher` to the destructure to access the pitcher name:
+```js
+// Change:
+{ side: "away", prop: g.awayKProp },
+{ side: "home", prop: g.homeKProp },
+// To:
+{ side: "away", prop: g.awayKProp, pitcher: g.awayPitcher },
+{ side: "home", prop: g.homeKProp, pitcher: g.homePitcher },
+```
+
+**totals records** (the `useEffect` that fires for Totals data):
+
+Add `bookTotal`:
+```js
+apiMutate("/api/model/calibration/record", "POST", {
+  gamePk: g.gamePk,
+  date: labTotalsData.date,
+  leanSide: g.model.lean,
+  leanProb: g.model.leanProb,
+  leanEdge: g.model.overUnderEdge,
+  hasEdge: g.model.hasEdge === true,
+  model: "totals",
+  bookTotal: g.model.bookTotal ?? null,   // NEW
+}).catch(() => {});
+```
+
+#### 3. `backend/jobs/resolveLabCalibrationJob.js` — new file
+
+```js
+const axios = require("axios");
+const { readLog, resolveEntry } = require("../services/labCalibration");
+
+const MLB_BASE = "https://statsapi.mlb.com/api/v1";
+
+async function fetchBoxForCalibration(gamePk) {
+  try {
+    const [bsRes, lsRes] = await Promise.all([
+      axios.get(`${MLB_BASE}/game/${gamePk}/boxscore`, { timeout: 10000 }),
+      axios.get(`${MLB_BASE}/game/${gamePk}/linescore`, { timeout: 10000 }),
+    ]);
+    const bs = bsRes.data;
+    const ls = lsRes.data;
+    const inningsPlayed = (ls.innings ?? []).length;
+    const isFinal = (inningsPlayed > 0 && !ls.currentInning)
+      || ls.abstractGameState === "Final";
+    if (!isFinal) return null;
+
+    const innings = (ls.innings ?? []).map(i => ({
+      away: i.away?.runs ?? 0,
+      home: i.home?.runs ?? 0,
+    }));
+    const awayRuns = ls.teams?.away?.runs ?? 0;
+    const homeRuns = ls.teams?.home?.runs ?? 0;
+
+    const parsePitchers = (players) =>
+      Object.values(players ?? {})
+        .filter(p => p.stats?.pitching?.inningsPitched)
+        .map(p => ({
+          name: p.person?.fullName ?? "",
+          k: p.stats.pitching.strikeOuts ?? 0,
+        }));
+
+    return {
+      innings,
+      awayRuns,
+      homeRuns,
+      pitching: {
+        away: parsePitchers(bs.teams?.away?.players),
+        home: parsePitchers(bs.teams?.home?.players),
+      },
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function gradeEntry(entry, box) {
+  const { model, leanSide, subjectKey, bookLine, bookTotal, pitcherLastName } = entry;
+
+  if (model === "f5ml") {
+    const f5 = box.innings.slice(0, 5);
+    const f5Away = f5.reduce((s, i) => s + i.away, 0);
+    const f5Home = f5.reduce((s, i) => s + i.home, 0);
+    if (f5Away === f5Home) return "PUSH";
+    const leanWon = leanSide === "away" ? f5Away > f5Home : f5Home > f5Away;
+    return leanWon ? "HIT" : "MISS";
+  }
+
+  if (model === "fullgame") {
+    if (box.awayRuns === box.homeRuns) return "PUSH";
+    const leanWon = leanSide === "away" ? box.awayRuns > box.homeRuns : box.homeRuns > box.awayRuns;
+    return leanWon ? "HIT" : "MISS";
+  }
+
+  if (model === "kprop") {
+    if (bookLine == null || !pitcherLastName || !subjectKey) return null;
+    const pitcherSide = subjectKey; // "away" | "home"
+    const lastName = pitcherLastName.toLowerCase();
+    const pitcher = (box.pitching[pitcherSide] ?? [])
+      .find(p => p.name.toLowerCase().includes(lastName));
+    const actualKs = pitcher?.k ?? null;
+    if (actualKs == null) return null;
+    if (actualKs === bookLine) return "PUSH";
+    return (leanSide === "OVER" ? actualKs > bookLine : actualKs < bookLine) ? "HIT" : "MISS";
+  }
+
+  if (model === "totals") {
+    if (bookTotal == null) return null;
+    const actualTotal = box.awayRuns + box.homeRuns;
+    if (actualTotal === bookTotal) return "PUSH";
+    return (leanSide === "OVER" ? actualTotal > bookTotal : actualTotal < bookTotal) ? "HIT" : "MISS";
+  }
+
+  return null;
+}
+
+async function resolveLabCalibration() {
+  console.log("  → resolveLabCalibration: starting sweep");
+  const entries = await readLog();
+  const unresolved = entries.filter(e => e.result === null || e.result === undefined);
+
+  if (!unresolved.length) {
+    console.log("  ✓ resolveLabCalibration: nothing to resolve");
+    return { resolved: 0, skipped: 0 };
+  }
+
+  // Group by gamePk to avoid redundant boxscore fetches
+  const byGame = {};
+  for (const entry of unresolved) {
+    if (!byGame[entry.gamePk]) byGame[entry.gamePk] = [];
+    byGame[entry.gamePk].push(entry);
+  }
+
+  let resolved = 0;
+  let skipped = 0;
+
+  for (const [gamePk, gameEntries] of Object.entries(byGame)) {
+    const box = await fetchBoxForCalibration(gamePk);
+    if (!box) {
+      console.log(`  · resolveLabCalibration: gamePk ${gamePk} not final yet, skipping`);
+      skipped += gameEntries.length;
+      continue;
+    }
+
+    for (const entry of gameEntries) {
+      const grade = gradeEntry(entry, box);
+      if (grade == null) {
+        console.log(`  · resolveLabCalibration: ${entry.id} — unable to grade (missing fields)`);
+        skipped++;
+        continue;
+      }
+      await resolveEntry(entry.id, grade);
+      console.log(`  ✓ resolveLabCalibration: ${entry.id} → ${grade}`);
+      resolved++;
+    }
+  }
+
+  console.log(`  ✓ resolveLabCalibration: resolved=${resolved} skipped=${skipped}`);
+  return { resolved, skipped };
+}
+
+module.exports = { resolveLabCalibration };
+```
+
+#### 4. `backend/jobs/scheduler.js` — wire the job
+
+Add import at top:
+```js
+const { resolveLabCalibration } = require("./resolveLabCalibrationJob");
+```
+
+Add cron at 4:30 AM Honolulu (30 min after `gradePendingPicks`):
+```js
+// Resolve Lab calibration entries nightly at 4:30 AM Honolulu
+cron.schedule("30 4 * * *", () => resolveLabCalibration(), { timezone: "Pacific/Honolulu" });
+```
+
+#### 5. `backend/server.js` — expose admin endpoint
+
+Add after the existing `grade-picks` admin endpoint:
+```js
+app.get("/api/admin/jobs/resolve-lab-calibration", requireAdminAuth, async (_req, res) => {
+  try {
+    const result = await require("./jobs/resolveLabCalibrationJob").resolveLabCalibration();
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ error: "resolve-lab-calibration failed", detail: err.message });
+  }
+});
+```
+
+### Scope
+
+- No changes to Board, Props, Scout, HR Scout, Advisor, Model Picks, Lab UI
+- No changes to calibration log format for f5ml / fullgame entries (already self-contained)
+- `bookLine` / `bookTotal` / `pitcherLastName` fields are additive — existing entries without them will get `null` and the job will skip them gracefully (already handles `bookLine == null` → return null)
+- New entries created after this task will include the fields and be fully resolvable
+
+### Verification
+
+- `node --check backend/jobs/resolveLabCalibrationJob.js` ✓
+- `node --check backend/jobs/scheduler.js` ✓
+- `npm run build` ✓
+- f5ml and fullgame entries resolve correctly from linescore only
+- kprop entries with missing `bookLine` are skipped gracefully (not errored)
+- kprop entries with `bookLine` and `pitcherLastName` resolve correctly
+- totals entries with `bookTotal` resolve correctly
+- Admin endpoint returns `{ ok: true, resolved: N, skipped: N }`

@@ -3477,3 +3477,100 @@ Full specs in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 65–68**.
 - `feat: add Lab calibration tracking with Brier score and track record display`
 
 *Updated 2026-05-02 — Session 65 complete · CODEX TASKS 65–68 all approved*
+
+---
+
+## ✅ Session 66 — CW: Task 27 Phase B isFinal Bug Fix
+
+**Files changed:** `backend/jobs/gradePicksJob.js`
+
+Task 27 Phase B (nightly pick settlement) was already fully implemented — `gradePicksJob.js`, cron at 4 AM Honolulu, and admin trigger endpoint all existed. The one outstanding issue was a one-line `isFinal` detection bug in the job, where the `abstractGameState === "Final"` fallback (added to `boxscore.js` in Task 60) had never been backported to the job file.
+
+**Fix applied — `backend/jobs/gradePicksJob.js` line 193:**
+```js
+// Before
+const isFinal = inningsPlayed > 0 && !ls.currentInning;
+// After
+const isFinal = (inningsPlayed > 0 && !ls.currentInning)
+  || ls.abstractGameState === "Final";
+```
+
+This mirrors the exact fix from Task 60. Without it, the nightly job could silently skip settling picks for games where MLB API returns `currentInning: 0` on completed games. Now grading is consistent between the frontend boxscore route and the backend settlement worker.
+
+**Task 27 Phase B: fully complete ✅**
+
+*Updated 2026-05-02 — Session 66 complete · Task 27 Phase B isFinal fix shipped*
+
+---
+
+## ✅ Session 67 — CW: CODEX TASKS 69–71 Specced (Lab Extension Suite 2)
+
+**Files changed:** `AGENT_SYSTEM_PROMPT.md`
+
+Three new specs written for the Lab's remaining organic work. Execution order: 71 → 69 → 70.
+
+### CODEX TASK 71 — Lab: Full-Game ML Pick Logging (XS, pending)
+Closes the gap from Task 67. Adds `computeLabFgMlGrade`, routes it through the `computeGrade` dispatch, adds a Log button (`propType: "LAB_FGML"`) to full-game cards, and extends the Picks tab Lab Picks filter to include `LAB_FGML`. No backend changes.
+
+### CODEX TASK 69 — Lab: K Prop Predictive Model (M-L, pending)
+New `GET /api/model/kprop` route in `modelF5.js`. Linear model: `predictedKs = INTERCEPT + PITCHER_K9*(k9-9.0) + OPP_K_PCT*(kPct-0.22) + UMP_K_TENDENCY*umpDelta + FORM_DELTA*(recentK9-k9)`. Book line from `/api/player-props/:gamePk` (pitcher_strikeouts market, last-name fuzzy match). Also adds `runsPerGame` to `teamStats.js` response (additive, non-breaking). Frontend: new `K Prop` sub-tab (3rd), two pitcher cards per game, OVER/UNDER lean + edge. Log with `propType: "LAB_KPROP"`. Auto-grade from pitching boxscore Ks. Calibration model `"kprop"` added.
+
+### CODEX TASK 70 — Lab: Game Totals Model (M, pending)
+New `GET /api/model/totals` route. Linear model: `predictedTotal = INTERCEPT + RPG deviations + SP ERA deviations + bullpen ERA deviation`. Book total from `oddsMap[key].total`. Frontend: new `Totals` sub-tab (4th), one card per game, OVER/UNDER lean. Log with `propType: "LAB_TOTALS"`. Auto-grade from final linescore runs sum. Calibration model `"totals"` added.
+
+### Notes
+- **Recalibration** (organic idea #3): data-dependent, no code needed until `lab-outcomes.json` accumulates ~20+ entries.
+- **Hybrid AI Props** (organic idea #4): Task 57 already shipped the merged algo+AI card view. Nothing concrete left to spec — will revisit if a specific gap surfaces.
+
+*Updated 2026-05-02 — Session 67 complete · CODEX TASKS 69–71 specced*
+
+---
+
+## ✅ Session 68 — CW: Review + Approve CODEX TASKS 69–71
+
+**Review status:** All three tasks approved ✅
+
+### Task 71 — Full-Game ML Pick Logging ✅
+`computeLabFgMlGrade` defined correctly — reads `pick.lean` ("HOME"/"AWAY") which matches how `logPick` stores the lean side on full-game cards. Log button wired via shared `labPickType` variable (`isLabF5 ? "LAB_F5ML" : "LAB_FGML"`), so the existing card render branch handles both F5 and FG logging without duplication. Picks tab filter extended to all four `LAB_*` propTypes. Dispatch in `computeGrade` wired at correct location.
+
+### Task 69 — K Prop Model ✅
+`teamStats.js` addition of `runsPerGame` is clean and non-breaking (three new lines, existing callers unaffected). `modelF5.js`: `COEFF_K`, `parseIP`, `predictKs` all correct per spec. Route fetches 8 endpoints per game via `Promise.allSettled` (all graceful on failure). `buildKProp` helper cleanly encapsulates both pitcher K prop calculations. Name match uses last-name substring. Calibration record/resolve routes extended to accept `"kprop"` and `"totals"` models, and Codex proactively added a `subjectKey` field to the calibration ID for K Props — this disambiguates away vs home pitcher entries for the same gamePk, which the spec didn't address. Clever improvement. Frontend: `labKData`/`labKLoading` state, auto-load effect, K Prop sub-tab, two-card-per-game layout, `computeLabKPropGrade` reads `pitcherSide`/`pitcherLastName`/`bookLine` from pick payload — all correctly logged at line 3762–3769.
+
+### Task 70 — Game Totals Model ✅
+`COEFF_TOT`, `predictTotal` correct. Route uses `oddsMap[key].total` (string → `parseFloat`) for book total. `runsPerGame` falls back to 4.5 if unavailable. Calibration resolve fires with `model: "totals"`. Frontend: `labTotalsData`/`labTotalsLoading`, auto-load effect, 4-tab toggle (`[F5 ML][Full-Game ML][K Prop][Totals]`), `computeLabTotalsGrade` reads `pick.leanSide` + `pick.bookTotal` — correctly stored in logPick at line 3793.
+
+### Bonus: Codex `subjectKey` improvement
+The calibration `record` and `resolve` routes now accept an optional `subjectKey` that gets embedded in the entry ID — `"kprop:date:gamePk:away"` vs `"kprop:date:gamePk:home"`. This solves a dedup collision that the spec didn't account for (two K prop entries per game with the same gamePk). Clean proactive fix.
+
+### Build note
+`node --check` on all three backend files passes. `npm run build` fails in the sandbox due to missing `@rollup/rollup-linux-arm64-gnu` native module — this is a known environment platform issue, not a code bug.
+
+### Commit messages
+- `feat: add Full-Game ML pick logging (LAB_FGML) and computeLabFgMlGrade`
+- `feat: add Lab K Prop predictive model — new sub-tab, route, grading`
+- `feat: add Lab Game Totals model — 4th Lab sub-tab, route, grading`
+
+*Updated 2026-05-03 — Session 68 complete · CODEX TASKS 69–71 all approved*
+
+---
+
+## ✅ Session 69 — CW: CODEX TASK 72 Specced (Nightly Calibration Resolver)
+
+**Files changed:** `AGENT_SYSTEM_PROMPT.md`
+
+### CODEX TASK 72 — Lab: Nightly Calibration Resolver Job (S, pending)
+
+Root cause: calibration entries are resolved frontend-side only. If the app is closed before a game finishes, entries stay `result: null` and are excluded from accuracy/Brier score stats permanently.
+
+Also fixes two payload gaps discovered during spec:
+- kprop calibration records were not storing `bookLine` or `pitcherLastName` — the job can't grade K prop entries without them
+- totals calibration records were not storing `bookTotal` — same problem
+
+**Three-part fix:**
+1. `modelF5.js` calibration/record route — accept and persist `bookLine`, `bookTotal`, `pitcherLastName` optional fields
+2. `prop-scout-v7.jsx` — add those fields to the kprop and totals record payloads; add `pitcher` to the kprop forEach destructure to access pitcher name
+3. New `backend/jobs/resolveLabCalibrationJob.js` — sweeps unresolved entries, groups by gamePk, fetches boxscore once per game, grades all entries for that game: f5ml (innings 1-5), fullgame (final score), kprop (pitcher SO vs bookLine), totals (total runs vs bookTotal). Skips gracefully when game not final or required fields missing.
+4. Scheduler wired at 4:30 AM Honolulu (30 min after gradePendingPicks)
+5. Admin endpoint `GET /api/admin/jobs/resolve-lab-calibration` for manual trigger
+
+*Updated 2026-05-03 — Session 69 complete · CODEX TASK 72 specced*

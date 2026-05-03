@@ -3149,6 +3149,10 @@ export default function App() {
   const [labLoading, setLabLoading] = useState(false);
   const [labFgData, setLabFgData] = useState(null);
   const [labFgLoading, setLabFgLoading] = useState(false);
+  const [labKData, setLabKData] = useState(null);
+  const [labKLoading, setLabKLoading] = useState(false);
+  const [labTotalsData, setLabTotalsData] = useState(null);
+  const [labTotalsLoading, setLabTotalsLoading] = useState(false);
   const [labCalibration, setLabCalibration] = useState(null);
   const [labCalibrationLoading, setLabCalibrationLoading] = useState(false);
   const [showLabTrackRecord, setShowLabTrackRecord] = useState(true);
@@ -3605,6 +3609,16 @@ export default function App() {
   }, [view, labSubTab, currentUser, isScoutUser, labFgData, labFgLoading]);
 
   useEffect(() => {
+    if (view !== "lab" || labSubTab !== "kprop" || !currentUser || !isScoutUser || labKData !== null || labKLoading) return;
+    fetchLabKData();
+  }, [view, labSubTab, currentUser, isScoutUser, labKData, labKLoading]);
+
+  useEffect(() => {
+    if (view !== "lab" || labSubTab !== "totals" || !currentUser || !isScoutUser || labTotalsData !== null || labTotalsLoading) return;
+    fetchLabTotalsData();
+  }, [view, labSubTab, currentUser, isScoutUser, labTotalsData, labTotalsLoading]);
+
+  useEffect(() => {
     if (view !== "lab" || !currentUser || !isScoutUser || labCalibration !== null || labCalibrationLoading) return;
     fetchLabCalibration();
   }, [view, currentUser, isScoutUser, labCalibration, labCalibrationLoading]);
@@ -3646,6 +3660,53 @@ export default function App() {
       }).catch(() => {});
     });
   }, [currentUser, isScoutUser, labFgData]);
+
+  useEffect(() => {
+    if (!currentUser || !isScoutUser || !labKData?.games?.length || !labKData?.date) return;
+    labKData.games.forEach((g) => {
+      [
+        { side: "away", prop: g.awayKProp, pitcher: g.awayPitcher },
+        { side: "home", prop: g.homeKProp, pitcher: g.homePitcher },
+      ].forEach(({ side, prop, pitcher }) => {
+        const key = `kprop:${labKData.date}:${g.gamePk}:${side}`;
+        if (labCalibrationRecorded.current.has(key)) return;
+        if (!prop?.lean || prop?.overUnderEdge == null || prop?.leanProb == null) return;
+        labCalibrationRecorded.current.add(key);
+        apiMutate("/api/model/calibration/record", "POST", {
+          gamePk: g.gamePk,
+          date: labKData.date,
+          leanSide: prop.lean,
+          leanProb: prop.leanProb,
+          leanEdge: prop.overUnderEdge,
+          hasEdge: prop.hasEdge === true,
+          model: "kprop",
+          subjectKey: side,
+          bookLine: prop.bookLine ?? null,
+          pitcherLastName: String(pitcher?.name ?? "").split(" ").pop() || null,
+        }).catch(() => {});
+      });
+    });
+  }, [currentUser, isScoutUser, labKData]);
+
+  useEffect(() => {
+    if (!currentUser || !isScoutUser || !labTotalsData?.games?.length || !labTotalsData?.date) return;
+    labTotalsData.games.forEach((g) => {
+      const key = `totals:${labTotalsData.date}:${g.gamePk}`;
+      if (labCalibrationRecorded.current.has(key)) return;
+      if (!g.model?.lean || g.model?.overUnderEdge == null || g.model?.leanProb == null) return;
+      labCalibrationRecorded.current.add(key);
+      apiMutate("/api/model/calibration/record", "POST", {
+        gamePk: g.gamePk,
+        date: labTotalsData.date,
+        leanSide: g.model.lean,
+        leanProb: g.model.leanProb,
+        leanEdge: g.model.overUnderEdge,
+        hasEdge: g.model.hasEdge === true,
+        model: "totals",
+        bookTotal: g.model.bookTotal ?? null,
+      }).catch(() => {});
+    });
+  }, [currentUser, isScoutUser, labTotalsData]);
 
   useEffect(() => {
     if (!currentUser || !isScoutUser) return;
@@ -3692,7 +3753,60 @@ export default function App() {
 
     resolveLab(labData?.games, labData?.date, "f5ml");
     resolveLab(labFgData?.games, labFgData?.date, "fullgame");
-  }, [currentUser, isScoutUser, liveBoxscores, labData, labFgData]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    if (labKData?.games?.length && labKData?.date) {
+      labKData.games.forEach((g) => {
+        const box = liveBoxscores[String(g.gamePk)] ?? liveBoxscores[g.gamePk];
+        if (!box?.isFinal) return;
+        [
+          { side: "away", prop: g.awayKProp, pitcher: g.awayPitcher },
+          { side: "home", prop: g.homeKProp, pitcher: g.homePitcher },
+        ].forEach(({ side, prop, pitcher }) => {
+          if (!prop?.lean || prop?.bookLine == null || !pitcher?.name) return;
+          const key = `kprop:${labKData.date}:${g.gamePk}:${side}`;
+          if (labCalibrationResolved.current.has(key)) return;
+          const grade = computeLabKPropGrade({
+            leanSide: prop.lean,
+            bookLine: prop.bookLine,
+            pitcherSide: side,
+            pitcherLastName: String(pitcher.name ?? "").split(" ").pop(),
+          }, box);
+          if (grade == null) return;
+          labCalibrationResolved.current.add(key);
+          apiMutate("/api/model/calibration/resolve", "POST", {
+            gamePk: g.gamePk,
+            model: "kprop",
+            result: grade === "hit" ? "HIT" : "MISS",
+            subjectKey: side,
+          })
+            .then(() => fetchLabCalibration())
+            .catch(() => {});
+        });
+      });
+    }
+
+    if (labTotalsData?.games?.length && labTotalsData?.date) {
+      labTotalsData.games.forEach((g) => {
+        const box = liveBoxscores[String(g.gamePk)] ?? liveBoxscores[g.gamePk];
+        if (!box?.isFinal) return;
+        const key = `totals:${labTotalsData.date}:${g.gamePk}`;
+        if (labCalibrationResolved.current.has(key)) return;
+        const grade = computeLabTotalsGrade({
+          leanSide: g.model?.lean,
+          bookTotal: g.model?.bookTotal,
+        }, box);
+        if (grade == null) return;
+        labCalibrationResolved.current.add(key);
+        apiMutate("/api/model/calibration/resolve", "POST", {
+          gamePk: g.gamePk,
+          model: "totals",
+          result: grade === "hit" ? "HIT" : "MISS",
+        })
+          .then(() => fetchLabCalibration())
+          .catch(() => {});
+      });
+    }
+  }, [currentUser, isScoutUser, liveBoxscores, labData, labFgData, labKData, labTotalsData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -3865,7 +3979,7 @@ export default function App() {
 
       let anyGraded = false;
       pendingPicks.forEach(pick => {
-        const grade = pick.propType === "LAB_F5ML" ? computeLabF5MlGrade(pick, box) : computeGrade(pick, box);
+        const grade = computeGrade(pick, box);
         if (grade !== null) {
           markResult(pick.id, grade);
           anyGraded = true;
@@ -3906,7 +4020,7 @@ export default function App() {
       if (cached?.isFinal) {
         let anyGraded = false;
         picks.forEach(pick => {
-          const grade = pick.propType === "LAB_F5ML" ? computeLabF5MlGrade(pick, cached) : computeGrade(pick, cached);
+          const grade = computeGrade(pick, cached);
           if (grade !== null) { markResult(pick.id, grade); anyGraded = true; }
         });
         if (!anyGraded) histGradedGames.current.delete(gamePkStr);
@@ -3923,7 +4037,7 @@ export default function App() {
           boxscoreFetched.current.add(gamePkStr);
           let anyGraded = false;
           picks.forEach(pick => {
-            const grade = pick.propType === "LAB_F5ML" ? computeLabF5MlGrade(pick, data) : computeGrade(pick, data);
+            const grade = computeGrade(pick, data);
             if (grade !== null) { markResult(pick.id, grade); anyGraded = true; }
           });
           if (!anyGraded) histGradedGames.current.delete(gamePkStr);
@@ -4596,6 +4710,36 @@ export default function App() {
     }
   }
 
+  async function fetchLabKData(force = false) {
+    if (labKLoading) return;
+    if (force) setLabKData(null);
+    setLabKLoading(true);
+    try {
+      const data = await apiFetch("/api/model/kprop");
+      setLabKData(data);
+    } catch (err) {
+      console.error("Lab K data error:", err);
+      setLabKData({ date: null, games: [], error: err.message ?? "Failed to load Lab K model" });
+    } finally {
+      setLabKLoading(false);
+    }
+  }
+
+  async function fetchLabTotalsData(force = false) {
+    if (labTotalsLoading) return;
+    if (force) setLabTotalsData(null);
+    setLabTotalsLoading(true);
+    try {
+      const data = await apiFetch("/api/model/totals");
+      setLabTotalsData(data);
+    } catch (err) {
+      console.error("Lab totals error:", err);
+      setLabTotalsData({ date: null, games: [], error: err.message ?? "Failed to load Lab totals model" });
+    } finally {
+      setLabTotalsLoading(false);
+    }
+  }
+
   async function fetchLabCalibration() {
     if (labCalibrationLoading) return;
     setLabCalibrationLoading(true);
@@ -4611,10 +4755,11 @@ export default function App() {
 
   // ── Pick tracker helpers ──────────────────────────────────────────────────
   const logPick = (prop) => {
+    const entryDate = prop.date ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
     const alreadyLogged = propLog.some(p =>
       String(p.gamePk) === String(prop.gamePk ?? selectedId) &&
       p.label === prop.label &&
-      p.date === new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
+      p.date === entryDate
     );
     if (alreadyLogged) return;
 
@@ -4622,7 +4767,7 @@ export default function App() {
     const entry = {
       id:          `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       timestamp:   new Date().toISOString(),
-      date:        new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+      date:        entryDate,
       game:        prop.game ?? `${game.away.abbr} @ ${game.home.abbr}`,
       gamePk:      prop.gamePk ?? selectedId,
       label:       prop.label,
@@ -4634,8 +4779,12 @@ export default function App() {
       awayTeam:    prop.awayTeam ?? game.away?.abbr ?? null,
       pitcherId:   prop.pitcherId   ?? prop.id ?? pitcher?.id ?? null,
       pitcherName: prop.pitcherName ?? prop.fullName ?? prop.name ?? pitcher?.name ?? null,
+      pitcherLastName: prop.pitcherLastName ?? null,
+      pitcherSide: prop.pitcherSide ?? null,
       playerId:    isBatterProp ? (prop.playerId ?? prop.id ?? activeBatter?.id ?? null) : null,
       playerName:  isBatterProp ? (prop.playerName ?? prop.fullName ?? prop.name ?? activeBatter?.name ?? null) : null,
+      leanSide:    prop.leanSide ?? null,
+      bookLine:    prop.bookLine ?? null,
       result:      null,
     };
     setPropLog(prev => {
@@ -4663,9 +4812,44 @@ export default function App() {
     if (leanWon == null) return null;
     return leanWon ? "hit" : "miss";
   };
+  const computeLabFgMlGrade = (pick, box) => {
+    if (!box?.isFinal) return null;
+    const awayRuns = box?.linescore?.away?.runs;
+    const homeRuns = box?.linescore?.home?.runs;
+    if (!Number.isFinite(awayRuns) || !Number.isFinite(homeRuns)) return null;
+    if (awayRuns === homeRuns) return null;
+    const lean = (pick.lean ?? "").toUpperCase();
+    const leanWon = lean === "HOME" ? homeRuns > awayRuns : lean === "AWAY" ? awayRuns > homeRuns : null;
+    if (leanWon == null) return null;
+    return leanWon ? "hit" : "miss";
+  };
+  const computeLabKPropGrade = (pick, box) => {
+    if (!box?.isFinal) return null;
+    const pitcherSide = pick.pitcherSide;
+    const lastName = (pick.pitcherLastName ?? "").toLowerCase();
+    const pitcherBox = Object.values(box?.pitching?.[pitcherSide] ?? {})
+      .find(p => (p?.name ?? "").toLowerCase().includes(lastName));
+    const actualKs = pitcherBox?.so ?? pitcherBox?.k ?? null;
+    if (actualKs == null || pick.bookLine == null) return null;
+    if (actualKs === pick.bookLine) return null;
+    return (pick.leanSide === "OVER" ? actualKs > pick.bookLine : actualKs < pick.bookLine) ? "hit" : "miss";
+  };
+  const computeLabTotalsGrade = (pick, box) => {
+    if (!box?.isFinal) return null;
+    const awayRuns = box?.linescore?.away?.runs;
+    const homeRuns = box?.linescore?.home?.runs;
+    if (!Number.isFinite(awayRuns) || !Number.isFinite(homeRuns)) return null;
+    const actualTotal = awayRuns + homeRuns;
+    if (pick.bookTotal == null) return null;
+    if (actualTotal === pick.bookTotal) return null;
+    return (pick.leanSide === "OVER" ? actualTotal > pick.bookTotal : actualTotal < pick.bookTotal) ? "hit" : "miss";
+  };
   const computeGrade = (pick, box) => {
     if (!box?.isFinal) return null;
     if (pick.propType === "LAB_F5ML") return computeLabF5MlGrade(pick, box);
+    if (pick.propType === "LAB_FGML") return computeLabFgMlGrade(pick, box);
+    if (pick.propType === "LAB_KPROP") return computeLabKPropGrade(pick, box);
+    if (pick.propType === "LAB_TOTALS") return computeLabTotalsGrade(pick, box);
     const label = (pick.label ?? "").toUpperCase();
     const lean  = (pick.lean  ?? "").toUpperCase();
     const innings   = box.linescore?.innings ?? [];
@@ -5995,9 +6179,12 @@ export default function App() {
 
         {view === "lab" && isScoutUser && (() => {
           const isLabF5 = labSubTab === "f5ml";
-          const activeLabData = isLabF5 ? labData : labFgData;
-          const activeLabLoading = isLabF5 ? labLoading : labFgLoading;
-          const refreshLab = () => (isLabF5 ? fetchLabData(true) : fetchLabFgData(true));
+          const isLabFullGame = labSubTab === "fullgame";
+          const isLabKProp = labSubTab === "kprop";
+          const isLabTotals = labSubTab === "totals";
+          const activeLabData = isLabF5 ? labData : isLabFullGame ? labFgData : isLabKProp ? labKData : labTotalsData;
+          const activeLabLoading = isLabF5 ? labLoading : isLabFullGame ? labFgLoading : isLabKProp ? labKLoading : labTotalsLoading;
+          const refreshLab = () => (isLabF5 ? fetchLabData(true) : isLabFullGame ? fetchLabFgData(true) : isLabKProp ? fetchLabKData(true) : fetchLabTotalsData(true));
 
           return (
             <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
@@ -6007,7 +6194,9 @@ export default function App() {
                     <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🔬 LAB</div>
                     <TierBadge tier="predictive" />
                   </div>
-                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{isLabF5 ? "F5 Moneyline" : "Full-Game Moneyline"} · Logistic model · Pre-calibrated coefficients · Experimental</div>
+                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
+                    {isLabF5 ? "F5 Moneyline" : isLabFullGame ? "Full-Game Moneyline" : isLabKProp ? "K Prop" : "Totals"} · Predictive model · Pre-calibrated coefficients · Experimental
+                  </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                   <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
@@ -6034,7 +6223,7 @@ export default function App() {
               </div>
 
               <div style={{ display: "flex", gap: 6 }}>
-                {[["f5ml", "F5 ML"], ["fullgame", "Full-Game ML"]].map(([key, label]) => (
+                {[["f5ml", "F5 ML"], ["fullgame", "Full-Game ML"], ["kprop", "K Prop"], ["totals", "Totals"]].map(([key, label]) => (
                   <button
                     key={key}
                     onClick={() => setLabSubTab(key)}
@@ -6060,13 +6249,17 @@ export default function App() {
                 <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>
                   {isLabF5
                     ? "Win probabilities generated by a pre-calibrated logistic regression using SP quality, command, form, umpire, and home field. Not a trained ML system. Not financial advice. Edge = model prob minus book implied prob."
-                    : "Full-Game Moneyline · Logistic model · Adds bullpen ERA differential vs F5 model. Not a trained ML system. Not financial advice. Edge = model prob minus book implied prob."}
+                    : isLabFullGame
+                      ? "Full-Game Moneyline · Logistic model · Adds bullpen ERA differential vs F5 model. Not a trained ML system. Not financial advice. Edge = model prob minus book implied prob."
+                      : isLabKProp
+                        ? "Strikeout props modeled from pitcher K/9, opponent team K%, umpire tendency, and recent form. Not a trained ML system. Not financial advice. Edge = model projection minus book line."
+                        : "Game totals modeled from team runs per game, both SP ERAs, and combined bullpen ERA. Not a trained ML system. Not financial advice. Edge = model projection minus book total."}
                 </div>
               </div>
 
               {activeLabLoading && !activeLabData && (
                 <Card>
-                  <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>Running {isLabF5 ? "F5" : "full-game"} predictive model across today&apos;s slate…</div>
+                  <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>Running {isLabF5 ? "F5" : isLabFullGame ? "full-game" : isLabKProp ? "K prop" : "totals"} predictive model across today&apos;s slate…</div>
                 </Card>
               )}
 
@@ -6078,21 +6271,269 @@ export default function App() {
 
               {!activeLabLoading && activeLabData && (activeLabData.games?.length ?? 0) === 0 && !activeLabData.error && (
                 <Card>
-                  <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>No {isLabF5 ? "F5" : "full-game"} model games available yet.</div>
+                  <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>No {isLabF5 ? "F5" : isLabFullGame ? "full-game" : isLabKProp ? "K prop" : "totals"} model games available yet.</div>
                 </Card>
               )}
 
               {activeLabData?.games?.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {activeLabData.games.map((g) => {
-                    const leanIsHome = g.model?.leanSide === "home";
-                    const leanTeam = leanIsHome ? g.home : g.away;
-                    const labPickLabel = `${leanTeam?.abbr ?? "?"} F5 ML`;
+                  {isLabTotals ? activeLabData.games.map((g) => {
+                    const labPickLabel = `${g.away?.abbr ?? "?"}@${g.home?.abbr ?? "?"} Total ${g.model?.lean ?? "—"} ${g.model?.bookTotal ?? "—"}`;
+                    const labPickDate = activeLabData?.date ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
                     const labPickLogged = propLog.some(p =>
                       String(p.gamePk) === String(g.gamePk) &&
                       p.label === labPickLabel &&
-                      p.propType === "LAB_F5ML" &&
-                      p.date === new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                      p.propType === "LAB_TOTALS" &&
+                      p.date === labPickDate
+                    );
+                    const labBox = liveBoxscores[String(g.gamePk)];
+                    const labGrade = computeLabTotalsGrade({
+                      leanSide: g.model?.lean,
+                      bookTotal: g.model?.bookTotal,
+                    }, labBox);
+                    const edgeColor = g.model?.hasEdge ? "#34d399" : (g.model?.overUnderEdge ?? 0) >= 0 ? "#fbbf24" : "#6b7280";
+                    const leanColor = g.model?.lean === "OVER" ? "#22c55e" : "#ef4444";
+                    const modelProbPct = g.model?.leanProb != null ? `${Math.round(g.model.leanProb * 100)}%` : "—";
+                    const edgeLabel = g.model?.overUnderEdge != null ? `${g.model.overUnderEdge >= 0 ? "+" : ""}${g.model.overUnderEdge.toFixed(1)} R` : "—";
+                    const combinedBullpenEraDisplay = g.model?.features?.combinedBullpenEra != null ? g.model.features.combinedBullpenEra.toFixed(2) : "—";
+
+                    return (
+                      <Card key={g.gamePk} style={{ padding: "12px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 4 }}>
+                              <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{g.away?.abbr} @ {g.home?.abbr}</div>
+                              {g.model?.hasEdge && (
+                                <span style={{ background: "rgba(52,211,153,0.14)", border: "1px solid rgba(52,211,153,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#34d399", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                  EDGE
+                                </span>
+                              )}
+                              {labGrade === "hit" && (
+                                <span style={{ background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#22c55e", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                  ✓ HIT
+                                </span>
+                              )}
+                              {labGrade === "miss" && (
+                                <span style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                  ✗ MISS
+                                </span>
+                              )}
+                              {g.dataWarning && (
+                                <span style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.30)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#fbbf24", fontFamily: "monospace" }}>
+                                  PARTIAL DATA
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 7 }}>
+                              {g.awayPitcher?.name} vs {g.homePitcher?.name}
+                            </div>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                Away RPG {g.teamStats?.awayRPG != null ? g.teamStats.awayRPG.toFixed(2) : "—"}
+                              </span>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                Home RPG {g.teamStats?.homeRPG != null ? g.teamStats.homeRPG.toFixed(2) : "—"}
+                              </span>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                Away ERA {g.awayPitcher?.era != null ? g.awayPitcher.era.toFixed(2) : "—"}
+                              </span>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                Home ERA {g.homePitcher?.era != null ? g.homePitcher.era.toFixed(2) : "—"}
+                              </span>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                BP ERA {combinedBullpenEraDisplay}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: 10, color: "#d1d5db", fontFamily: "monospace" }}>
+                              Model: {g.model?.predictedTotal != null ? g.model.predictedTotal.toFixed(1) : "—"} vs Line: {g.model?.bookTotal != null ? g.model.bookTotal.toFixed(1) : "—"}
+                            </div>
+                          </div>
+
+                          <div style={{ minWidth: 118, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 7, flexShrink: 0 }}>
+                            <div style={{ background: `${edgeColor}15`, border: `1px solid ${edgeColor}33`, borderRadius: 10, padding: "7px 10px", textAlign: "right", minWidth: 110 }}>
+                              <div style={{ fontSize: 10, color: leanColor, fontWeight: 800, fontFamily: "monospace", marginBottom: 2 }}>
+                                {g.model?.lean ?? "—"} {g.model?.bookTotal != null ? g.model.bookTotal.toFixed(1) : "—"}
+                              </div>
+                              <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
+                              <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>{edgeLabel}</div>
+                            </div>
+                            <button
+                              onClick={() => !labPickLogged && logPick({
+                                gamePk: g.gamePk,
+                                game: `${g.away?.abbr} @ ${g.home?.abbr}`,
+                                label: labPickLabel,
+                                lean: g.model?.lean ?? "—",
+                                confidence: Math.round((g.model?.leanProb ?? 0) * 100),
+                                propType: "LAB_TOTALS",
+                                date: labPickDate,
+                                leanSide: g.model?.lean ?? null,
+                                bookTotal: g.model?.bookTotal ?? null,
+                                homeTeam: g.home?.abbr ?? null,
+                                awayTeam: g.away?.abbr ?? null,
+                              })}
+                              title={labPickLogged ? "Already logged" : "Log this Lab pick"}
+                              disabled={labPickLogged}
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 700,
+                                background: labPickLogged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
+                                border: `1px solid ${labPickLogged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
+                                borderRadius: 8,
+                                padding: "6px 10px",
+                                cursor: labPickLogged ? "default" : "pointer",
+                                color: labPickLogged ? "#22c55e" : "#9ca3af",
+                                fontFamily: "monospace",
+                                minWidth: 110,
+                                textAlign: "center",
+                              }}
+                            >
+                              {labPickLogged ? "✓ Logged" : "＋ Log"}
+                            </button>
+                          </div>
+                        </div>
+                      </Card>
+                    );
+                  }) : isLabKProp ? activeLabData.games.flatMap((g) => {
+                    const cards = [
+                      { side: "away", pitcher: g.awayPitcher, kProp: g.awayKProp, oppTeam: g.home },
+                      { side: "home", pitcher: g.homePitcher, kProp: g.homeKProp, oppTeam: g.away },
+                    ]
+                      .filter(({ kProp }) => kProp != null)
+                      .map(({ side, pitcher, kProp, oppTeam }) => {
+                        const labPickLabel = `${pitcher?.name ?? "Unknown"} K ${kProp?.lean ?? "—"} ${kProp?.bookLine ?? "—"}`;
+                        const labPickDate = activeLabData?.date ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                        const labPickLogged = propLog.some(p =>
+                          String(p.gamePk) === String(g.gamePk) &&
+                          p.label === labPickLabel &&
+                          p.propType === "LAB_KPROP" &&
+                          p.date === labPickDate
+                        );
+                        const labBox = liveBoxscores[String(g.gamePk)];
+                        const labGrade = computeLabKPropGrade({
+                          leanSide: kProp?.lean,
+                          bookLine: kProp?.bookLine,
+                          pitcherSide: side,
+                          pitcherLastName: String(pitcher?.name ?? "").split(" ").pop(),
+                        }, labBox);
+                        const edgeColor = kProp?.hasEdge ? "#34d399" : (kProp?.overUnderEdge ?? 0) >= 0 ? "#fbbf24" : "#6b7280";
+                        const leanColor = kProp?.lean === "OVER" ? "#22c55e" : "#ef4444";
+                        const modelProbPct = kProp?.leanProb != null ? `${Math.round(kProp.leanProb * 100)}%` : "—";
+                        const edgeLabel = kProp?.overUnderEdge != null ? `${kProp.overUnderEdge >= 0 ? "+" : ""}${kProp.overUnderEdge.toFixed(1)} K` : "—";
+                        const oppKPct = kProp?.features?.oppKPctDecimal != null ? `${(kProp.features.oppKPctDecimal * 100).toFixed(1)}%` : "—";
+                        const umpDelta = g.umpire?.kTendency != null ? `${g.umpire.kTendency >= 0 ? "+" : ""}${g.umpire.kTendency.toFixed(2)}` : "—";
+                        const formDelta = kProp?.features?.formDelta != null ? `${kProp.features.formDelta >= 0 ? "+" : ""}${kProp.features.formDelta.toFixed(1)}` : "—";
+
+                        return (
+                          <Card key={`${g.gamePk}:${side}`} style={{ padding: "12px 14px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 4 }}>
+                                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>
+                                    [{side === "away" ? "AWAY" : "HOME"}] {pitcher?.name} K Prop
+                                  </div>
+                                  {kProp?.hasEdge && (
+                                    <span style={{ background: "rgba(52,211,153,0.14)", border: "1px solid rgba(52,211,153,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#34d399", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                      EDGE
+                                    </span>
+                                  )}
+                                  {labGrade === "hit" && (
+                                    <span style={{ background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#22c55e", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                      ✓ HIT
+                                    </span>
+                                  )}
+                                  {labGrade === "miss" && (
+                                    <span style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                      ✗ MISS
+                                    </span>
+                                  )}
+                                  {kProp?.dataWarning && (
+                                    <span style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.30)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#fbbf24", fontFamily: "monospace" }}>
+                                      PARTIAL DATA
+                                    </span>
+                                  )}
+                                </div>
+                                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 7 }}>
+                                  {g.away?.abbr} @ {g.home?.abbr} · Opp {oppTeam?.abbr ?? "—"} · Ump {g.umpire?.name ?? "TBD"}
+                                </div>
+                                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                                  <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                    K/9 {pitcher?.k9 != null ? pitcher.k9.toFixed(2) : "—"}
+                                  </span>
+                                  <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                    Opp K% {oppKPct}
+                                  </span>
+                                  <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                    Ump Δ {umpDelta}
+                                  </span>
+                                  <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                    Form Δ {formDelta}
+                                  </span>
+                                </div>
+                                <div style={{ fontSize: 10, color: "#d1d5db", fontFamily: "monospace" }}>
+                                  Model: {kProp?.predictedKs != null ? `${kProp.predictedKs} K` : "—"} vs Line: {kProp?.bookLine ?? "—"}
+                                </div>
+                              </div>
+
+                              <div style={{ minWidth: 118, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 7, flexShrink: 0 }}>
+                                <div style={{ background: `${edgeColor}15`, border: `1px solid ${edgeColor}33`, borderRadius: 10, padding: "7px 10px", textAlign: "right", minWidth: 110 }}>
+                                  <div style={{ fontSize: 10, color: leanColor, fontWeight: 800, fontFamily: "monospace", marginBottom: 2 }}>
+                                    {kProp?.lean ?? "—"} {kProp?.bookLine ?? "—"}
+                                  </div>
+                                  <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
+                                  <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>{edgeLabel}</div>
+                                </div>
+                                <button
+                                  onClick={() => !labPickLogged && logPick({
+                                    gamePk: g.gamePk,
+                                    game: `${g.away?.abbr} @ ${g.home?.abbr}`,
+                                    label: labPickLabel,
+                                    lean: kProp?.lean ?? "—",
+                                    confidence: Math.round((kProp?.leanProb ?? 0) * 100),
+                                    propType: "LAB_KPROP",
+                                    date: labPickDate,
+                                    pitcherName: pitcher?.name ?? null,
+                                    pitcherLastName: String(pitcher?.name ?? "").split(" ").pop(),
+                                    pitcherSide: side,
+                                    leanSide: kProp?.lean ?? null,
+                                    bookLine: kProp?.bookLine ?? null,
+                                    homeTeam: g.home?.abbr ?? null,
+                                    awayTeam: g.away?.abbr ?? null,
+                                  })}
+                                  title={labPickLogged ? "Already logged" : "Log this Lab pick"}
+                                  disabled={labPickLogged}
+                                  style={{
+                                    fontSize: 11,
+                                    fontWeight: 700,
+                                    background: labPickLogged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
+                                    border: `1px solid ${labPickLogged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
+                                    borderRadius: 8,
+                                    padding: "6px 10px",
+                                    cursor: labPickLogged ? "default" : "pointer",
+                                    color: labPickLogged ? "#22c55e" : "#9ca3af",
+                                    fontFamily: "monospace",
+                                    minWidth: 110,
+                                    textAlign: "center",
+                                  }}
+                                >
+                                  {labPickLogged ? "✓ Logged" : "＋ Log"}
+                                </button>
+                              </div>
+                            </div>
+                          </Card>
+                        );
+                      });
+                    return cards;
+                  }) : activeLabData.games.map((g) => {
+                    const leanIsHome = g.model?.leanSide === "home";
+                    const leanTeam = leanIsHome ? g.home : g.away;
+                    const labPickLabel = `${leanTeam?.abbr ?? "?"} ${isLabF5 ? "F5 ML" : "FG ML"}`;
+                    const labPickType = isLabF5 ? "LAB_F5ML" : "LAB_FGML";
+                    const labPickDate = activeLabData?.date ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                    const labPickLogged = propLog.some(p =>
+                      String(p.gamePk) === String(g.gamePk) &&
+                      p.label === labPickLabel &&
+                      p.propType === labPickType &&
+                      p.date === labPickDate
                     );
                     const bookLine = isLabF5
                       ? (leanIsHome ? g.odds?.f5HomeML : g.odds?.f5AwayML)
@@ -6206,37 +6647,36 @@ export default function App() {
                               <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
                               <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>Book {bookProbPct} · {bookLine ?? "—"}</div>
                             </div>
-                            {isLabF5 && (
-                              <button
-                                onClick={() => !labPickLogged && logPick({
-                                  gamePk: g.gamePk,
-                                  game: `${g.away?.abbr} @ ${g.home?.abbr}`,
-                                  label: labPickLabel,
-                                  lean: g.model?.leanSide?.toUpperCase() ?? "—",
-                                  confidence: Math.round(((g.model?.leanSide === "home" ? g.model?.homeProb : g.model?.awayProb) ?? 0) * 100),
-                                  propType: "LAB_F5ML",
-                                  homeTeam: g.home?.abbr ?? null,
-                                  awayTeam: g.away?.abbr ?? null,
-                                })}
-                                title={labPickLogged ? "Already logged" : "Log this Lab pick"}
-                                disabled={labPickLogged}
-                                style={{
-                                  fontSize: 11,
-                                  fontWeight: 700,
-                                  background: labPickLogged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
-                                  border: `1px solid ${labPickLogged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
-                                  borderRadius: 8,
-                                  padding: "6px 10px",
-                                  cursor: labPickLogged ? "default" : "pointer",
-                                  color: labPickLogged ? "#22c55e" : "#9ca3af",
-                                  fontFamily: "monospace",
-                                  minWidth: 110,
-                                  textAlign: "center",
-                                }}
-                              >
-                                {labPickLogged ? "✓ Logged" : "＋ Log"}
-                              </button>
-                            )}
+                            <button
+                              onClick={() => !labPickLogged && logPick({
+                                gamePk: g.gamePk,
+                                game: `${g.away?.abbr} @ ${g.home?.abbr}`,
+                                label: labPickLabel,
+                                lean: g.model?.leanSide?.toUpperCase() ?? "—",
+                                confidence: Math.round(((g.model?.leanSide === "home" ? g.model?.homeProb : g.model?.awayProb) ?? 0) * 100),
+                                propType: labPickType,
+                                date: labPickDate,
+                                homeTeam: g.home?.abbr ?? null,
+                                awayTeam: g.away?.abbr ?? null,
+                              })}
+                              title={labPickLogged ? "Already logged" : "Log this Lab pick"}
+                              disabled={labPickLogged}
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 700,
+                                background: labPickLogged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
+                                border: `1px solid ${labPickLogged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
+                                borderRadius: 8,
+                                padding: "6px 10px",
+                                cursor: labPickLogged ? "default" : "pointer",
+                                color: labPickLogged ? "#22c55e" : "#9ca3af",
+                                fontFamily: "monospace",
+                                minWidth: 110,
+                                textAlign: "center",
+                              }}
+                            >
+                              {labPickLogged ? "✓ Logged" : "＋ Log"}
+                            </button>
                             <div style={{ fontSize: 11, fontWeight: 800, color: edgeColor, fontFamily: "monospace" }}>{edgeLabel}</div>
                             <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", textAlign: "right" }}>
                               {g.away?.abbr} {awayProbPct} / {g.home?.abbr} {homeProbPct}
@@ -6264,13 +6704,13 @@ export default function App() {
 
                   {showLabTrackRecord && (
                     <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "10px 12px" }}>
-                      {["f5ml", "fullgame"].map((modelKey) => {
+                      {["f5ml", "fullgame", "kprop", "totals"].map((modelKey) => {
                         const summary = labCalibration?.summary?.[modelKey];
-                        const title = modelKey === "f5ml" ? "F5 ML" : "Full-Game ML";
+                        const title = modelKey === "f5ml" ? "F5 ML" : modelKey === "fullgame" ? "Full-Game ML" : modelKey === "kprop" ? "K Prop" : "Totals";
                         if (!summary) return null;
                         const sampleSmall = (summary.total ?? 0) < 20;
                         return (
-                          <div key={modelKey} style={{ marginBottom: modelKey === "f5ml" ? 12 : 0 }}>
+                          <div key={modelKey} style={{ marginBottom: modelKey !== "totals" ? 12 : 0 }}>
                             <div style={{ fontSize: 9, fontWeight: 800, color: "#f9fafb", letterSpacing: "0.05em", marginBottom: 6 }}>{title}</div>
                             <div style={{ display: "grid", gridTemplateColumns: isNarrowPhone ? "1fr 1fr" : "repeat(5, 1fr)", gap: 6, marginBottom: sampleSmall ? 6 : 0 }}>
                               <div style={{ background: "#1e2030", borderRadius: 8, padding: "7px 8px", textAlign: "center" }}>
@@ -8849,10 +9289,10 @@ export default function App() {
             picksFilter === "miss"    ? p.result === "miss" : true
           );
           const labPicks = filtered
-            .filter(p => p.propType === "LAB_F5ML")
+            .filter(p => ["LAB_F5ML", "LAB_FGML", "LAB_KPROP", "LAB_TOTALS"].includes(p.propType))
             .sort((a, b) => new Date(b.timestamp ?? 0).getTime() - new Date(a.timestamp ?? 0).getTime());
-          const standardFiltered = filtered.filter(p => p.propType !== "LAB_F5ML");
-          const hasAnyLabPicks = propLog.some(p => p.propType === "LAB_F5ML");
+          const standardFiltered = filtered.filter(p => !["LAB_F5ML", "LAB_FGML", "LAB_KPROP", "LAB_TOTALS"].includes(p.propType));
+          const hasAnyLabPicks = propLog.some(p => ["LAB_F5ML", "LAB_FGML", "LAB_KPROP", "LAB_TOTALS"].includes(p.propType));
 
           return (<>
             {/* Stats bar */}
@@ -9408,7 +9848,7 @@ export default function App() {
                         <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>{p.date} · {p.game}</div>
                         <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", marginBottom: 4 }}>{p.label}</div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                          <LeanBadge label={p.lean} positive={p.lean === "HOME"} small />
+                          <LeanBadge label={p.lean} positive={p.lean === "HOME" || p.lean === "OVER"} small />
                           <span style={{ fontSize: 9, color: "#34d399", fontFamily: "monospace", fontWeight: 700 }}>Model {p.confidence}%</span>
                         </div>
                       </div>
