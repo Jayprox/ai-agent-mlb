@@ -3144,8 +3144,14 @@ export default function App() {
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [advisorError, setAdvisorError] = useState(null);
   const [advisorMessagesLeft, setAdvisorMessagesLeft] = useState(20);
+  const [labSubTab, setLabSubTab] = useState("f5ml");
   const [labData, setLabData] = useState(null);
   const [labLoading, setLabLoading] = useState(false);
+  const [labFgData, setLabFgData] = useState(null);
+  const [labFgLoading, setLabFgLoading] = useState(false);
+  const [labCalibration, setLabCalibration] = useState(null);
+  const [labCalibrationLoading, setLabCalibrationLoading] = useState(false);
+  const [showLabTrackRecord, setShowLabTrackRecord] = useState(true);
   // Prop result tracker — persisted to localStorage
   const [propLog, setPropLog] = useState(() => {
     try { return JSON.parse(localStorage.getItem("propscout_log") || "[]"); }
@@ -3215,6 +3221,8 @@ export default function App() {
   const boardBoxFetched = useRef(new Set());                  // gamePks already fetched for Board results
   const chatBottomRef = useRef(null);
   const advisorBottomRef = useRef(null);
+  const labCalibrationRecorded = useRef(new Set());
+  const labCalibrationResolved = useRef(new Set());
 
   // Fetch weather when a game card is opened
   useEffect(() => {
@@ -3587,9 +3595,104 @@ export default function App() {
   }, [view, currentUser, hrScoutPicks, hrScoutLoading, hrScoutError]);
 
   useEffect(() => {
-    if (view !== "lab" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
+    if (view !== "lab" || labSubTab !== "f5ml" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
     fetchLabData();
-  }, [view, currentUser, isScoutUser, labData, labLoading]);
+  }, [view, labSubTab, currentUser, isScoutUser, labData, labLoading]);
+
+  useEffect(() => {
+    if (view !== "lab" || labSubTab !== "fullgame" || !currentUser || !isScoutUser || labFgData !== null || labFgLoading) return;
+    fetchLabFgData();
+  }, [view, labSubTab, currentUser, isScoutUser, labFgData, labFgLoading]);
+
+  useEffect(() => {
+    if (view !== "lab" || !currentUser || !isScoutUser || labCalibration !== null || labCalibrationLoading) return;
+    fetchLabCalibration();
+  }, [view, currentUser, isScoutUser, labCalibration, labCalibrationLoading]);
+
+  useEffect(() => {
+    if (!currentUser || !isScoutUser || !labData?.games?.length || !labData?.date) return;
+    labData.games.forEach((g) => {
+      const key = `f5ml:${labData.date}:${g.gamePk}`;
+      if (labCalibrationRecorded.current.has(key)) return;
+      if (!g.model?.leanSide || g.model?.leanEdge == null) return;
+      labCalibrationRecorded.current.add(key);
+      apiMutate("/api/model/calibration/record", "POST", {
+        gamePk: g.gamePk,
+        date: labData.date,
+        leanSide: g.model.leanSide,
+        leanProb: g.model.leanSide === "home" ? g.model.homeProb : g.model.awayProb,
+        leanEdge: g.model.leanEdge,
+        hasEdge: g.model.hasEdge === true,
+        model: "f5ml",
+      }).catch(() => {});
+    });
+  }, [currentUser, isScoutUser, labData]);
+
+  useEffect(() => {
+    if (!currentUser || !isScoutUser || !labFgData?.games?.length || !labFgData?.date) return;
+    labFgData.games.forEach((g) => {
+      const key = `fullgame:${labFgData.date}:${g.gamePk}`;
+      if (labCalibrationRecorded.current.has(key)) return;
+      if (!g.model?.leanSide || g.model?.leanEdge == null) return;
+      labCalibrationRecorded.current.add(key);
+      apiMutate("/api/model/calibration/record", "POST", {
+        gamePk: g.gamePk,
+        date: labFgData.date,
+        leanSide: g.model.leanSide,
+        leanProb: g.model.leanSide === "home" ? g.model.homeProb : g.model.awayProb,
+        leanEdge: g.model.leanEdge,
+        hasEdge: g.model.hasEdge === true,
+        model: "fullgame",
+      }).catch(() => {});
+    });
+  }, [currentUser, isScoutUser, labFgData]);
+
+  useEffect(() => {
+    if (!currentUser || !isScoutUser) return;
+    const resolveLab = (games, date, model) => {
+      if (!games?.length || !date) return;
+      games.forEach((g) => {
+        const key = `${model}:${date}:${g.gamePk}`;
+        if (labCalibrationResolved.current.has(key)) return;
+        const box = liveBoxscores[String(g.gamePk)] ?? liveBoxscores[g.gamePk];
+        if (!box) return;
+
+        let result = null;
+        if (model === "f5ml") {
+          const innings = box.linescore?.innings ?? [];
+          if (innings.length < 5) return;
+          const f5Away = innings.slice(0, 5).reduce((s, i) => s + (i?.away ?? 0), 0);
+          const f5Home = innings.slice(0, 5).reduce((s, i) => s + (i?.home ?? 0), 0);
+          if (f5Away === f5Home) result = "PUSH";
+          else result = g.model?.leanSide === "home"
+            ? (f5Home > f5Away ? "HIT" : "MISS")
+            : (f5Away > f5Home ? "HIT" : "MISS");
+        } else {
+          if (!box?.isFinal) return;
+          const awayRuns = box.linescore?.away?.runs;
+          const homeRuns = box.linescore?.home?.runs;
+          if (awayRuns == null || homeRuns == null) return;
+          if (awayRuns === homeRuns) result = "PUSH";
+          else result = g.model?.leanSide === "home"
+            ? (homeRuns > awayRuns ? "HIT" : "MISS")
+            : (awayRuns > homeRuns ? "HIT" : "MISS");
+        }
+
+        if (!result) return;
+        labCalibrationResolved.current.add(key);
+        apiMutate("/api/model/calibration/resolve", "POST", {
+          gamePk: g.gamePk,
+          model,
+          result,
+        })
+          .then(() => fetchLabCalibration())
+          .catch(() => {});
+      });
+    };
+
+    resolveLab(labData?.games, labData?.date, "f5ml");
+    resolveLab(labFgData?.games, labFgData?.date, "fullgame");
+  }, [currentUser, isScoutUser, liveBoxscores, labData, labFgData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -3762,7 +3865,7 @@ export default function App() {
 
       let anyGraded = false;
       pendingPicks.forEach(pick => {
-        const grade = computeGrade(pick, box);
+        const grade = pick.propType === "LAB_F5ML" ? computeLabF5MlGrade(pick, box) : computeGrade(pick, box);
         if (grade !== null) {
           markResult(pick.id, grade);
           anyGraded = true;
@@ -3803,7 +3906,7 @@ export default function App() {
       if (cached?.isFinal) {
         let anyGraded = false;
         picks.forEach(pick => {
-          const grade = computeGrade(pick, cached);
+          const grade = pick.propType === "LAB_F5ML" ? computeLabF5MlGrade(pick, cached) : computeGrade(pick, cached);
           if (grade !== null) { markResult(pick.id, grade); anyGraded = true; }
         });
         if (!anyGraded) histGradedGames.current.delete(gamePkStr);
@@ -3820,7 +3923,7 @@ export default function App() {
           boxscoreFetched.current.add(gamePkStr);
           let anyGraded = false;
           picks.forEach(pick => {
-            const grade = computeGrade(pick, data);
+            const grade = pick.propType === "LAB_F5ML" ? computeLabF5MlGrade(pick, data) : computeGrade(pick, data);
             if (grade !== null) { markResult(pick.id, grade); anyGraded = true; }
           });
           if (!anyGraded) histGradedGames.current.delete(gamePkStr);
@@ -4478,6 +4581,34 @@ export default function App() {
     }
   }
 
+  async function fetchLabFgData(force = false) {
+    if (labFgLoading) return;
+    if (force) setLabFgData(null);
+    setLabFgLoading(true);
+    try {
+      const data = await apiFetch("/api/model/fullgame");
+      setLabFgData(data);
+    } catch (err) {
+      console.error("Full-game Lab fetch failed:", err);
+      setLabFgData({ date: null, games: [], error: err.message ?? "Failed to load full-game Lab model" });
+    } finally {
+      setLabFgLoading(false);
+    }
+  }
+
+  async function fetchLabCalibration() {
+    if (labCalibrationLoading) return;
+    setLabCalibrationLoading(true);
+    try {
+      const data = await apiFetch("/api/model/calibration");
+      setLabCalibration(data);
+    } catch (err) {
+      console.error("Lab calibration fetch failed:", err);
+    } finally {
+      setLabCalibrationLoading(false);
+    }
+  }
+
   // ── Pick tracker helpers ──────────────────────────────────────────────────
   const logPick = (prop) => {
     const alreadyLogged = propLog.some(p =>
@@ -4499,8 +4630,8 @@ export default function App() {
       confidence:  prop.confidence,
       // Enriched schema (Trends Full)
       propType:    prop.propType   ?? null,
-      homeTeam:    game.home?.abbr ?? null,
-      awayTeam:    game.away?.abbr ?? null,
+      homeTeam:    prop.homeTeam ?? game.home?.abbr ?? null,
+      awayTeam:    prop.awayTeam ?? game.away?.abbr ?? null,
       pitcherId:   prop.pitcherId   ?? prop.id ?? pitcher?.id ?? null,
       pitcherName: prop.pitcherName ?? prop.fullName ?? prop.name ?? pitcher?.name ?? null,
       playerId:    isBatterProp ? (prop.playerId ?? prop.id ?? activeBatter?.id ?? null) : null,
@@ -4520,8 +4651,21 @@ export default function App() {
   };
   // ── Auto-grade a pick from final boxscore data ───────────────────────────
   // Returns "hit" | "miss" | null (null = can't determine from available data)
+  const computeLabF5MlGrade = (pick, box) => {
+    if (!box?.isFinal) return null;
+    const innings = box.linescore?.innings ?? [];
+    if (innings.length < 5) return null;
+    const f5Away = innings.slice(0, 5).reduce((sum, inn) => sum + (inn?.away ?? 0), 0);
+    const f5Home = innings.slice(0, 5).reduce((sum, inn) => sum + (inn?.home ?? 0), 0);
+    if (f5Away === f5Home) return null;
+    const lean = (pick.lean ?? "").toUpperCase();
+    const leanWon = lean === "HOME" ? f5Home > f5Away : lean === "AWAY" ? f5Away > f5Home : null;
+    if (leanWon == null) return null;
+    return leanWon ? "hit" : "miss";
+  };
   const computeGrade = (pick, box) => {
     if (!box?.isFinal) return null;
+    if (pick.propType === "LAB_F5ML") return computeLabF5MlGrade(pick, box);
     const label = (pick.label ?? "").toUpperCase();
     const lean  = (pick.lean  ?? "").toUpperCase();
     const innings   = box.linescore?.innings ?? [];
@@ -5849,157 +5993,320 @@ export default function App() {
           </div>
         )}
 
-        {view === "lab" && isScoutUser && (
-          <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🔬 LAB</div>
-                  <TierBadge tier="predictive" />
+        {view === "lab" && isScoutUser && (() => {
+          const isLabF5 = labSubTab === "f5ml";
+          const activeLabData = isLabF5 ? labData : labFgData;
+          const activeLabLoading = isLabF5 ? labLoading : labFgLoading;
+          const refreshLab = () => (isLabF5 ? fetchLabData(true) : fetchLabFgData(true));
+
+          return (
+            <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🔬 LAB</div>
+                    <TierBadge tier="predictive" />
+                  </div>
+                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{isLabF5 ? "F5 Moneyline" : "Full-Game Moneyline"} · Logistic model · Pre-calibrated coefficients · Experimental</div>
                 </div>
-                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>F5 Moneyline · Logistic model · Pre-calibrated coefficients · Experimental</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
-                  {labData?.date ?? "today"}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                  <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
+                    {activeLabData?.date ?? "today"}
+                  </div>
+                  <button
+                    onClick={refreshLab}
+                    disabled={activeLabLoading}
+                    style={{
+                      background: activeLabLoading ? "rgba(255,255,255,0.04)" : "rgba(52,211,153,0.15)",
+                      border: `1px solid ${activeLabLoading ? "#2d3148" : "rgba(52,211,153,0.35)"}`,
+                      borderRadius: 8,
+                      padding: "6px 10px",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      color: activeLabLoading ? "#4b5563" : "#34d399",
+                      cursor: activeLabLoading ? "default" : "pointer",
+                      fontFamily: "monospace",
+                    }}
+                  >
+                    ↺ Refresh
+                  </button>
                 </div>
-                <button
-                  onClick={() => fetchLabData(true)}
-                  disabled={labLoading}
-                  style={{
-                    background: labLoading ? "rgba(255,255,255,0.04)" : "rgba(52,211,153,0.15)",
-                    border: `1px solid ${labLoading ? "#2d3148" : "rgba(52,211,153,0.35)"}`,
-                    borderRadius: 8,
-                    padding: "6px 10px",
-                    fontSize: 10,
-                    fontWeight: 700,
-                    color: labLoading ? "#4b5563" : "#34d399",
-                    cursor: labLoading ? "default" : "pointer",
-                    fontFamily: "monospace",
-                  }}
-                >
-                  ↺ Refresh
-                </button>
               </div>
-            </div>
 
-            <div style={{ background: "rgba(52,211,153,0.06)", border: "1px solid rgba(52,211,153,0.2)", borderRadius: 10, padding: "10px 12px" }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: "#34d399", marginBottom: 3 }}>⚗ EXPERIMENTAL MODEL</div>
-              <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>
-                Win probabilities generated by a pre-calibrated logistic regression using SP quality, command, form, umpire, and home field.
-                Not a trained ML system. Not financial advice. Edge = model prob minus book implied prob.
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["f5ml", "F5 ML"], ["fullgame", "Full-Game ML"]].map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setLabSubTab(key)}
+                    style={{
+                      background: labSubTab === key ? "rgba(52,211,153,0.18)" : "#161827",
+                      border: `1px solid ${labSubTab === key ? "rgba(52,211,153,0.45)" : "#1f2437"}`,
+                      borderRadius: 8,
+                      padding: "6px 10px",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      color: labSubTab === key ? "#34d399" : "#9ca3af",
+                      cursor: "pointer",
+                      fontFamily: "monospace",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
-            </div>
 
-            {labLoading && !labData && (
-              <Card>
-                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>Running F5 predictive model across today&apos;s slate…</div>
-              </Card>
-            )}
-
-            {labData?.error && (
-              <div style={{ background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.30)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
-                {labData.error}
+              <div style={{ background: "rgba(52,211,153,0.06)", border: "1px solid rgba(52,211,153,0.2)", borderRadius: 10, padding: "10px 12px" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#34d399", marginBottom: 3 }}>⚗ EXPERIMENTAL MODEL</div>
+                <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>
+                  {isLabF5
+                    ? "Win probabilities generated by a pre-calibrated logistic regression using SP quality, command, form, umpire, and home field. Not a trained ML system. Not financial advice. Edge = model prob minus book implied prob."
+                    : "Full-Game Moneyline · Logistic model · Adds bullpen ERA differential vs F5 model. Not a trained ML system. Not financial advice. Edge = model prob minus book implied prob."}
+                </div>
               </div>
-            )}
 
-            {!labLoading && labData && (labData.games?.length ?? 0) === 0 && !labData.error && (
-              <Card>
-                <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>No F5 model games available yet.</div>
-              </Card>
-            )}
+              {activeLabLoading && !activeLabData && (
+                <Card>
+                  <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>Running {isLabF5 ? "F5" : "full-game"} predictive model across today&apos;s slate…</div>
+                </Card>
+              )}
 
-            {labData?.games?.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {labData.games.map((g) => {
-                  const leanIsHome = g.model?.leanSide === "home";
-                  const leanTeam = leanIsHome ? g.home : g.away;
-                  const leanPitcher = leanIsHome ? g.homePitcher : g.awayPitcher;
-                  const bookLine = leanIsHome ? g.odds?.f5HomeML : g.odds?.f5AwayML;
-                  const modelProb = leanIsHome ? g.model?.homeProb : g.model?.awayProb;
-                  const impliedProb = leanIsHome ? g.model?.homeImplied : g.model?.awayImplied;
-                  const leanEdge = g.model?.leanEdge ?? 0;
-                  const edgeColor = g.model?.hasEdge ? "#34d399" : leanEdge >= 0 ? "#fbbf24" : "#6b7280";
-                  const homeProbPct = g.model?.homeProb != null ? `${Math.round(g.model.homeProb * 100)}%` : "—";
-                  const awayProbPct = g.model?.awayProb != null ? `${Math.round(g.model.awayProb * 100)}%` : "—";
-                  const modelProbPct = modelProb != null ? `${Math.round(modelProb * 100)}%` : "—";
-                  const bookProbPct = impliedProb != null ? `${Math.round(impliedProb * 100)}%` : "—";
-                  const edgeLabel = `${leanEdge >= 0 ? "+" : ""}${(leanEdge * 100).toFixed(1)}pp`;
-                  return (
-                    <Card key={g.gamePk} style={{ padding: "12px 14px" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-                        <div style={{ minWidth: 0, flex: 1 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 4 }}>
-                            <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{g.away?.abbr} @ {g.home?.abbr}</div>
-                            {g.model?.hasEdge && (
-                              <span style={{ background: "rgba(52,211,153,0.14)", border: "1px solid rgba(52,211,153,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#34d399", fontFamily: "monospace", letterSpacing: "0.05em" }}>
-                                EDGE
-                              </span>
-                            )}
-                            {g.dataWarning && (
-                              <span style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.30)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#fbbf24", fontFamily: "monospace" }}>
-                                PARTIAL DATA
-                              </span>
-                            )}
-                          </div>
-                          <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 7 }}>
-                            {g.awayPitcher?.name} vs {g.homePitcher?.name}
-                          </div>
-                          <div style={{ display: "grid", gridTemplateColumns: isNarrowPhone ? "1fr" : "1fr 1fr", gap: 8, marginBottom: 8 }}>
-                            <div style={{ background: "#1a1c2e", border: "1px solid #1f2437", borderRadius: 10, padding: "8px 10px" }}>
-                              <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{g.away?.abbr} starter</div>
-                              <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", marginBottom: 3 }}>{g.awayPitcher?.name}</div>
-                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 9, fontFamily: "monospace" }}>
-                                <span style={{ color: "#f59e0b" }}>ERA {g.awayPitcher?.era != null ? g.awayPitcher.era.toFixed(2) : "—"}</span>
-                                <span style={{ color: "#22c55e" }}>WHIP {g.awayPitcher?.whip != null ? g.awayPitcher.whip.toFixed(2) : "—"}</span>
-                                <span style={{ color: "#9ca3af" }}>L3 ERA {g.awayPitcher?.lastThreeEra != null ? g.awayPitcher.lastThreeEra.toFixed(2) : "—"}</span>
+              {activeLabData?.error && (
+                <div style={{ background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.30)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+                  {activeLabData.error}
+                </div>
+              )}
+
+              {!activeLabLoading && activeLabData && (activeLabData.games?.length ?? 0) === 0 && !activeLabData.error && (
+                <Card>
+                  <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>No {isLabF5 ? "F5" : "full-game"} model games available yet.</div>
+                </Card>
+              )}
+
+              {activeLabData?.games?.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {activeLabData.games.map((g) => {
+                    const leanIsHome = g.model?.leanSide === "home";
+                    const leanTeam = leanIsHome ? g.home : g.away;
+                    const labPickLabel = `${leanTeam?.abbr ?? "?"} F5 ML`;
+                    const labPickLogged = propLog.some(p =>
+                      String(p.gamePk) === String(g.gamePk) &&
+                      p.label === labPickLabel &&
+                      p.propType === "LAB_F5ML" &&
+                      p.date === new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
+                    );
+                    const bookLine = isLabF5
+                      ? (leanIsHome ? g.odds?.f5HomeML : g.odds?.f5AwayML)
+                      : (leanIsHome ? g.odds?.homeML : g.odds?.awayML);
+                    const modelProb = leanIsHome ? g.model?.homeProb : g.model?.awayProb;
+                    const impliedProb = leanIsHome ? g.model?.homeImplied : g.model?.awayImplied;
+                    const leanEdge = g.model?.leanEdge ?? 0;
+                    const edgeColor = g.model?.hasEdge ? "#34d399" : leanEdge >= 0 ? "#fbbf24" : "#6b7280";
+                    const labBox = liveBoxscores[String(g.gamePk)];
+                    const f5Innings = Array.isArray(labBox?.linescore?.innings) ? labBox.linescore.innings.slice(0, 5) : [];
+                    const hasResolvedF5 = f5Innings.length >= 5;
+                    const f5Away = hasResolvedF5 ? f5Innings.reduce((sum, inn) => sum + (inn?.away ?? 0), 0) : null;
+                    const f5Home = hasResolvedF5 ? f5Innings.reduce((sum, inn) => sum + (inn?.home ?? 0), 0) : null;
+                    const finalAway = labBox?.linescore?.away?.runs ?? null;
+                    const finalHome = labBox?.linescore?.home?.runs ?? null;
+                    const labHit = isLabF5
+                      ? (!hasResolvedF5 || f5Away == null || f5Home == null || f5Away === f5Home
+                          ? null
+                          : g.model?.leanSide === "home"
+                            ? f5Home > f5Away
+                            : g.model?.leanSide === "away"
+                              ? f5Away > f5Home
+                              : null)
+                      : (labBox?.isFinal !== true || finalAway == null || finalHome == null || finalAway === finalHome
+                          ? null
+                          : g.model?.leanSide === "home"
+                            ? finalHome > finalAway
+                            : g.model?.leanSide === "away"
+                              ? finalAway > finalHome
+                              : null);
+                    const homeProbPct = g.model?.homeProb != null ? `${Math.round(g.model.homeProb * 100)}%` : "—";
+                    const awayProbPct = g.model?.awayProb != null ? `${Math.round(g.model.awayProb * 100)}%` : "—";
+                    const modelProbPct = modelProb != null ? `${Math.round(modelProb * 100)}%` : "—";
+                    const bookProbPct = impliedProb != null ? `${Math.round(impliedProb * 100)}%` : "—";
+                    const edgeLabel = `${leanEdge >= 0 ? "+" : ""}${(leanEdge * 100).toFixed(1)}pp`;
+
+                    return (
+                      <Card key={g.gamePk} style={{ padding: "12px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 4 }}>
+                              <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{g.away?.abbr} @ {g.home?.abbr}</div>
+                              {g.model?.hasEdge && (
+                                <span style={{ background: "rgba(52,211,153,0.14)", border: "1px solid rgba(52,211,153,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#34d399", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                  EDGE
+                                </span>
+                              )}
+                              {labHit === true && (
+                                <span style={{ background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#22c55e", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                  ✓ HIT
+                                </span>
+                              )}
+                              {labHit === false && (
+                                <span style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                  ✗ MISS
+                                </span>
+                              )}
+                              {g.dataWarning && (
+                                <span style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.30)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#fbbf24", fontFamily: "monospace" }}>
+                                  PARTIAL DATA
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 7 }}>
+                              {g.awayPitcher?.name} vs {g.homePitcher?.name}
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: isNarrowPhone ? "1fr" : "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                              <div style={{ background: "#1a1c2e", border: "1px solid #1f2437", borderRadius: 10, padding: "8px 10px" }}>
+                                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{g.away?.abbr} starter</div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", marginBottom: 3 }}>{g.awayPitcher?.name}</div>
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 9, fontFamily: "monospace" }}>
+                                  <span style={{ color: "#f59e0b" }}>ERA {g.awayPitcher?.era != null ? g.awayPitcher.era.toFixed(2) : "—"}</span>
+                                  <span style={{ color: "#22c55e" }}>WHIP {g.awayPitcher?.whip != null ? g.awayPitcher.whip.toFixed(2) : "—"}</span>
+                                  <span style={{ color: "#9ca3af" }}>L3 ERA {g.awayPitcher?.lastThreeEra != null ? g.awayPitcher.lastThreeEra.toFixed(2) : "—"}</span>
+                                </div>
+                              </div>
+                              <div style={{ background: "#1a1c2e", border: "1px solid #1f2437", borderRadius: 10, padding: "8px 10px" }}>
+                                <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{g.home?.abbr} starter</div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", marginBottom: 3 }}>{g.homePitcher?.name}</div>
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 9, fontFamily: "monospace" }}>
+                                  <span style={{ color: "#f59e0b" }}>ERA {g.homePitcher?.era != null ? g.homePitcher.era.toFixed(2) : "—"}</span>
+                                  <span style={{ color: "#22c55e" }}>WHIP {g.homePitcher?.whip != null ? g.homePitcher.whip.toFixed(2) : "—"}</span>
+                                  <span style={{ color: "#9ca3af" }}>L3 ERA {g.homePitcher?.lastThreeEra != null ? g.homePitcher.lastThreeEra.toFixed(2) : "—"}</span>
+                                </div>
                               </div>
                             </div>
-                            <div style={{ background: "#1a1c2e", border: "1px solid #1f2437", borderRadius: 10, padding: "8px 10px" }}>
-                              <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{g.home?.abbr} starter</div>
-                              <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", marginBottom: 3 }}>{g.homePitcher?.name}</div>
-                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 9, fontFamily: "monospace" }}>
-                                <span style={{ color: "#f59e0b" }}>ERA {g.homePitcher?.era != null ? g.homePitcher.era.toFixed(2) : "—"}</span>
-                                <span style={{ color: "#22c55e" }}>WHIP {g.homePitcher?.whip != null ? g.homePitcher.whip.toFixed(2) : "—"}</span>
-                                <span style={{ color: "#9ca3af" }}>L3 ERA {g.homePitcher?.lastThreeEra != null ? g.homePitcher.lastThreeEra.toFixed(2) : "—"}</span>
-                              </div>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                Ump {g.umpire?.name ?? "TBD"}
+                              </span>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                K tendency {g.umpire?.kTendency != null ? `${g.umpire.kTendency >= 0 ? "+" : ""}${g.umpire.kTendency.toFixed(2)}` : "—"}
+                              </span>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                ERA Δ {g.model?.features?.eraDiff != null ? `${g.model.features.eraDiff >= 0 ? "+" : ""}${g.model.features.eraDiff.toFixed(2)}` : "—"}
+                              </span>
+                              <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                WHIP Δ {g.model?.features?.whipDiff != null ? `${g.model.features.whipDiff >= 0 ? "+" : ""}${g.model.features.whipDiff.toFixed(2)}` : "—"}
+                              </span>
+                              {!isLabF5 && (
+                                <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                                  BP ERA Δ {g.model?.features?.bullpenEraDiff != null ? `${g.model.features.bullpenEraDiff >= 0 ? "+" : ""}${g.model.features.bullpenEraDiff.toFixed(2)}` : "—"}
+                                </span>
+                              )}
                             </div>
                           </div>
-                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-                            <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
-                              Ump {g.umpire?.name ?? "TBD"}
-                            </span>
-                            <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
-                              K tendency {g.umpire?.kTendency != null ? `${g.umpire.kTendency >= 0 ? "+" : ""}${g.umpire.kTendency.toFixed(2)}` : "—"}
-                            </span>
-                            <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
-                              ERA Δ {g.model?.features?.eraDiff != null ? `${g.model.features.eraDiff >= 0 ? "+" : ""}${g.model.features.eraDiff.toFixed(2)}` : "—"}
-                            </span>
-                            <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
-                              WHIP Δ {g.model?.features?.whipDiff != null ? `${g.model.features.whipDiff >= 0 ? "+" : ""}${g.model.features.whipDiff.toFixed(2)}` : "—"}
-                            </span>
-                          </div>
-                        </div>
 
-                        <div style={{ minWidth: 118, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 7, flexShrink: 0 }}>
-                          <div style={{ background: `${edgeColor}15`, border: `1px solid ${edgeColor}33`, borderRadius: 10, padding: "7px 10px", textAlign: "right", minWidth: 110 }}>
-                            <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace", marginBottom: 2 }}>{leanTeam?.abbr} F5 ML</div>
-                            <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
-                            <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>Book {bookProbPct} · {bookLine ?? "—"}</div>
-                          </div>
-                          <div style={{ fontSize: 11, fontWeight: 800, color: edgeColor, fontFamily: "monospace" }}>{edgeLabel}</div>
-                          <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", textAlign: "right" }}>
-                            {g.away?.abbr} {awayProbPct} / {g.home?.abbr} {homeProbPct}
+                          <div style={{ minWidth: 118, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 7, flexShrink: 0 }}>
+                            <div style={{ background: `${edgeColor}15`, border: `1px solid ${edgeColor}33`, borderRadius: 10, padding: "7px 10px", textAlign: "right", minWidth: 110 }}>
+                              <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace", marginBottom: 2 }}>{leanTeam?.abbr} {isLabF5 ? "F5 ML" : "ML"}</div>
+                              <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
+                              <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>Book {bookProbPct} · {bookLine ?? "—"}</div>
+                            </div>
+                            {isLabF5 && (
+                              <button
+                                onClick={() => !labPickLogged && logPick({
+                                  gamePk: g.gamePk,
+                                  game: `${g.away?.abbr} @ ${g.home?.abbr}`,
+                                  label: labPickLabel,
+                                  lean: g.model?.leanSide?.toUpperCase() ?? "—",
+                                  confidence: Math.round(((g.model?.leanSide === "home" ? g.model?.homeProb : g.model?.awayProb) ?? 0) * 100),
+                                  propType: "LAB_F5ML",
+                                  homeTeam: g.home?.abbr ?? null,
+                                  awayTeam: g.away?.abbr ?? null,
+                                })}
+                                title={labPickLogged ? "Already logged" : "Log this Lab pick"}
+                                disabled={labPickLogged}
+                                style={{
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                  background: labPickLogged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
+                                  border: `1px solid ${labPickLogged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
+                                  borderRadius: 8,
+                                  padding: "6px 10px",
+                                  cursor: labPickLogged ? "default" : "pointer",
+                                  color: labPickLogged ? "#22c55e" : "#9ca3af",
+                                  fontFamily: "monospace",
+                                  minWidth: 110,
+                                  textAlign: "center",
+                                }}
+                              >
+                                {labPickLogged ? "✓ Logged" : "＋ Log"}
+                              </button>
+                            )}
+                            <div style={{ fontSize: 11, fontWeight: 800, color: edgeColor, fontFamily: "monospace" }}>{edgeLabel}</div>
+                            <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", textAlign: "right" }}>
+                              {g.away?.abbr} {awayProbPct} / {g.home?.abbr} {homeProbPct}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </Card>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
+                      </Card>
+                    );
+                  })}
+                </div>
+              )}
+
+              {(labCalibration || labCalibrationLoading) && (
+                <div>
+                  <button
+                    onClick={() => setShowLabTrackRecord((s) => !s)}
+                    style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#161827", border: "1px solid #1f2437", borderRadius: showLabTrackRecord ? "8px 8px 0 0" : 8, padding: "8px 12px", cursor: "pointer" }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 10, fontWeight: 800, color: "#34d399", textTransform: "uppercase", letterSpacing: "0.05em" }}>📊 Track Record</span>
+                      {labCalibrationLoading && <span style={{ fontSize: 8, color: "#6b7280" }}>loading…</span>}
+                    </div>
+                    <span style={{ fontSize: 9, color: "#4b5563" }}>{showLabTrackRecord ? "▲ hide" : "▼ show"}</span>
+                  </button>
+
+                  {showLabTrackRecord && (
+                    <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "10px 12px" }}>
+                      {["f5ml", "fullgame"].map((modelKey) => {
+                        const summary = labCalibration?.summary?.[modelKey];
+                        const title = modelKey === "f5ml" ? "F5 ML" : "Full-Game ML";
+                        if (!summary) return null;
+                        const sampleSmall = (summary.total ?? 0) < 20;
+                        return (
+                          <div key={modelKey} style={{ marginBottom: modelKey === "f5ml" ? 12 : 0 }}>
+                            <div style={{ fontSize: 9, fontWeight: 800, color: "#f9fafb", letterSpacing: "0.05em", marginBottom: 6 }}>{title}</div>
+                            <div style={{ display: "grid", gridTemplateColumns: isNarrowPhone ? "1fr 1fr" : "repeat(5, 1fr)", gap: 6, marginBottom: sampleSmall ? 6 : 0 }}>
+                              <div style={{ background: "#1e2030", borderRadius: 8, padding: "7px 8px", textAlign: "center" }}>
+                                <div style={{ fontSize: 12, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{summary.hits}-{summary.misses} {summary.pushes ? `(${summary.pushes})` : ""}</div>
+                                <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>Record</div>
+                              </div>
+                              <div style={{ background: "#1e2030", borderRadius: 8, padding: "7px 8px", textAlign: "center" }}>
+                                <div style={{ fontSize: 12, fontWeight: 800, color: "#34d399", fontFamily: "monospace" }}>{summary.accuracy != null ? `${summary.accuracy}%` : "—"}</div>
+                                <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>Accuracy</div>
+                              </div>
+                              <div style={{ background: "#1e2030", borderRadius: 8, padding: "7px 8px", textAlign: "center" }} title="Closer to 0 is better; 0.25 = coin flip">
+                                <div style={{ fontSize: 12, fontWeight: 800, color: "#fbbf24", fontFamily: "monospace" }}>{summary.brierScore != null ? summary.brierScore.toFixed(2) : "—"}</div>
+                                <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>Brier</div>
+                              </div>
+                              <div style={{ background: "#1e2030", borderRadius: 8, padding: "7px 8px", textAlign: "center" }}>
+                                <div style={{ fontSize: 12, fontWeight: 800, color: "#a78bfa", fontFamily: "monospace" }}>{summary.edgeHits ?? 0}-{(summary.edgeTotal ?? 0) - (summary.edgeHits ?? 0)}</div>
+                                <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>Edge</div>
+                              </div>
+                              <div style={{ background: "#1e2030", borderRadius: 8, padding: "7px 8px", textAlign: "center" }}>
+                                <div style={{ fontSize: 12, fontWeight: 800, color: "#38bdf8", fontFamily: "monospace" }}>{summary.edgeAccuracy != null ? `${summary.edgeAccuracy}%` : "—"}</div>
+                                <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>Edge Acc.</div>
+                              </div>
+                            </div>
+                            {sampleSmall && (
+                              <div style={{ fontSize: 9, color: "#6b7280" }}>Small sample — calibration improves over time.</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {view === "scout" && isScoutUser && (
           <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
@@ -8541,6 +8848,11 @@ export default function App() {
             picksFilter === "hit"     ? p.result === "hit" :
             picksFilter === "miss"    ? p.result === "miss" : true
           );
+          const labPicks = filtered
+            .filter(p => p.propType === "LAB_F5ML")
+            .sort((a, b) => new Date(b.timestamp ?? 0).getTime() - new Date(a.timestamp ?? 0).getTime());
+          const standardFiltered = filtered.filter(p => p.propType !== "LAB_F5ML");
+          const hasAnyLabPicks = propLog.some(p => p.propType === "LAB_F5ML");
 
           return (<>
             {/* Stats bar */}
@@ -9077,6 +9389,46 @@ export default function App() {
               ))}
             </div>
 
+            {/* Lab Picks */}
+            {hasAnyLabPicks && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 10, fontWeight: 800, color: "#34d399", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 8 }}>
+                  🔬 Lab Picks
+                </div>
+                {labPicks.length === 0 ? (
+                  <Card>
+                    <div style={{ textAlign: "center", padding: "16px 0", fontSize: 10, color: "#4b5563" }}>
+                      No Lab picks match the current filter.
+                    </div>
+                  </Card>
+                ) : labPicks.map(p => (
+                  <Card key={p.id} style={{ marginBottom: 8, borderColor: p.result === "hit" ? "rgba(34,197,94,0.25)" : p.result === "miss" ? "rgba(239,68,68,0.25)" : "rgba(52,211,153,0.22)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>{p.date} · {p.game}</div>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", marginBottom: 4 }}>{p.label}</div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                          <LeanBadge label={p.lean} positive={p.lean === "HOME"} small />
+                          <span style={{ fontSize: 9, color: "#34d399", fontFamily: "monospace", fontWeight: 700 }}>Model {p.confidence}%</span>
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                        {p.result === "hit" && (
+                          <span style={{ fontSize: 9, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>✓ HIT</span>
+                        )}
+                        {p.result === "miss" && (
+                          <span style={{ fontSize: 9, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>✗ MISS</span>
+                        )}
+                        {p.result === null && (
+                          <span style={{ fontSize: 9, fontWeight: 800, color: "#fbbf24", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>Pending</span>
+                        )}
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            )}
+
             {/* Pick cards */}
             {filtered.length === 0 ? (
               <Card>
@@ -9086,7 +9438,7 @@ export default function App() {
                   <div style={{ fontSize: 10, color: "#4b5563", lineHeight: 1.5 }}>Go to a game → Props tab → tap ＋ on any prop to log it here.</div>
                 </div>
               </Card>
-            ) : filtered.map(p => (
+            ) : standardFiltered.length === 0 ? null : standardFiltered.map(p => (
               <Card key={p.id} style={{ borderColor: p.result === "hit" ? "rgba(34,197,94,0.25)" : p.result === "miss" ? "rgba(239,68,68,0.25)" : "#1f2437" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
                   <div>

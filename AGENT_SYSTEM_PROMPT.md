@@ -10909,3 +10909,652 @@ const modelProbPct = modelProb != null ? `${Math.round(modelProb * 100)}%` : "�
 ```
 
 This is the large probability figure displayed on each game card. Without this fix the field renders blank. All other logic was correct.
+
+### Follow-up Fixes Applied After Initial Task 64 Ship
+
+Two additional follow-ups were applied after local testing:
+
+1. **Frontend TDZ / boot crash fix**
+   - The Lab auto-load effect referenced `isScoutUser` before that variable was declared inside `App()`.
+   - This caused:
+     - `ReferenceError: can't access lexical declaration 'isScoutUser' before initialization`
+     - blank-screen app boot in local dev
+   - Fix:
+     - moved `SCOUT_ALLOWLIST`, `scoutIdentity`, and `isScoutUser` up near the auth/user state block
+     - removed the later duplicate declaration
+   - Result:
+     - Lab still remains double-gated
+     - app boots normally again
+
+2. **Odds API fallback for unsupported F5 markets**
+   - Some local/dev The Odds API environments reject:
+     - `h2h_h1`
+     - `spreads_h1`
+     - `totals_h1`
+   - Previously this caused the entire `/api/odds` request to fail with `502`, which also caused the Lab fetch to fail.
+   - Fix in `backend/routes/odds.js`:
+     - try full market set first:
+       - `h2h,totals,spreads,totals_h1,h2h_h1,spreads_h1`
+     - if upstream specifically rejects the H1 markets, automatically retry with fallback:
+       - `h2h,totals,spreads`
+     - set `partialMarkets: true` on the returned odds payload in this fallback case
+   - Result:
+     - local app no longer crashes or hard-fails when F5 odds markets are unsupported
+     - standard odds continue to load
+     - F5 book lines may be `null` locally, but Lab still loads and degrades gracefully
+
+### Verification (Follow-up)
+
+- `node --check backend/routes/odds.js` ✓
+- `npm run build` ✓
+
+---
+
+## SESSION 64 — CW: CODEX TASKS 65–68 Specced (Lab Extensions)
+
+Four additive Lab tasks specced and queued for Codex. All are `prop-scout-v7.jsx`-only except where noted. No changes to Board, Model Picks, Scout, HR Scout, or Advisor.
+
+---
+
+## CODEX TASK 65 — Lab: Auto-grade HIT/MISS on F5 ML Cards ✅ COMPLETED
+
+**LOE:** XS
+**Files:** `prop-scout-v7.jsx` only
+**Priority:** High — do first
+
+### Background
+
+The Lab cards currently have no outcome feedback. The Board already has a working F5 grading block (lines ~9274–9293) that sums innings 1–5 from `liveBoxscores[gamePk].linescore.innings`. The Lab should use the same logic to show HIT/MISS badges on each game card once the F5 result is known.
+
+### What to build
+
+Inside the `labData.games.map((g) => { ... })` card render loop (around line 5913), add these derived values per card:
+
+```js
+const labBox       = liveBoxscores[g.gamePk];
+const labInnings   = labBox?.linescore?.innings ?? [];
+const f5Away       = labInnings.length >= 5
+  ? labInnings.slice(0, 5).reduce((s, i) => s + (i?.away ?? 0), 0)
+  : null;
+const f5Home       = labInnings.length >= 5
+  ? labInnings.slice(0, 5).reduce((s, i) => s + (i?.home ?? 0), 0)
+  : null;
+
+// null = not yet gradeable (game not deep enough or data missing)
+// Ties push → null (no grade)
+const labHit =
+  f5Away === null || f5Home === null || f5Away === f5Home
+    ? null
+    : g.model?.leanSide === "home"
+      ? f5Home > f5Away
+      : f5Away > f5Home;
+```
+
+Render a badge next to the `EDGE` badge in the card header row:
+
+```jsx
+{labHit === true  && <span style={{ background: "rgba(34,197,94,0.14)",  border: "1px solid rgba(34,197,94,0.35)",  borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#22c55e",  fontFamily: "monospace" }}>✓ HIT</span>}
+{labHit === false && <span style={{ background: "rgba(239,68,68,0.14)",  border: "1px solid rgba(239,68,68,0.35)",  borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#ef4444",  fontFamily: "monospace" }}>✗ MISS</span>}
+```
+
+### Scope
+
+- No backend changes
+- No pick log changes
+- No new state needed — `liveBoxscores` already populated
+
+### Verification
+
+- `npm run build` must pass
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 65 handoff note
+
+## HANDOFF NOTE — 2026-05-02 — CODEX TASK 65 COMPLETED (Lab F5 Auto-Grading Badges)
+
+Added auto-grade HIT/MISS badges to the `🔬 Lab` F5 Moneyline cards using existing frontend live boxscore state only.
+
+### Frontend
+
+- File changed:
+  - `prop-scout-v7.jsx`
+- Inside the Lab view card render loop (`labData.games.map(...)`):
+  - derive `f5Away` and `f5Home` by summing the first 5 innings from:
+    - `liveBoxscores[String(g.gamePk)]?.linescore?.innings`
+  - require at least `5` resolved innings
+  - ties return `null` / no badge
+  - compare against `g.model.leanSide`
+    - home lean hits when `f5Home > f5Away`
+    - away lean hits when `f5Away > f5Home`
+- Render behavior:
+  - `✓ HIT` badge when the Lab lean won through 5 innings
+  - `✗ MISS` badge when the Lab lean lost through 5 innings
+  - no badge when:
+    - fewer than 5 innings are resolved
+    - F5 score is tied
+    - boxscore is unavailable
+
+### Scope
+
+- No backend changes
+- No logging / Picks integration
+- Reuses existing live boxscore state already present in the app
+
+### Verification
+
+- `npm run build` ✓
+
+---
+
+## CODEX TASK 66 — Lab: Pick Logging for F5 ML Model Picks ✅ COMPLETED
+
+**LOE:** Small-Medium
+**Files:** `prop-scout-v7.jsx` only
+**Priority:** High — do after Task 65
+
+### Background
+
+The Lab currently has no way to save a play for tracking. This task adds a Log button to each Lab card (using the existing `logPick` infrastructure) and a "Lab Picks" section in the Picks tab filtered to `propType === "LAB_F5ML"`. Auto-grading is wired to the same F5 innings-sum logic.
+
+### Part A — Log button on Lab cards
+
+In the Lab card render, add a Log button in the right-side column below the model probability display. Use the existing `logPick` function:
+
+```js
+const labPickLabel  = `${leanTeam?.abbr ?? "?"} F5 ML`;
+const labPickLogged = propLog.some(p =>
+  String(p.gamePk) === String(g.gamePk) &&
+  p.label === labPickLabel &&
+  p.propType === "LAB_F5ML" &&
+  p.date === new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })
+);
+
+// Call logPick with:
+logPick({
+  gamePk:      g.gamePk,
+  game:        `${g.away?.abbr} @ ${g.home?.abbr}`,
+  label:       labPickLabel,
+  lean:        g.model?.leanSide?.toUpperCase() ?? "—",
+  confidence:  Math.round((g.model?.leanSide === "home" ? g.model?.homeProb : g.model?.awayProb) * 100),
+  propType:    "LAB_F5ML",
+  homeTeam:    g.home?.abbr ?? null,
+  awayTeam:    g.away?.abbr ?? null,
+  // No pitcherId/playerName — game-level prop
+});
+```
+
+Button: disabled + muted when already logged. Style consistent with other Log buttons in the app.
+
+Note: `logPick` uses `selectedId` as a fallback for `gamePk`. Since Lab cards are not in a selected-game context, always pass `gamePk: g.gamePk` explicitly.
+
+### Part B — Auto-grading for LAB_F5ML picks
+
+In the existing auto-grade `useEffect` (around line 3745), add a case for `propType === "LAB_F5ML"`:
+
+```js
+if (p.propType === "LAB_F5ML") {
+  const box     = liveBoxscores[gamePk];
+  const innings = box?.linescore?.innings ?? [];
+  if (innings.length < 5) return; // not yet gradeable
+  const f5Away = innings.slice(0, 5).reduce((s, i) => s + (i?.away ?? 0), 0);
+  const f5Home = innings.slice(0, 5).reduce((s, i) => s + (i?.home ?? 0), 0);
+  if (f5Away === f5Home) return; // push — no grade
+  const leanWon = p.lean === "HOME" ? f5Home > f5Away : f5Away > f5Home;
+  return leanWon ? "HIT" : "MISS";
+}
+```
+
+Also add `"LAB_F5ML"` to the historical pending picks resolution `useEffect` (around line 3784) using the same logic via `liveBoxscores`.
+
+### Part C — Lab Picks section in Picks tab
+
+In the Picks tab view, add a "🔬 Lab Picks" section above or below the existing pick sections. Show only picks where `p.propType === "LAB_F5ML"`, sorted by timestamp descending. Each row shows: game, lean team, model prob (stored as `confidence`), date, and result badge (HIT / MISS / pending). Keep it minimal — no parlay slip, no sync button for this section in v1.
+
+### Scope
+
+- No backend changes
+- No new state — uses existing `propLog` and `setPropLog`
+- Lab Picks section is only visible when at least one `LAB_F5ML` pick exists
+
+### Verification
+
+- `npm run build` must pass
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 66 handoff note
+
+---
+
+## CODEX TASK 67 — Lab: Full-Game Moneyline Model Sub-Tab ✅ COMPLETED
+
+**LOE:** Medium
+**Files:** `backend/routes/modelF5.js`, `prop-scout-v7.jsx`
+**Priority:** Medium — do after Task 66
+
+### Background
+
+The Lab currently only models the F5 Moneyline. This task adds a Full-Game ML model as a second sub-tab inside the Lab view. Same architecture as the F5 model, with slightly different signals: home field is weighted higher, bullpen ERA differential is added, and the form coefficient is reduced (form matters less over 9 innings).
+
+### Part A — Backend: add full-game ML endpoint to `backend/routes/modelF5.js`
+
+Add a new route: `GET /api/model/fullgame`
+
+**Coefficients** — hard-code as `COEFF_FG`:
+
+```js
+const COEFF_FG = {
+  INTERCEPT:        -0.10,  // home wins full game ~53% historically
+  ERA_DIFF:          0.14,  // per run ERA advantage (both SPs)
+  WHIP_DIFF:         0.17,
+  HOME_FIELD:        0.16,  // stronger than F5 (0.12)
+  UMP_K_TENDENCY:    0.04,  // less leverage over 9 innings
+  FORM_DIFF:         0.07,  // regression to mean is stronger over full game
+  BULLPEN_ERA_DIFF:  0.13,  // away bullpen ERA - home bullpen ERA; NEW signal
+};
+```
+
+**Feature additions vs. F5:**
+- `BULLPEN_ERA_DIFF` = `awayBullpenEra - homeBullpenEra`. Fetch from `GET /api/bullpen/:gamePk`. The bullpen response has `{ away: { era }, home: { era } }` — use those fields. If unavailable, neutral-fill with `0`.
+
+**Data fetches per game** (extend the existing `Promise.allSettled` block pattern):
+```
+GET /api/players/:awayPitcherId/stats?group=pitching
+GET /api/players/:awayPitcherId/gamelog?group=pitching
+GET /api/players/:homePitcherId/stats?group=pitching
+GET /api/players/:homePitcherId/gamelog?group=pitching
+
+## HANDOFF NOTE — 2026-05-02 — CODEX TASK 66 COMPLETED (Lab Pick Logging)
+
+Added logging + Picks tab visibility for `🔬 Lab` F5 ML picks using the existing frontend pick log system only.
+
+### Frontend
+
+- File changed:
+  - `prop-scout-v7.jsx`
+
+### What was added
+
+1. **Log button on each Lab card**
+   - Each Lab card now derives:
+     - `labPickLabel = "${leanTeam.abbr} F5 ML"`
+     - `labPickLogged` from same-day `propLog`
+   - Added a Log button in the right-side Lab card column
+   - Uses existing `logPick(...)`
+   - Logged payload:
+     - `propType: "LAB_F5ML"`
+     - explicit `gamePk: g.gamePk`
+     - explicit `homeTeam` / `awayTeam`
+     - `lean` = `HOME` or `AWAY`
+     - `confidence` = lean-side model win probability as %
+   - Button disables and turns green once logged
+
+2. **Auto-grading for Lab picks**
+   - Added helper:
+     - `computeLabF5MlGrade(pick, box)`
+   - Uses first 5 innings from:
+     - `box.linescore.innings.slice(0, 5)`
+   - Rules:
+     - fewer than 5 innings = `null`
+     - tie after 5 = `null`
+     - home lean wins if `f5Home > f5Away`
+     - away lean wins if `f5Away > f5Home`
+   - Wired into:
+     - the normal live/final auto-grade effect
+     - the historical catch-up effect
+
+3. **Lab Picks section in Picks tab**
+   - New `🔬 Lab Picks` section appears only when at least one `LAB_F5ML` pick exists
+   - Section is filtered by the existing `all / pending / hit / miss` picker
+   - Each row shows:
+     - game
+     - pick label
+     - lean
+     - stored model probability (`confidence`)
+     - result badge (`✓ HIT`, `✗ MISS`, or `Pending`)
+   - Standard non-Lab picks remain in the main pick card list below
+
+### Small supporting fix
+
+- `logPick(...)` now respects passed-in `prop.homeTeam` / `prop.awayTeam`
+  before falling back to the currently selected game context.
+  This matters for Lab because Lab cards are cross-slate and not tied to the active `selectedId`.
+
+### Scope
+
+- No backend changes
+- No new state
+- No Picks server API changes
+- Reused existing `propLog`, `markResult`, and boxscore polling infrastructure
+
+### Verification
+
+- `npm run build` ✓
+GET /api/umpires/:gamePk
+GET /api/bullpen/:gamePk          ← NEW for full-game model
+```
+
+**Odds fields to use:** `awayML` and `homeML` (full-game moneyline — already in the odds payload, not the h1 variants). Edge threshold is still ≥ 4pp. Sort by `|leanEdge|` descending.
+
+**Cache key:** `"model:fullgame"`, TTL 10 minutes.
+
+**Return shape:** same as `/api/model/f5` but with `bullpenEraAway`, `bullpenEraHome`, `bullpenEraDiff` added to the `features` object on each game.
+
+### Part B — Frontend: add Full-Game ML sub-tab to Lab view
+
+Add a small sub-tab toggle inside the Lab header row, above the disclaimer banner:
+
+```
+[ F5 ML ] [ Full-Game ML ]
+```
+
+Add state: `const [labSubTab, setLabSubTab] = useState("f5ml")` near the other Lab state.
+
+Add state: `const [labFgData, setLabFgData] = useState(null)` and `const [labFgLoading, setLabFgLoading] = useState(false)`.
+
+Add `fetchLabFgData(force?)` helper following the exact same pattern as `fetchLabData`.
+
+Auto-fetch when `view === "lab" && labSubTab === "fullgame" && !labFgData`.
+
+Card rendering: same layout as F5 cards, with the addition of a "Bullpen" chip in the features row:
+
+```jsx
+<span style={{ /* same chip style */ }}>
+  BP ERA Δ {g.model?.features?.bullpenEraDiff != null ? `${g.model.features.bullpenEraDiff >= 0 ? "+" : ""}${g.model.features.bullpenEraDiff.toFixed(2)}` : "—"}
+</span>
+```
+
+Auto-grade full-game cards using `liveBoxscores[g.gamePk]` final score (away vs home runs, same pattern as existing ML card grading in the Board). Show HIT/MISS badge.
+
+**Disclaimer banner:** reuse the same emerald banner, but update the copy to say "Full-Game Moneyline · Logistic model · Adds bullpen ERA differential vs F5 model".
+
+### Scope
+
+- F5 ML sub-tab behavior unchanged
+- No changes to Board, picks log, or other views
+- `labSubTab` state does not persist across sessions (resets to `"f5ml"` on refresh — that's fine)
+
+### Verification
+
+- `node --check backend/routes/modelF5.js` must pass
+- `npm run build` must pass
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 67 handoff note
+
+---
+
+## CODEX TASK 68 — Lab: Calibration Tracking (Model Track Record) ✅ COMPLETED
+
+**LOE:** Medium
+**Files:** `backend/routes/modelF5.js`, `backend/services/labCalibration.js` (new), `prop-scout-v7.jsx`
+**Priority:** Medium — do after Task 67
+
+### Background
+
+The Lab model currently has no memory. This task adds a lightweight calibration log that records each day's model predictions alongside actual outcomes, and surfaces a simple track-record display inside the Lab view.
+
+**Storage choice:** a flat JSON append-log at `backend/data/lab-outcomes.json`. Simple, no DB migration, survives server restarts. Create the `backend/data/` directory if it doesn't exist.
+
+### Part A — Calibration service: `backend/services/labCalibration.js` (new file)
+
+```js
+// Manages a lightweight JSON log of Lab F5 model predictions and outcomes.
+// File: backend/data/lab-outcomes.json
+// Entry shape:
+// {
+//   id:         string (gamePk + date),
+//   gamePk:     number,
+//   date:       string (YYYY-MM-DD),
+//   leanSide:   "away" | "home",
+//   leanProb:   number (0–1),
+//   leanEdge:   number | null,
+//   hasEdge:    boolean,
+//   model:      "f5ml" | "fullgame",
+//   result:     null | "HIT" | "MISS" | "PUSH",
+//   resolvedAt: null | ISO string,
+// }
+```
+
+Export these functions:
+- `readLog()` — reads and parses `lab-outcomes.json`, returns `[]` on missing/corrupt file
+- `writeLog(entries)` — atomically writes the full array back to the file
+- `appendEntry(entry)` — calls `readLog`, checks for duplicate `id`, appends if new, calls `writeLog`
+- `resolveEntry(id, result)` — sets `result` and `resolvedAt` for the matching entry
+
+### Part B — New backend route in `backend/routes/modelF5.js`
+
+**`POST /api/model/calibration/record`** — called by the frontend when a Lab card is displayed (fire-and-forget, not user-initiated). Body: `{ gamePk, date, leanSide, leanProb, leanEdge, hasEdge, model }`. Calls `appendEntry`. Requires auth (`requireAuth` middleware already on the router). Returns `{ ok: true }`.
+
+**`POST /api/model/calibration/resolve`** — resolves past entries with known outcomes. Body: `{ gamePk, model, result }` where `result` is `"HIT" | "MISS" | "PUSH"`. Calls `resolveEntry`. Returns `{ ok: true }`.
+
+**`GET /api/model/calibration`** — returns the full log plus computed summary stats:
+```js
+{
+  entries: [...],
+  summary: {
+    f5ml:     { total, hits, misses, pushes, accuracy, brierScore, edgeHits, edgeTotal, edgeAccuracy },
+    fullgame: { ... },
+    combined: { ... },
+  }
+}
+```
+
+**Brier score formula:** `(1/N) * Σ (leanProb - outcome)²` where `outcome = 1` for HIT, `0` for MISS. Lower is better. Skip PUSH entries.
+
+### Part C — Frontend auto-record and resolve
+
+**Auto-record:** When `labData` loads successfully (in `fetchLabData`), fire a `POST /api/model/calibration/record` for each game that has both a `leanSide` and `leanEdge`. Use `fetch` with `{ method: "POST", ... }`. Fire-and-forget — don't await or block the UI.
+
+Same for `labFgData` (full-game model) with `model: "fullgame"`.
+
+**Auto-resolve:** When `labHit` or the full-game equivalent resolves to non-null (in the card render), fire a `POST /api/model/calibration/resolve` once per game (guard with a `useRef` set to avoid re-firing). This fires when a game has enough innings to grade. Only fire if `result !== null`.
+
+### Part D — Calibration display in Lab view
+
+Add a collapsible "📊 Track Record" section at the bottom of the Lab view (below the game cards). Fetch calibration data on mount with `GET /api/model/calibration`.
+
+Display per model (F5 ML / Full-Game ML):
+- Record: `X–Y (Z pushes)`
+- Accuracy: `XX%`
+- Brier score: `0.XX` (lower = better; show a tooltip: "Closer to 0 is better; 0.25 = coin flip")
+- Edge accuracy: `X–Y` (only games where `hasEdge === true`)
+- Sample size caveat if N < 20: "Small sample — calibration improves over time"
+
+Keep the display compact — a simple two-column stat grid per model is fine. No charts needed in v1.
+
+### Scope
+
+- No DB schema changes — flat JSON file only
+- `backend/data/` directory must be created if it doesn't exist
+- No changes to existing pick log or Board grading
+- Auto-record and auto-resolve are silent fire-and-forget — never block or error the UI
+
+### Verification
+
+- `node --check backend/routes/modelF5.js` must pass
+- `npm run build` must pass
+- `backend/data/lab-outcomes.json` must be created on first run (not committed to git — add to `.gitignore`)
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 68 handoff note
+
+## HANDOFF NOTE — 2026-05-02 — CODEX TASK 68 COMPLETED (Lab Calibration Tracking)
+
+Added a lightweight persistent calibration log for Lab model predictions plus a frontend Track Record panel.
+
+### Backend
+
+- New file:
+  - `backend/services/labCalibration.js`
+- Storage:
+  - `backend/data/lab-outcomes.json`
+- Service exports:
+  - `readLog()`
+  - `writeLog(entries)`
+  - `appendEntry(entry)`
+  - `resolveEntry(id, result)`
+- Write behavior:
+  - ensures `backend/data/` exists
+  - uses full-array rewrite with temp-file rename for safer writes
+  - duplicate records are prevented by `id`
+
+### New routes in `backend/routes/modelF5.js`
+
+- `POST /api/model/calibration/record`
+  - records one model prediction
+  - body:
+    - `gamePk`
+    - `date`
+    - `leanSide`
+    - `leanProb`
+    - `leanEdge`
+    - `hasEdge`
+    - `model` (`f5ml` or `fullgame`)
+- `POST /api/model/calibration/resolve`
+  - resolves an existing calibration entry with:
+    - `HIT`
+    - `MISS`
+    - `PUSH`
+- `GET /api/model/calibration`
+  - returns:
+    - full entry log
+    - `summary.f5ml`
+    - `summary.fullgame`
+    - `summary.combined`
+
+### Summary stats returned
+
+For each model bucket:
+- `total`
+- `hits`
+- `misses`
+- `pushes`
+- `accuracy`
+- `brierScore`
+- `edgeHits`
+- `edgeTotal`
+- `edgeAccuracy`
+
+Brier score uses only settled non-push entries:
+- HIT → outcome `1`
+- MISS → outcome `0`
+
+### Frontend
+
+- File changed:
+  - `prop-scout-v7.jsx`
+- Added state:
+  - `labCalibration`
+  - `labCalibrationLoading`
+  - `showLabTrackRecord`
+- Added refs:
+  - `labCalibrationRecorded`
+  - `labCalibrationResolved`
+
+### Auto-record behavior
+
+- When `labData` loads:
+  - fire-and-forget `POST /api/model/calibration/record` for each F5 model game
+- When `labFgData` loads:
+  - fire-and-forget `POST /api/model/calibration/record` for each full-game model game
+- Deduped in frontend via `labCalibrationRecorded`
+- Also deduped in backend via `id`
+
+### Auto-resolve behavior
+
+- When a Lab card grades out from `liveBoxscores`:
+  - F5 model resolves from first 5 innings
+  - full-game model resolves from final score
+- Fires silent `POST /api/model/calibration/resolve`
+- Uses `labCalibrationResolved` ref so each game/model/date resolves only once
+- Refreshes calibration summary after successful resolve
+
+### Lab UI
+
+- Added collapsible `📊 Track Record` section at the bottom of the Lab view
+- Displays both:
+  - `F5 ML`
+  - `Full-Game ML`
+- Each model block shows:
+  - record
+  - accuracy
+  - Brier score
+  - edge-only record
+  - edge-only accuracy
+- Shows a small-sample note when settled sample `< 20`
+
+### Git ignore
+
+- Added:
+  - `backend/data/`
+to `.gitignore` so `lab-outcomes.json` is never committed
+
+### Verification
+
+- `node --check backend/services/labCalibration.js` ✓
+- `node --check backend/routes/modelF5.js` ✓
+- `npm run build` ✓
+
+## HANDOFF NOTE — 2026-05-02 — CODEX TASK 67 COMPLETED (Lab Full-Game ML Sub-Tab)
+
+Extended the private `🔬 Lab` predictive area with a second model lane for full-game moneyline.
+
+### Backend
+
+- File changed:
+  - `backend/routes/modelF5.js`
+- Added hard-coded `COEFF_FG` constants for the full-game logistic model:
+  - stronger home field than F5
+  - reduced ump / form leverage
+  - added bullpen ERA differential coefficient
+- Added reusable shared model-building flow:
+  - fetch slate + odds once
+  - per-game `Promise.allSettled` fetch pattern
+  - neutral-fill missing signals
+  - preserve `dataWarning` instead of dropping games
+- New route:
+  - `GET /api/model/fullgame`
+- Full-game route uses:
+  - SP season stats
+  - SP gamelog / last-3 ERA
+  - umpire tendency
+  - bullpen ERA from:
+    - `GET /api/bullpen/:gamePk`
+  - full-game odds:
+    - `awayML`
+    - `homeML`
+- Full-game model output shape matches F5 structure, with added feature fields:
+  - `bullpenEraAway`
+  - `bullpenEraHome`
+  - `bullpenEraDiff`
+- Cache key:
+  - `model:fullgame`
+
+### Frontend
+
+- File changed:
+  - `prop-scout-v7.jsx`
+- Added Lab state:
+  - `labSubTab`
+  - `labFgData`
+  - `labFgLoading`
+- Added `fetchLabFgData(force?)`
+- Added Lab sub-tab toggle:
+  - `F5 ML`
+  - `Full-Game ML`
+- Auto-fetch behavior:
+  - F5 data loads only when `labSubTab === "f5ml"`
+  - full-game data loads only when `labSubTab === "fullgame"`
+- Lab view now uses shared render logic for both sub-tabs
+- Disclaimer text updates by active sub-tab
+- Full-game cards:
+  - use full-game ML odds
+  - auto-grade via final score from `liveBoxscores`
+  - show a `BP ERA Δ` chip in the features row
+- F5 behavior remains intact
+- F5-only logging remains intact
+  - no new pick-log behavior was added for full-game cards in this task
+
+### Scope
+
+- No changes to Board
+- No changes to existing Lab F5 logging flow
+- No changes to Picks log schema
+- `labSubTab` remains session-local and resets to `f5ml` on refresh
+
+### Verification
+
+- `node --check backend/routes/modelF5.js` ✓
+- `npm run build` ✓

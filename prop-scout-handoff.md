@@ -3409,3 +3409,71 @@ Without this, the primary probability display on every card would render blank.
 - `fix: define modelProbPct in Lab card render`
 
 *Updated 2026-05-02 — Session 62 complete · CODEX TASK 64 approved + hotfixed*
+
+---
+
+## ✅ Session 63 — CW: Review Codex Follow-Up Fixes for Task 64
+
+**Review status:** Both fixes approved ✅
+
+### Fix 1 — TDZ boot crash (`prop-scout-v7.jsx`)
+
+`SCOUT_ALLOWLIST`, `scoutIdentity`, and `isScoutUser` moved earlier in the component so the Lab auto-load `useEffect` (which references `isScoutUser` in its dependency array) no longer hits a temporal dead zone. Declaration is now at line ~3096, well before the effect at line ~3590. Double-gate on both nav button and view block still intact.
+
+### Fix 2 — Odds API H1 market fallback (`backend/routes/odds.js`)
+
+Added graceful retry when The Odds API rejects H1 markets (`h2h_h1`, `spreads_h1`, `totals_h1`). Error response pattern-matched on "not supported by this endpoint" + H1 market name. On match: retries with base markets only (`h2h,totals,spreads`) and sets `partialMarkets: true` on the result. Non-H1 errors still propagate normally. `node --check` passes.
+
+*Updated 2026-05-02 — Session 63 complete · Task 64 follow-up fixes reviewed*
+
+---
+
+## ✅ Session 64 — CW: CODEX TASKS 65–68 Specced (Lab Extension Suite)
+
+**Files changed:** `AGENT_SYSTEM_PROMPT.md` (4 specs added)
+
+All four tasks are additive Lab extensions. No changes to Board, Model Picks, Scout, HR Scout, Advisor, or any existing grading/pick infrastructure except where explicitly noted (Task 66 auto-grade wiring).
+
+### CODEX TASK 65 — Lab: Auto-grade HIT/MISS on F5 ML Cards (XS, pending)
+Inside the Lab card render loop, derive `f5Away` + `f5Home` from `liveBoxscores[g.gamePk].linescore.innings.slice(0,5)`. Compare against `g.model.leanSide`. Show ✓ HIT or ✗ MISS badge (same style as Board). Ties + incomplete games → no badge. No backend changes, no new state.
+
+### CODEX TASK 66 — Lab: Pick Logging for F5 ML Model Picks (S-M, pending)
+Log button on each Lab card using existing `logPick` with `propType: "LAB_F5ML"`. Explicit `gamePk: g.gamePk` (not `selectedId`). Dedup by game + label + date. Auto-grading wired into existing grade `useEffect` using F5 innings sum. Lab Picks section in Picks tab filtered to `propType === "LAB_F5ML"`.
+
+### CODEX TASK 67 — Lab: Full-Game ML Model Sub-Tab (M, pending)
+New `GET /api/model/fullgame` route in `modelF5.js`. Adds bullpen ERA diff signal (`GET /api/bullpen/:gamePk`). New `COEFF_FG` constants. Same output shape as F5. Frontend: `[F5 ML] [Full-Game ML]` sub-tab toggle inside Lab, `labSubTab` state, `labFgData`/`labFgLoading` state, same card layout + Bullpen ERA Δ chip. Full-game auto-grade using final boxscore scores.
+
+### CODEX TASK 68 — Lab: Calibration Tracking / Track Record (M, pending)
+New `backend/services/labCalibration.js` — read/write `backend/data/lab-outcomes.json`. Three new routes on the model router: `POST /calibration/record`, `POST /calibration/resolve`, `GET /calibration`. Frontend auto-records on data load (fire-and-forget), auto-resolves when grade becomes non-null. Collapsible "📊 Track Record" section at bottom of Lab: record, accuracy %, Brier score, edge-only accuracy. `backend/data/` added to `.gitignore`.
+
+Full specs in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 65–68**.
+
+*Updated 2026-05-02 — Session 64 complete · CODEX TASKS 65–68 specced*
+
+---
+
+## ✅ Session 65 — CW: Review + Approve CODEX TASKS 65–68 (Lab Extension Suite)
+
+**Review status:** All four tasks approved ✅
+
+### Task 65 — Auto-grade HIT/MISS ✅
+`labHit` derived from `liveBoxscores[g.gamePk].linescore.innings.slice(0,5)` inside the card map. F5 and full-game paths handled separately via `isLabF5` guard — F5 uses innings sum, full-game uses final `linescore.away.runs / home.runs`. Ties + incomplete games → `null`. Badges correct. No backend changes.
+
+### Task 66 — Lab Pick Logging ✅
+`computeLabF5MlGrade` helper defined cleanly and routed into the existing `computeGrade` dispatch (line ~4668) and all three grade `useEffect` call sites. `logPick` called with explicit `gamePk: g.gamePk` (not `selectedId`). Dedup by game + label + date + `propType`. Lab Picks section in Picks tab filtered to `LAB_F5ML`, shows model%, result badge, pending state. No backend changes.
+
+### Task 67 — Full-Game ML Sub-Tab ✅
+`COEFF_FG` with all 7 coefficients including `BULLPEN_ERA_DIFF: 0.13`. Codex refactored shared fetch/build logic into `fetchSlateAndOdds()` + `buildModelGames()` helpers — clean DRY improvement beyond the spec. `GET /api/model/fullgame` correct. `labSubTab` state, `labFgData`/`labFgLoading` state, separate fetch effects per sub-tab, `[F5 ML][Full-Game ML]` toggle, full-game card uses final boxscore scores for grading. `node --check` ✓.
+
+### Task 68 — Calibration Tracking ✅
+`backend/services/labCalibration.js` — atomic write via `.tmp` rename (correct, prevents corrupt reads on crash). `readLog` returns `[]` on ENOENT or corrupt JSON. `appendEntry` deduplicates on `id`. `resolveEntry` correct. Three routes on the model router: `POST /calibration/record`, `POST /calibration/resolve`, `GET /calibration`. `buildCalibrationSummary` computes accuracy, Brier score, edge-only accuracy correctly. Frontend: fire-and-forget `apiMutate` calls on data load and grade resolution. `📊 Track Record` collapsible section with small-sample caveat at N < 20. `backend/data/` already in `.gitignore` (line 17). `node --check` ✓.
+
+**Bonus:** Codex proactively refactored Task 67's shared slate/odds/build logic into reusable helpers, making the full-game route much cleaner than a copy-paste of the F5 route.
+
+### Commit messages
+- `feat: add HIT/MISS auto-grade to Lab F5 and full-game ML cards`
+- `feat: add Lab pick logging and Lab Picks section in Picks tab`
+- `feat: add Full-Game ML sub-tab to Lab with bullpen ERA signal`
+- `feat: add Lab calibration tracking with Brier score and track record display`
+
+*Updated 2026-05-02 — Session 65 complete · CODEX TASKS 65–68 all approved*

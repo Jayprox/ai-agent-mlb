@@ -37,6 +37,25 @@
       "playerName": null,
       "result": "hit",
       "userId": "user10"
+    },
+    {
+      "id": "1777785861369_ylfn0",
+      "timestamp": "2026-05-03T05:24:21.369Z",
+      "date": "May 2",
+      "game": "BAL @ NYY",
+      "gamePk": 823554,
+      "label": "BAL F5 ML",
+      "lean": "AWAY",
+      "confidence": 39,
+      "propType": "LAB_F5ML",
+      "homeTeam": "NYY",
+      "awayTeam": "BAL",
+      "pitcherId": 677960,
+      "pitcherName": "Ryan Weathers",
+      "playerId": null,
+      "playerName": null,
+      "result": null,
+      "userId": "user10"
     }
   ]
 }
