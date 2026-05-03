@@ -53,6 +53,7 @@ app.use("/api/scout", require("./routes/scout"));
 app.use("/api/hr-scout", require("./routes/hrScout"));
 app.use("/api/chat", require("./routes/chat"));
 app.use("/api/advisor", require("./routes/advisor"));
+app.use("/api/model", require("./routes/modelF5"));
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {

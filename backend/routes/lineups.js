@@ -4,6 +4,7 @@ const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
 const { fetchBatterPowerProfile } = require("./batterPower");
 const { fetchBatterRecentForm } = require("./batterGamelog");
+const SEASON = new Date().getFullYear();
 
 // Transform a team's boxscore data into a batting-order array.
 // Returns [] if the lineup hasn't been posted yet.
@@ -23,6 +24,20 @@ const transformTeam = (teamData) => {
   }).filter(Boolean);
 };
 
+const transformRoster = (rosterData) => {
+  return (rosterData?.roster ?? [])
+    .filter(p => p.position?.type !== "Pitcher" && p.status?.code === "A")
+    .sort((a, b) => parseInt(a.jerseyNumber ?? 99, 10) - parseInt(b.jerseyNumber ?? 99, 10))
+    .map(p => ({
+      order:      null,
+      id:         p.person.id,
+      name:       p.person.fullName,
+      pos:        p.position.abbreviation,
+      primaryPos: p.person.primaryPosition?.abbreviation ?? null,
+      hand:       p.batSide?.code ?? p.person?.batSide?.code ?? "?",
+    }));
+};
+
 // ── GET /api/lineups/:gamePk ─────────────────────────────────
 // Returns confirmed batting orders for both teams.
 // `confirmed: false` means the lineup hasn't been posted yet — frontend
@@ -39,10 +54,14 @@ router.get("/:gamePk", async (req, res) => {
 
   try {
     const { data } = await mlb.get(`/game/${gamePk}/boxscore?hydrate=person`);
+    const awayTeamId = data?.teams?.away?.team?.id;
+    const homeTeamId = data?.teams?.home?.team?.id;
 
     const awayLineup = transformTeam(data.teams.away);
     const homeLineup = transformTeam(data.teams.home);
     const confirmed  = awayLineup.length > 0 && homeLineup.length > 0;
+    let awayRoster = [];
+    let homeRoster = [];
 
     // Enrich batters with power profiles when lineups are confirmed.
     // Fetch in parallel, max 3 at a time to avoid Savant throttling.
@@ -63,13 +82,29 @@ router.get("/:gamePk", async (req, res) => {
           b.recentForm = forms[idx] ?? null;
         });
       }
+    } else if (awayTeamId && homeTeamId) {
+      try {
+        const [awayRosterRes, homeRosterRes] = await Promise.all([
+          mlb.get(`/teams/${awayTeamId}/roster`, {
+            params: { rosterType: "active", season: SEASON, hydrate: "person" },
+          }),
+          mlb.get(`/teams/${homeTeamId}/roster`, {
+            params: { rosterType: "active", season: SEASON, hydrate: "person" },
+          }),
+        ]);
+        awayRoster = transformRoster(awayRosterRes.data);
+        homeRoster = transformRoster(homeRosterRes.data);
+      } catch (rosterErr) {
+        console.warn(`Roster fallback failed for game ${gamePk}: ${rosterErr.message}`);
+      }
     }
 
     const result = {
       gamePk: parseInt(gamePk),
       confirmed,
-      away: awayLineup,
-      home: homeLineup,
+      source: confirmed ? "lineup" : "roster",
+      away: confirmed ? awayLineup : awayRoster,
+      home: confirmed ? homeLineup : homeRoster,
     };
 
     // If lineups are posted: cache 5 min (they can still change).

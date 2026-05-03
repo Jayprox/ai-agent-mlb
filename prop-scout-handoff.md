@@ -3145,3 +3145,267 @@ Removed `.slice(0, 8)` from `gameBlocks` — all games on the slate are now incl
 **Commit message:** `fix: remove advisor slate cap — include all games in buildAdvisorContext`
 
 *Updated 2026-05-01 — Session 53 complete · Advisor slate cap bug fixed*
+
+---
+
+## ✅ Session 54 — Backlog Additions (Codex)
+
+**Files changed:** `AGENT_SYSTEM_PROMPT.md` only (two new backlog items documented)
+
+---
+
+### BACKLOG — Hybrid AI Summary Text for Board / Model Cards
+
+**Status:** Open — backlog only, no implementation started
+**LOE:** Medium
+**Type:** Frontend + light AI call
+
+**Problem:** Board and Model pick cards show generic summary lines like `Strong edge — multiple positive signals` which are not informative.
+
+**Decision:** Hybrid approach — keep scoring and pick selection fully deterministic, but add a small AI rewrite step for the summary sentence only.
+
+**Implementation shape:**
+1. Scoring model stays unchanged
+2. For each card, extract a compact structured payload: market/prop type, lean, top 2 positive factors, optional caution
+3. Send only that payload to `gpt-4o-mini` for a constrained rewrite
+4. AI returns one short sentence (8–16 words), using only supplied factors, no new stats, no hype
+
+**Example output:** `Elite control and solid recent depth support the over on outs.`
+
+---
+
+### BACKLOG — Show Active Roster Before Confirmed Lineups
+
+**Status:** Open — backlog only, no implementation started
+**LOE:** Medium-Large
+**Type:** Full-stack (lineups route + frontend + batter algorithms)
+
+**Problem:** The app feels empty early in the day when official lineups haven't posted yet. HR, Hits, and other batter-facing tabs are sparsely populated.
+
+**Desired behavior:**
+- Pre-lineup: show active roster hitters, label section `Roster`, still compute algorithmic confidence, still surface props/odds
+- Post-lineup: switch label to `Lineup`, replace roster with confirmed batting order, recompute rankings
+
+**Important:** This is not just a label change — it affects any feature keyed on confirmed lineups, including Board → HR, Board → Hits, game-level batter views, and matchup logic that uses batting order as an input.
+
+**Implementation shape:**
+1. `lineups` route / frontend data model supports two states: `confirmed lineup` vs `fallback roster`
+2. UI labels: `Roster` (fallback) vs `Lineup` (confirmed)
+3. Batter algorithms run on roster players pre-lineup, omitting or lightening batting-order bonuses until confirmed
+4. On confirmed lineup arrival: replace roster data + recompute rankings/confidence
+
+*Updated 2026-05-02 — Session 54 · Two new backlog items added by Codex*
+
+---
+
+## ✅ Session 55 — Board/Slate UI Polish + Auto-Grade Hardening + New Backlog Items
+
+**Files changed:** `prop-scout-v7.jsx`, `backend/jobs/gradePicksJob.js`
+
+### Completed changes
+
+**Slate view:**
+- Slate cards now show probable starters — compact SP row (team abbr + pitcher last name) below the time/stadium line
+
+**Board → Games:**
+- Hit badges (`#/# hit`) extended to Run Line and Moneyline cards (previously only NRFI/Total)
+- Away-side lean badge color fixed — was inheriting old red styling after team abbr switch; now correctly reflects team side
+- Displayed score semantics updated: away/under/YRFI leans now show `100 - rawScore` so the number always represents the lean side's strength
+- Card sort order updated to match the new displayed score
+
+**Board → K/Outs:**
+- Score moved to left rail under rank; prop side/line badge now on right — presentation only, no scoring math changed
+- Sportsbook chips no longer disappear during batter-prop retries — retry logic now preserves existing pitcher prop payload while fetching batter props in the background
+
+**Auto-grading:**
+- Pitcher name matching hardened in both `computeGrade` (frontend) and `gradePicksJob.js` (backend)
+- Specifically fixes labels like `JR Ritchie Strikeouts OVER 4.5` that were failing to match the pitcher in the boxscore
+- Note: this fixes the name-matching half of the grading bug; the `isFinal` detection issue (BACKLOG TASK 60) remains open
+
+### New backlog items added
+
+**F5 Board Markets** — Add `F5 Moneyline` and `F5 Run Line` sub-tabs to Board → Games. Same card style, SP-weighted scoring, no bullpen influence. Scoped re-introduction — F5 was removed everywhere else in the app.
+
+**Clarify Algorithmic vs Projection vs AI Labels** — 3-tier labeling across the app: `⚙ Algorithmic` (Board, Model Picks), `Estimated Projection` (projected stat values), `✦ AI-Assisted` (Scout, HR Scout, Advisor).
+
+**Private Predictive Models Tab** — Experimental gated tab visible only to the user. F5 Moneyline as first market. Uses existing PS data as feature layer; produces its own model output clearly separate from the heuristic/research core.
+
+### Verification
+
+- `npm run build` passed
+- `node --check backend/jobs/gradePicksJob.js` passed
+
+*Updated 2026-05-02 — Session 55 complete · Board/Slate polish · auto-grade hardened · 3 new backlog items*
+
+---
+
+## ✅ Session 56 — CW: XS Fixes (Task 58 + Task 60) + F5 Board Markets Spec (CODEX TASK 61)
+
+**Files changed:** `backend/routes/boxscore.js`, `prop-scout-v7.jsx`
+
+### Task 60 — isFinal Detection Bug (backend/routes/boxscore.js)
+
+Fixed `isFinal` detection for old games. MLB API can return `currentInning: 0` for finished games, making the original guard unreliable. Added `|| ls.abstractGameState === "Final"` as a secondary check. This unblocks historical auto-grading for K props and any other picks stuck as pending after games finished.
+
+```js
+// Before
+const isFinal = inningsPlayed > 0 && !ls.currentInning;
+// After
+const isFinal = (inningsPlayed > 0 && !ls.currentInning)
+  || ls.abstractGameState === "Final";
+```
+
+### Task 58 — Games Board Summary Text (prop-scout-v7.jsx)
+
+Replaced the generic score-bucket ternary in the Games Board card footer with a snippet built from the card's existing `factors[]` array. Now shows the top 2 positive factors by weight (e.g. `"Home pitcher has a clear ERA edge · Wide ump zone"`) instead of `"Strong edge — multiple positive signals"`.
+
+### CODEX TASK 61 — F5 Board Markets ✅ COMPLETED
+
+Full spec written in `AGENT_SYSTEM_PROMPT.md`. Two new sub-tabs added to Board → Games: `F5 ML` and `F5 RL`.
+
+**Files Codex touched:**
+- `backend/routes/odds.js` — `extractBook` now parses `h2h_h1` (F5 ML) and `spreads_h1` (F5 RL); Odds API markets param updated
+- `prop-scout-v7.jsx` — `f5ml` + `f5spread` scoring blocks in `computeGameBoard`, sub-tabs in Games tab row, hit summary grading using innings 1–5
+
+**Scoring philosophy:** Mirrors the full-game ML/RL engine but with heavier SP weighting (ERA diff +20 max vs +15) and no bullpen signals. Umpire tendency and market-vs-model edge both apply. F5 picks are **not loggable** in this version.
+
+**Codex bonus:** Live F5 outcome tracker sums linescore innings 1–5 from `liveBoxscores` to power the hit/miss badge on the F5 sub-tabs — not in the original spec, confirmed correct by CW review.
+
+**Key constraint preserved:** F5 only introduced in Board → Games — not in Props tab, Model Picks, or anywhere else.
+
+### Commit messages
+- `fix: harden isFinal detection with abstractGameState fallback`
+- `fix: replace generic Games board summary text with top signal factors`
+- `feat: add F5 Moneyline + F5 Run Line sub-tabs to Board → Games`
+
+---
+
+## ✅ Session 57 — CW: Review + Approve CODEX TASK 61 (F5 Board Markets)
+
+**Review status:** Approved ✅
+
+CW reviewed the complete implementation against the CODEX TASK 61 spec. All scoring blocks, Odds API parsing, sub-tab wiring, hit summary grading, and scope constraints confirmed correct. `node --check` passed on both `.js` backend files. Codex's unscripted F5 live outcome tracker is a net positive addition.
+
+No follow-up fixes needed. Both docs updated. Ready for next backlog item.
+
+---
+
+## ✅ Session 58 — CW: Review + Approve CODEX TASK 62 (Label Transparency Pass)
+
+**Review status:** Approved ✅
+
+CW reviewed the complete label implementation. All 3 tiers (`ALGORITHMIC` / `PROJECTION` / `AI-ASSISTED`) with correct colors (blue / teal / purple) and hover tooltips confirmed present. Correct placement verified across all 8 call sites: Model Picks header + cards, Board K/Outs/Games cards, Slate pitcher card, HR Scout header, Props tab header, Props merged-view cards (per branch), Advisor header, Scout header.
+
+No backend changes, no logic changes. Pure label/UX pass. Scope constraints preserved.
+
+### Commit message
+- `feat: add algorithmic / projection / AI-assisted tier badges across pick surfaces`
+
+*Updated 2026-05-02 — Session 58 complete · CODEX TASK 62 approved*
+
+---
+
+## ✅ Session 59 — CW: CODEX TASK 63 Spec (Active Roster Fallback)
+
+**Files changed:** `AGENT_SYSTEM_PROMPT.md` (spec added), `prop-scout-handoff.md` (this entry)
+
+Full spec written for CODEX TASK 63 — Active Roster Before Confirmed Lineups. Two-file change: backend and frontend.
+
+### CODEX TASK 63 — Active Roster Fallback Before Confirmed Lineups ✅ COMPLETED
+
+**LOE:** Medium  
+**Files:** `backend/routes/lineups.js`, `prop-scout-v7.jsx`
+
+**Problem:** The Lineup tab shows an empty state all morning until official batting orders post, making the app feel thin early in the day.
+
+**Fix:** When `confirmed === false`, fetch the active 26-man roster via `GET /api/v1/teams/{teamId}/roster?rosterType=active&season=2026` and return those hitters as an unordered fallback. Frontend shows them under a "📋 Lineup Not Yet Posted" amber banner with the label `{ABBR} Roster (Lineup Pending)` and position abbreviations in the slot column instead of batting order numbers.
+
+**Key constraints:**
+- No enrichment (no `fetchBatterPowerProfile` / `fetchBatterRecentForm`) for roster fallback
+- Roster players do NOT feed into Model Picks, Board, or K/Outs scoring — those still gate on `confirmed === true`
+- Backend adds `source: "roster"` | `"lineup"` field to the response
+- If roster API fails, fall back gracefully to empty arrays — never break the endpoint
+- TTL unchanged (1-min cache for unconfirmed state)
+- When real lineup posts, the 1-min TTL naturally replaces the roster view
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 63**.
+
+*Updated 2026-05-02 — Session 59 complete · CODEX TASK 63 specced*
+
+---
+
+## ✅ Session 60 — CW: Review + Approve CODEX TASK 63 (Active Roster Fallback)
+
+**Review status:** Approved ✅
+
+CW reviewed the complete implementation. Backend `transformRoster` helper is clean and correct — non-pitcher filter, active status guard, jersey-number sort, `order: null`, no enrichment. Roster fetch wrapped in inner try/catch with `console.warn` fallback exactly as specced. `source: "lineup" | "roster"` field correct. Frontend `isRosterFallback` detection, label change, amber banner, and slot badge substitution all confirmed present and correct. All scope constraints preserved — Model Picks, Board, and K/Outs scoring untouched. `node --check` and `npm run build` both pass.
+
+Minor dead-weight in slot badge styling (fontWeight/fontFamily conditionals evaluate to identical values in both branches) — not a bug, not worth a follow-up.
+
+### Commit message
+- `feat: show active roster in lineup tab before batting orders post`
+
+*Updated 2026-05-02 — Session 60 complete · CODEX TASK 63 approved*
+
+---
+
+## ✅ Session 61 — CW: CODEX TASK 64 Spec (🔬 Lab Tab — F5 ML Predictive Model)
+
+**Files changed:** `AGENT_SYSTEM_PROMPT.md` (spec added), `prop-scout-handoff.md` (this entry)
+
+### CODEX TASK 64 — 🔬 Lab Tab: F5 Moneyline Predictive Model (pending Codex)
+
+**LOE:** Large
+**Files:** `backend/routes/modelF5.js` (new), `backend/server.js`, `prop-scout-v7.jsx`
+**Access:** `isScoutUser` only
+
+**Architecture decisions (confirmed with user):**
+- Output: win probability % (not 0–95 score)
+- All games shown on slate; edge games (≥ 4pp gap vs. book) get `EDGE` badge
+- Tab name: 🔬 Lab (accent color: emerald `#34d399`)
+
+**What gets built:**
+
+1. **`backend/routes/modelF5.js`** — new route at `GET /api/model/f5`. Fetches today's slate, SP season stats + gamelog (last 3 starts), umpire assignments, and F5 ML odds per game. Builds feature vector: `eraDiff`, `whipDiff`, `homeField`, `umpKTendency`, `formDiff`. Runs pre-calibrated logistic regression (`sigmoid(β₀ + β₁x₁ + ...)`) to produce `homeProb` / `awayProb`. Computes edge vs. book implied probability. Returns per-game array sorted by `|leanEdge|` descending. 10-minute cache.
+
+2. **`backend/server.js`** — mounts `modelF5` at `/api/model`
+
+3. **`prop-scout-v7.jsx`** — adds 🔬 Lab nav button (emerald, gated on `isScoutUser`), `labData` + `labLoading` state, fetch on `view === "lab"`, full card list UI with probabilities, book implied, edge in pp, EDGE badge, disclaimer banner. Adds `predictive` tier to `TIER_BADGES`.
+
+**Key constraints:**
+- No Board / Model Picks / Scout / HR Scout / Advisor changes
+- No pick logging wired in this version
+- Coefficients are hard-coded constants — no training pipeline
+- Double-gated on `isScoutUser` (nav button AND view render)
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 64**.
+
+*Updated 2026-05-02 — Session 61 complete · CODEX TASK 64 specced*
+
+---
+
+## ✅ Session 62 — CW: Review + Approve CODEX TASK 64 (🔬 Lab Tab) + Hotfix
+
+**Review status:** Approved with CW hotfix ✅
+
+### What Codex built (confirmed correct)
+
+- `backend/routes/modelF5.js` — clean. Coefficients correct, sigmoid correct, `mlToImplied` correct, `Promise.allSettled` at both the per-game and per-fetch levels, `dataWarning` flag, 10-min cache, sort by `|leanEdge|`, `requireLabAccess` server-side guard using `LAB_ALLOWLIST` env var
+- `backend/server.js` — mounted at `/api/model` ✓
+- `prop-scout-v7.jsx` — `predictive` tier in `TIER_BADGES`, `labData`/`labLoading` state, `fetchLabData()` with `force` refresh support, emerald Lab nav button after Advisor, double-gated view block, full card UI (header, disclaimer, loading, error, empty, per-game cards with probs, edge, ump, features)
+
+### CW hotfix
+
+`modelProbPct` was used in the card render to display the lean-side win probability (the large number on each card) but was never defined. Fixed by CW by adding:
+
+```js
+const modelProbPct = modelProb != null ? `${Math.round(modelProb * 100)}%` : "—";
+```
+
+Without this, the primary probability display on every card would render blank.
+
+### Commit messages
+- `feat: add 🔬 Lab tab with F5 ML logistic regression model`
+- `fix: define modelProbPct in Lab card render`
+
+*Updated 2026-05-02 — Session 62 complete · CODEX TASK 64 approved + hotfixed*

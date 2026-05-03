@@ -26,6 +26,10 @@ function parseIpToOuts(ip) {
   return (inn || 0) * 3 + (thirds || 0);
 }
 
+function normalizeName(s) {
+  return String(s ?? "").toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 // Ported from prop-scout-v7.jsx computeGrade — keep in sync
 function computeGrade(pick, box) {
   if (!box?.isFinal) return null;
@@ -43,16 +47,51 @@ function computeGrade(pick, box) {
       const byId = allBatters.find((b) => String(b.id) === storedId);
       if (byId) return byId;
     }
-    const storedName = (pick.playerName ?? "").toUpperCase();
+    const storedName = normalizeName(pick.playerName);
     if (storedName) {
       const byName = allBatters.find((b) =>
-        b.name.toUpperCase().includes(storedName) ||
-        storedName.includes(b.name.toUpperCase().split(" ").pop())
+        normalizeName(b.name).includes(storedName) ||
+        storedName.includes(normalizeName(b.name).split(" ").pop())
       );
       if (byName) return byName;
     }
-    const lastName = label.split(" ")[0];
-    return allBatters.find((b) => b.name.toUpperCase().includes(lastName)) ?? null;
+    const labelName = normalizeName(label
+      .replace(/\bTOTAL BASES\b.*$/, "")
+      .replace(/\bHITS\b.*$/, "")
+      .replace(/\bRBI\b.*$/, "")
+      .replace(/\bHR\b.*$/, "")
+      .trim());
+    const lastName = labelName.split(" ")[0];
+    return allBatters.find((b) => normalizeName(b.name).includes(lastName)) ?? null;
+  };
+  const findPitcher = () => {
+    const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
+    const storedName = normalizeName(pick.pitcherName);
+    if (storedName) {
+      const byStored = allPitchers.find((p) => {
+        const pname = normalizeName(p.name);
+        const plast = pname.split(" ").pop();
+        return pname.includes(storedName) || storedName.includes(plast);
+      });
+      if (byStored) return byStored;
+    }
+
+    const labelName = normalizeName(label
+      .replace(/\bSTRIKEOUTS?\b.*$/, "")
+      .replace(/\bK'S\b.*$/, "")
+      .replace(/\bK O\/U\b.*$/, "")
+      .replace(/\bOUTS\b.*$/, "")
+      .trim());
+    if (labelName) {
+      const byLabel = allPitchers.find((p) => {
+        const pname = normalizeName(p.name);
+        const plast = pname.split(" ").pop();
+        return pname.includes(labelName) || labelName.includes(pname) || labelName.includes(plast);
+      });
+      if (byLabel) return byLabel;
+    }
+
+    return null;
   };
 
   if (label.startsWith("NRFI")) {
@@ -86,10 +125,7 @@ function computeGrade(pick, box) {
     const m = label.match(/(\d+\.?\d*)/);
     if (!m) return null;
     const line = parseFloat(m[1]);
-    const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
-    const storedName = (pick.pitcherName ?? "").toUpperCase();
-    let pitcher = storedName ? allPitchers.find((p) => p.name.toUpperCase().includes(storedName) || storedName.includes(p.name.toUpperCase().split(" ").pop())) : null;
-    if (!pitcher) pitcher = allPitchers.find((p) => p.name.toUpperCase().includes(label.split(" ")[0]));
+    const pitcher = findPitcher();
     if (!pitcher) return null;
     if (lean === "OVER") return (pitcher.k ?? 0) > line ? "hit" : "miss";
     if (lean === "UNDER") return (pitcher.k ?? 0) < line ? "hit" : "miss";
@@ -99,10 +135,7 @@ function computeGrade(pick, box) {
     const m = label.match(/(\d+\.?\d*)/);
     if (!m) return null;
     const line = parseFloat(m[1]);
-    const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
-    const storedName = (pick.pitcherName ?? "").toUpperCase();
-    let pitcher = storedName ? allPitchers.find((p) => p.name.toUpperCase().includes(storedName)) : null;
-    if (!pitcher) pitcher = allPitchers.find((p) => p.name.toUpperCase().includes(label.split(" ")[0]));
+    const pitcher = findPitcher();
     if (!pitcher) return null;
     const outs = parseIpToOuts(pitcher.ip);
     if (lean === "OVER") return outs > line ? "hit" : "miss";

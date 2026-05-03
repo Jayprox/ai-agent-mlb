@@ -524,7 +524,7 @@ const fetchOdds = async (forceRefresh = false) => {
 // ─────────────────────────────────────────────
 const generateWhyFactors = (c, type) => {
   // Game-level types: factors are pre-computed in computeGameBoard
-  if (type === "nrfi" || type === "total" || type === "spread" || type === "ml") {
+  if (type === "nrfi" || type === "total" || type === "spread" || type === "ml" || type === "f5ml" || type === "f5spread") {
     return c.factors ?? [];
   }
 
@@ -1283,16 +1283,44 @@ const buildLiveGame = (sg) => {
 // ─────────────────────────────────────────────
 // PRIMITIVES
 // ─────────────────────────────────────────────
-const LeanBadge = ({ label, positive, small }) => {
-  const color  = positive === true ? "#22c55e" : positive === false ? "#ef4444" : "#f59e0b";
-  const bg     = positive === true ? "rgba(34,197,94,0.12)" : positive === false ? "rgba(239,68,68,0.12)" : "rgba(245,158,11,0.12)";
-  const border = positive === true ? "rgba(34,197,94,0.4)"  : positive === false ? "rgba(239,68,68,0.4)"  : "rgba(245,158,11,0.4)";
+const LeanBadge = ({ label, positive, small, color: customColor, title }) => {
+  const color  = customColor ?? (positive === true ? "#22c55e" : positive === false ? "#ef4444" : "#f59e0b");
+  const bg     = customColor ? `${customColor}14` : positive === true ? "rgba(34,197,94,0.12)" : positive === false ? "rgba(239,68,68,0.12)" : "rgba(245,158,11,0.12)";
+  const border = customColor ? `${customColor}44` : positive === true ? "rgba(34,197,94,0.4)"  : positive === false ? "rgba(239,68,68,0.4)"  : "rgba(245,158,11,0.4)";
   return (
-    <div style={{ display: "inline-flex", alignItems: "center", gap: 5, background: bg, border: `1px solid ${border}`, borderRadius: 6, padding: small ? "2px 7px" : "4px 11px", fontSize: small ? 9 : 10, fontWeight: 700, color, fontFamily: "monospace", whiteSpace: "nowrap" }}>
+    <div title={title} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: bg, border: `1px solid ${border}`, borderRadius: 6, padding: small ? "2px 7px" : "4px 11px", fontSize: small ? 9 : 10, fontWeight: 700, color, fontFamily: "monospace", whiteSpace: "nowrap" }}>
       <div style={{ width: small ? 5 : 6, height: small ? 5 : 6, borderRadius: "50%", background: color, boxShadow: `0 0 5px ${color}`, flexShrink: 0 }} />
       {label}
     </div>
   );
+};
+
+const TIER_BADGES = {
+  algorithmic: {
+    label: "ALGORITHMIC",
+    color: "#38bdf8",
+    tooltip: "Pure deterministic formula using stats, odds, and matchup data; no LLM involved.",
+  },
+  projection: {
+    label: "PROJECTION",
+    color: "#2dd4bf",
+    tooltip: "Stats-based estimate or synthetic-line fallback; no LLM involved.",
+  },
+  ai: {
+    label: "AI-ASSISTED",
+    color: "#a78bfa",
+    tooltip: "LLM-assisted analysis generated from structured slate, prop, and matchup context.",
+  },
+  predictive: {
+    label: "PREDICTIVE",
+    color: "#34d399",
+    tooltip: "Logistic regression model with pre-calibrated coefficients — outputs win probability, not a heuristic score.",
+  },
+};
+
+const TierBadge = ({ tier, small = true }) => {
+  const badge = TIER_BADGES[tier] ?? TIER_BADGES.algorithmic;
+  return <LeanBadge label={badge.label} small={small} color={badge.color} title={badge.tooltip} />;
 };
 
 const Card = ({ children, style, onClick }) => (
@@ -1429,6 +1457,8 @@ const BullpenCard = ({ label, data }) => {
 // ─────────────────────────────────────────────
 const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null, liveScore = null, injuredIds = new Set(), preferredBook = "DK" }) => {
   const topProp = bestBet ?? (game.props[0]?.lean ? game.props[0] : null);
+  const awaySpLast = game.awayPitcher?.name?.split(" ").slice(-1)[0] ?? null;
+  const homeSpLast = game.pitcher?.name?.split(" ").slice(-1)[0] ?? null;
   // Merge live odds if available for this game
   const liveKey       = `${game.away.name}|${game.home.name}`;
   const liveOdds      = liveOddsMap[liveKey];
@@ -1490,6 +1520,22 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
             )}
           </div>
           <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{game.time} · {game.stadium}</div>
+          {(awaySpLast || homeSpLast) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace", letterSpacing: "0.05em" }}>SP</span>
+              {awaySpLast && (
+                <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>
+                  {game.away.abbr} {awaySpLast}
+                </span>
+              )}
+              {awaySpLast && homeSpLast && <span style={{ fontSize: 8, color: "#374151" }}>vs</span>}
+              {homeSpLast && (
+                <span style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>
+                  {game.home.abbr} {homeSpLast}
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div style={{ textAlign: "right" }}>
           {isFinal && liveScore ? (() => {
@@ -2081,7 +2127,7 @@ const mlToImplied = (ml) => {
 };
 
 // ── computeGameBoard: score every game on a given game-level market ───────────
-// type: "nrfi" | "total" | "spread" | "ml"
+// type: "nrfi" | "total" | "spread" | "ml" | "f5ml" | "f5spread"
 // Returns array sorted by abs(score - 50) desc (strongest edge first).
 // Each item: { gamePk, name, gameLabel, away, home, score, lean, leanLabel,
 //              line, factors[], homeSP, awaySP, weather, nrfi }
@@ -2378,10 +2424,128 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
         gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
         score, lean, leanAbbr: mlLeanAbbr, leanLabel: `${mlLeanAbbr} ML ${mlLine}`, line: mlLine, odds,
         factors, homeSP, awaySP, weather: wx, stadium: game.stadium });
+
+    // ── F5 MONEYLINE ────────────────────────────────────────────────────────
+    } else if (type === "f5ml") {
+      const f5HomeML = odds.f5HomeML ?? null;
+      const f5AwayML = odds.f5AwayML ?? null;
+      if (!f5HomeML && !f5AwayML) return;
+      const homeImpl = f5HomeML ? mlToImplied(f5HomeML) : 0.5;
+      const awayImpl = f5AwayML ? mlToImplied(f5AwayML) : 0.5;
+
+      if (homeEra !== null && awayEra !== null) {
+        const diff = awayEra - homeEra;
+        const d = diff > 2.0 ? 20 : diff > 1.0 ? 13 : diff > 0.5 ? 7 : diff < -2.0 ? -20 : diff < -1.0 ? -13 : diff < -0.5 ? -7 : 0;
+        score += d;
+        factors.push({ label: "SP ERA Matchup", pts: d, max: 20,
+          value: `${game.home.abbr} SP ${homeEra.toFixed(2)} vs ${game.away.abbr} SP ${awayEra.toFixed(2)}`,
+          detail: diff > 1.0 ? "Home pitcher has a clear F5 edge" : diff < -1.0 ? "Away pitcher is dominant through 5" : "Even F5 pitching matchup" });
+      }
+
+      if (homeWhip !== null && awayWhip !== null) {
+        const wDiff = awayWhip - homeWhip;
+        const wPts = wDiff > 0.25 ? 8 : wDiff > 0.1 ? 4 : wDiff < -0.25 ? -8 : wDiff < -0.1 ? -4 : 0;
+        score += wPts;
+        factors.push({ label: "SP Command (WHIP)", pts: wPts, max: 8,
+          value: `${game.home.abbr} ${homeWhip.toFixed(2)} vs ${game.away.abbr} ${awayWhip.toFixed(2)}`,
+          detail: wDiff > 0.15 ? "Home SP has better control through 5" : wDiff < -0.15 ? "Away SP commands the zone better" : "Similar command" });
+      }
+
+      if (umpire?.rating === "pitcher") {
+        score += 5;
+        factors.push({ label: "Umpire Tendency", pts: 5, max: 5, value: umpire.name ?? "HP Ump", detail: "Pitcher-friendly zone — suppresses F5 offense" });
+      } else if (umpire?.rating === "hitter") {
+        score -= 4;
+        factors.push({ label: "Umpire Tendency", pts: -4, max: 5, value: umpire.name ?? "HP Ump", detail: "Hitter-friendly zone — opens up F5 scoring" });
+      }
+
+      score += 2;
+      factors.push({ label: "Home Field", pts: 2, max: 2, value: game.home.abbr, detail: "Slight home edge in early innings" });
+
+      if (f5HomeML && f5AwayML) {
+        const modelHome = score / 100;
+        const edge = modelHome - homeImpl;
+        const edgePts = edge > 0.12 ? 8 : edge > 0.06 ? 4 : edge < -0.12 ? -8 : edge < -0.06 ? -4 : 0;
+        score += edgePts;
+        factors.push({ label: "Model vs Market Edge", pts: edgePts, max: 8,
+          value: `Market: ${game.home.abbr} ${(homeImpl * 100).toFixed(0)}% / ${game.away.abbr} ${(awayImpl * 100).toFixed(0)}%`,
+          detail: edgePts > 0 ? "Model likes home more than F5 market" : edgePts < 0 ? "Market has home well-priced already" : "Model and market aligned" });
+      }
+
+      score = Math.round(Math.max(30, Math.min(78, score)));
+      const lean = score >= 50 ? "HOME" : "AWAY";
+      const leanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr;
+      const mlLine = lean === "HOME" ? (f5HomeML ?? "—") : (f5AwayML ?? "—");
+      games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
+        gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
+        score, lean, leanAbbr, leanLabel: `${leanAbbr} F5 ML ${mlLine}`, line: mlLine, odds,
+        factors, homeSP, awaySP, weather: wx, stadium: game.stadium });
+
+    // ── F5 RUN LINE ─────────────────────────────────────────────────────────
+    } else if (type === "f5spread") {
+      const f5AwaySpread = odds.f5AwaySpread ?? null;
+      const f5HomeSpread = odds.f5HomeSpread ?? null;
+      const f5AwaySpreadOdds = odds.f5AwaySpreadOdds ?? null;
+      const f5HomeSpreadOdds = odds.f5HomeSpreadOdds ?? null;
+      if (!f5AwaySpread && !f5HomeSpread) return;
+
+      if (homeEra !== null && awayEra !== null) {
+        const diff = awayEra - homeEra;
+        const d = diff > 2.0 ? 20 : diff > 1.0 ? 13 : diff > 0.5 ? 7 : diff < -2.0 ? -20 : diff < -1.0 ? -13 : diff < -0.5 ? -7 : 0;
+        score += d;
+        factors.push({ label: "SP ERA Matchup", pts: d, max: 20,
+          value: `${game.home.abbr} SP ${homeEra.toFixed(2)} vs ${game.away.abbr} SP ${awayEra.toFixed(2)}`,
+          detail: diff > 1.0 ? "Home starter projects well through 5" : diff < -1.0 ? "Away starter owns the F5 edge" : "Even F5 pitching matchup" });
+      }
+
+      if (homeWhip !== null && awayWhip !== null) {
+        const wDiff = awayWhip - homeWhip;
+        const wPts = wDiff > 0.25 ? 8 : wDiff > 0.1 ? 4 : wDiff < -0.25 ? -8 : wDiff < -0.1 ? -4 : 0;
+        score += wPts;
+        factors.push({ label: "SP Command (WHIP)", pts: wPts, max: 8,
+          value: `${game.home.abbr} ${homeWhip.toFixed(2)} vs ${game.away.abbr} ${awayWhip.toFixed(2)}`,
+          detail: wDiff > 0.15 ? "Home SP has better control through 5" : wDiff < -0.15 ? "Away SP commands the zone better" : "Similar command" });
+      }
+
+      if (umpire?.rating === "pitcher") {
+        score += 5;
+        factors.push({ label: "Umpire Tendency", pts: 5, max: 5, value: umpire.name ?? "HP Ump", detail: "Pitcher-friendly zone — helps F5 favorite cover" });
+      } else if (umpire?.rating === "hitter") {
+        score -= 4;
+        factors.push({ label: "Umpire Tendency", pts: -4, max: 5, value: umpire.name ?? "HP Ump", detail: "Hitter-friendly zone — more early scoring variance" });
+      }
+
+      score += 2;
+      factors.push({ label: "Home Field", pts: 2, max: 2, value: game.home.abbr, detail: "Slight home edge in early innings" });
+
+      if (f5HomeSpreadOdds && f5AwaySpreadOdds) {
+        const homeImpl = mlToImplied(f5HomeSpreadOdds);
+        const modelHome = score / 100;
+        const edge = modelHome - homeImpl;
+        const edgePts = edge > 0.12 ? 8 : edge > 0.06 ? 4 : edge < -0.12 ? -8 : edge < -0.06 ? -4 : 0;
+        score += edgePts;
+        factors.push({ label: "Model vs Market Edge", pts: edgePts, max: 8,
+          value: `Market RL: ${game.home.abbr} ${f5HomeSpread ?? "—"} (${f5HomeSpreadOdds ?? "—"}) / ${game.away.abbr} ${f5AwaySpread ?? "—"} (${f5AwaySpreadOdds ?? "—"})`,
+          detail: edgePts > 0 ? "Model likes home F5 run line more than market" : edgePts < 0 ? "Market already prices the home F5 edge" : "Model and market aligned" });
+      }
+
+      score = Math.round(Math.max(30, Math.min(78, score)));
+      const lean = score >= 50 ? "HOME" : "AWAY";
+      const leanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr;
+      const spreadLine = lean === "HOME" ? (f5HomeSpread ?? "—") : (f5AwaySpread ?? "—");
+      const spreadOdds = lean === "HOME" ? f5HomeSpreadOdds : f5AwaySpreadOdds;
+      games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
+        gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
+        score, lean, leanAbbr, leanLabel: `${leanAbbr} F5 RL ${spreadLine}${spreadOdds ? ` (${spreadOdds})` : ""}`, line: spreadLine, odds,
+        factors, homeSP, awaySP, weather: wx, stadium: game.stadium });
     }
   });
-  // Sort by score descending (high = strong OVER/NRFI/HOME lean, low = strong UNDER/YRFI/AWAY lean)
-  return games.sort((a, b) => b.score - a.score);
+  // Sort by displayed side-strength score so away/under/YRFI leans rank intuitively too.
+  const gameDisplayScore = (g) =>
+    g?.lean === "YRFI" || g?.lean === "UNDER" || g?.lean === "AWAY"
+      ? 100 - (g.score ?? 0)
+      : (g.score ?? 0);
+  return games.sort((a, b) => gameDisplayScore(b) - gameDisplayScore(a));
 };
 
 function computeLiveProps({
@@ -2929,6 +3093,12 @@ export default function App() {
   const [loginError,   setLoginError]   = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
 
+  const SCOUT_ALLOWLIST = ["leadoffkaiba"];
+  const scoutIdentity = (currentUser?.username ?? currentUser?.email ?? "").toLowerCase();
+  const isScoutUser = !!currentUser && SCOUT_ALLOWLIST.includes(scoutIdentity);
+  const CHAT_ALLOWLIST = ["leadoffkaiba"];
+  const isChatUser = !!currentUser && CHAT_ALLOWLIST.includes((currentUser?.username ?? currentUser?.email ?? "").toLowerCase());
+
   const [preferredBook,    setPreferredBook]    = useState("DK"); // "DK"|"FD"|"CZR"|"MGM"|"BOV" — DK is app default
   const [propsBookFilter,  setPropsBookFilter]  = useState("DK");
   const [prefSaving,       setPrefSaving]       = useState(false);
@@ -2974,6 +3144,8 @@ export default function App() {
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [advisorError, setAdvisorError] = useState(null);
   const [advisorMessagesLeft, setAdvisorMessagesLeft] = useState(20);
+  const [labData, setLabData] = useState(null);
+  const [labLoading, setLabLoading] = useState(false);
   // Prop result tracker — persisted to localStorage
   const [propLog, setPropLog] = useState(() => {
     try { return JSON.parse(localStorage.getItem("propscout_log") || "[]"); }
@@ -3226,15 +3398,17 @@ export default function App() {
     if (!IS_ODDS_SANDBOX && ODDS_API_KEY) {
       (liveSlate ?? []).forEach(game => {
         const key = String(game.gamePk);
+        const existingProps = Array.isArray(livePlayerProps[key]?.props) ? livePlayerProps[key].props : [];
         if (livePlayerProps[key] === "loading") return;
-        const hasBatterProps = Array.isArray(livePlayerProps[key]?.props) &&
-          livePlayerProps[key].props.some(p =>
-            p.market === "batter_home_runs" || p.market === "batter_hits"
-          );
+        const hasBatterProps = existingProps.some(p =>
+          p.market === "batter_home_runs" || p.market === "batter_hits"
+        );
         if (hasBatterProps) return;
         if (boardPropsFetched.current.has(key)) return;
         boardPropsFetched.current.add(key);
-        setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
+        if (!existingProps.length) {
+          setLivePlayerProps(prev => ({ ...prev, [key]: "loading" }));
+        }
         fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "", game.gamePk)
           .then(result => {
             const normalized = result?.props ? result : { props: result ?? [], reason: "ok" };
@@ -3249,7 +3423,9 @@ export default function App() {
           })
           .catch(() => {
             boardPropsFetched.current.delete(key);
-            setLivePlayerProps(prev => ({ ...prev, [key]: { props: [] } }));
+            if (!existingProps.length) {
+              setLivePlayerProps(prev => ({ ...prev, [key]: { props: [] } }));
+            }
           });
       });
     }
@@ -3409,6 +3585,11 @@ export default function App() {
       .catch((err) => setHrScoutError(err.message ?? "Failed to load HR Scout picks"))
       .finally(() => setHrScoutLoading(false));
   }, [view, currentUser, hrScoutPicks, hrScoutLoading, hrScoutError]);
+
+  useEffect(() => {
+    if (view !== "lab" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
+    fetchLabData();
+  }, [view, currentUser, isScoutUser, labData, labLoading]);
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -4155,11 +4336,6 @@ export default function App() {
   const mediumPicks = topSlatePicks.filter(p => p.tier === "MEDIUM");
   const specPicks   = topSlatePicks.filter(p => p.tier === "SPEC");
 
-  const SCOUT_ALLOWLIST = ["leadoffkaiba"];
-  const scoutIdentity = (currentUser?.username ?? currentUser?.email ?? "").toLowerCase();
-  const isScoutUser = !!currentUser && SCOUT_ALLOWLIST.includes(scoutIdentity);
-  const CHAT_ALLOWLIST = ["leadoffkaiba"];
-  const isChatUser = !!currentUser && CHAT_ALLOWLIST.includes((currentUser?.username ?? currentUser?.email ?? "").toLowerCase());
   const QUICK_CHIPS = [
     "Best plays today",
     "Top K props",
@@ -4287,6 +4463,21 @@ export default function App() {
     setAdvisorError(null);
   }
 
+  async function fetchLabData(force = false) {
+    if (labLoading) return;
+    if (force) setLabData(null);
+    setLabLoading(true);
+    try {
+      const data = await apiFetch("/api/model/f5");
+      setLabData(data);
+    } catch (err) {
+      console.error("Lab fetch failed:", err);
+      setLabData({ date: null, games: [], error: err.message ?? "Failed to load Lab model" });
+    } finally {
+      setLabLoading(false);
+    }
+  }
+
   // ── Pick tracker helpers ──────────────────────────────────────────────────
   const logPick = (prop) => {
     const alreadyLogged = propLog.some(p =>
@@ -4339,21 +4530,58 @@ export default function App() {
     const totalRuns = awayRuns + homeRuns;
     const allBatters = [...(box.batting?.away ?? []), ...(box.batting?.home ?? [])];
     const findBatter = () => {
+      const norm = (s) => String(s ?? "").toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
       const storedId = pick.playerId != null ? String(pick.playerId) : null;
       if (storedId) {
         const byId = allBatters.find(b => String(b.id) === storedId);
         if (byId) return byId;
       }
-      const storedName = (pick.playerName ?? "").toUpperCase();
+      const storedName = norm(pick.playerName);
       if (storedName) {
         const byName = allBatters.find(b =>
-          b.name.toUpperCase().includes(storedName) ||
-          storedName.includes(b.name.toUpperCase().split(" ").pop())
+          norm(b.name).includes(storedName) ||
+          storedName.includes(norm(b.name).split(" ").pop())
         );
         if (byName) return byName;
       }
-      const lastName = label.split(" ")[0];
-      return allBatters.find(b => b.name.toUpperCase().includes(lastName)) ?? null;
+      const labelName = norm(label
+        .replace(/\bTOTAL BASES\b.*$/, "")
+        .replace(/\bHITS\b.*$/, "")
+        .replace(/\bRBI\b.*$/, "")
+        .replace(/\bHR\b.*$/, "")
+        .trim());
+      const lastName = labelName.split(" ")[0];
+      return allBatters.find(b => norm(b.name).includes(lastName)) ?? null;
+    };
+    const normName = (s) => String(s ?? "").toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+    const findPitcher = () => {
+      const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
+      const storedName = normName(pick.pitcherName);
+      if (storedName) {
+        const byStored = allPitchers.find(p => {
+          const pname = normName(p.name);
+          const plast = pname.split(" ").pop();
+          return pname.includes(storedName) || storedName.includes(plast);
+        });
+        if (byStored) return byStored;
+      }
+
+      const labelName = normName(label
+        .replace(/\bSTRIKEOUTS?\b.*$/, "")
+        .replace(/\bK'S\b.*$/, "")
+        .replace(/\bK O\/U\b.*$/, "")
+        .replace(/\bOUTS\b.*$/, "")
+        .trim());
+      if (labelName) {
+        const byLabel = allPitchers.find(p => {
+          const pname = normName(p.name);
+          const plast = pname.split(" ").pop();
+          return pname.includes(labelName) || labelName.includes(pname) || labelName.includes(plast);
+        });
+        if (byLabel) return byLabel;
+      }
+
+      return null;
     };
 
     // NRFI — no runs scored in 1st inning
@@ -4411,17 +4639,7 @@ export default function App() {
       const m = label.match(/(\d+\.?\d*)/);
       if (!m) return null;
       const line = parseFloat(m[1]);
-      const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
-      // Try to match by pitcherName stored on the pick
-      const storedName = (pick.pitcherName ?? "").toUpperCase();
-      let pitcher = storedName
-        ? allPitchers.find(p => p.name.toUpperCase().includes(storedName) || storedName.includes(p.name.toUpperCase().split(" ").pop()))
-        : null;
-      // Fallback: extract last name from label (first word)
-      if (!pitcher) {
-        const lastName = label.split(" ")[0];
-        pitcher = allPitchers.find(p => p.name.toUpperCase().includes(lastName));
-      }
+      const pitcher = findPitcher();
       if (!pitcher) return null;
       if (lean === "OVER")  return (pitcher.k ?? 0) > line  ? "hit" : "miss";
       if (lean === "UNDER") return (pitcher.k ?? 0) < line  ? "hit" : "miss";
@@ -4433,15 +4651,7 @@ export default function App() {
       const m = label.match(/(\d+\.?\d*)/);
       if (!m) return null;
       const line = parseFloat(m[1]);
-      const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
-      const storedName  = (pick.pitcherName ?? "").toUpperCase();
-      let pitcher = storedName
-        ? allPitchers.find(p => p.name.toUpperCase().includes(storedName))
-        : null;
-      if (!pitcher) {
-        const lastName = label.split(" ")[0];
-        pitcher = allPitchers.find(p => p.name.toUpperCase().includes(lastName));
-      }
+      const pitcher = findPitcher();
       if (!pitcher) return null;
       const outs = parseIpToOuts(pitcher.ip);
       if (lean === "OVER")  return outs > line  ? "hit" : "miss";
@@ -4678,17 +4888,7 @@ export default function App() {
                   <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>{p.label}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
                     <span style={{ fontSize: 9, color: "#6b7280" }}>{p.game}</span>
-                    <span style={{
-                      fontSize: 7,
-                      fontWeight: 800,
-                      color: "#94a3b8",
-                      background: "rgba(148,163,184,0.08)",
-                      border: "1px solid rgba(148,163,184,0.2)",
-                      borderRadius: 4,
-                      padding: "1px 5px",
-                      fontFamily: "monospace",
-                      letterSpacing: "0.04em",
-                    }} title="Algorithmic pick — generated by the scoring model using Statcast + sportsbook data. No AI/LLM involved.">⚙ ALGO</span>
+                    <TierBadge tier="algorithmic" />
                     {p.lineupConfirmed && <span style={{ fontSize: 8, color: "#22c55e", fontWeight: 700 }}>✓ LINEUP</span>}
                     {gameStatus === "LIVE" && (
                       <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
@@ -4962,6 +5162,12 @@ export default function App() {
               <button onClick={() => setView("advisor")}
                 style={{ background: view === "advisor" ? "#f59e0b" : "#161827", border: `1px solid ${view === "advisor" ? "#f59e0b" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "advisor" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
                 🧠 Advisor
+              </button>
+            )}
+            {isScoutUser && (
+              <button onClick={() => setView("lab")}
+                style={{ background: view === "lab" ? "#34d399" : "#161827", border: `1px solid ${view === "lab" ? "#34d399" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "lab" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
+                🔬 Lab
               </button>
             )}
             {isChatUser && (
@@ -5319,12 +5525,13 @@ export default function App() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <SLabel style={{ marginBottom: 0 }}>🎯 Model Picks</SLabel>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <TierBadge tier="algorithmic" small={false} />
               {topSlatePicks.length > 0 && (
                 <span style={{ background: modelBoardHits > 0 ? "#22c55e" : "#374151", color: modelBoardHits > 0 ? "#03140a" : "#d1d5db", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 900, lineHeight: 1.2, fontFamily: "monospace", whiteSpace: "nowrap" }}>
                   {modelBoardHits}/{topSlatePicks.length} hit
                 </span>
               )}
-              <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>ALGO · {topSlatePicks.length} picks</span>
+              <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{topSlatePicks.length} picks</span>
             </div>
           </div>
 
@@ -5490,7 +5697,10 @@ export default function App() {
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
               <div>
-                <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🧠 ADVISOR</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🧠 ADVISOR</div>
+                  <TierBadge tier="ai" />
+                </div>
                 <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>Pick your persona · Ask for plays or research</div>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -5639,12 +5849,167 @@ export default function App() {
           </div>
         )}
 
+        {view === "lab" && isScoutUser && (
+          <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🔬 LAB</div>
+                  <TierBadge tier="predictive" />
+                </div>
+                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>F5 Moneyline · Logistic model · Pre-calibrated coefficients · Experimental</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
+                  {labData?.date ?? "today"}
+                </div>
+                <button
+                  onClick={() => fetchLabData(true)}
+                  disabled={labLoading}
+                  style={{
+                    background: labLoading ? "rgba(255,255,255,0.04)" : "rgba(52,211,153,0.15)",
+                    border: `1px solid ${labLoading ? "#2d3148" : "rgba(52,211,153,0.35)"}`,
+                    borderRadius: 8,
+                    padding: "6px 10px",
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: labLoading ? "#4b5563" : "#34d399",
+                    cursor: labLoading ? "default" : "pointer",
+                    fontFamily: "monospace",
+                  }}
+                >
+                  ↺ Refresh
+                </button>
+              </div>
+            </div>
+
+            <div style={{ background: "rgba(52,211,153,0.06)", border: "1px solid rgba(52,211,153,0.2)", borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#34d399", marginBottom: 3 }}>⚗ EXPERIMENTAL MODEL</div>
+              <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>
+                Win probabilities generated by a pre-calibrated logistic regression using SP quality, command, form, umpire, and home field.
+                Not a trained ML system. Not financial advice. Edge = model prob minus book implied prob.
+              </div>
+            </div>
+
+            {labLoading && !labData && (
+              <Card>
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>Running F5 predictive model across today&apos;s slate…</div>
+              </Card>
+            )}
+
+            {labData?.error && (
+              <div style={{ background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.30)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+                {labData.error}
+              </div>
+            )}
+
+            {!labLoading && labData && (labData.games?.length ?? 0) === 0 && !labData.error && (
+              <Card>
+                <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>No F5 model games available yet.</div>
+              </Card>
+            )}
+
+            {labData?.games?.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {labData.games.map((g) => {
+                  const leanIsHome = g.model?.leanSide === "home";
+                  const leanTeam = leanIsHome ? g.home : g.away;
+                  const leanPitcher = leanIsHome ? g.homePitcher : g.awayPitcher;
+                  const bookLine = leanIsHome ? g.odds?.f5HomeML : g.odds?.f5AwayML;
+                  const modelProb = leanIsHome ? g.model?.homeProb : g.model?.awayProb;
+                  const impliedProb = leanIsHome ? g.model?.homeImplied : g.model?.awayImplied;
+                  const leanEdge = g.model?.leanEdge ?? 0;
+                  const edgeColor = g.model?.hasEdge ? "#34d399" : leanEdge >= 0 ? "#fbbf24" : "#6b7280";
+                  const homeProbPct = g.model?.homeProb != null ? `${Math.round(g.model.homeProb * 100)}%` : "—";
+                  const awayProbPct = g.model?.awayProb != null ? `${Math.round(g.model.awayProb * 100)}%` : "—";
+                  const modelProbPct = modelProb != null ? `${Math.round(modelProb * 100)}%` : "—";
+                  const bookProbPct = impliedProb != null ? `${Math.round(impliedProb * 100)}%` : "—";
+                  const edgeLabel = `${leanEdge >= 0 ? "+" : ""}${(leanEdge * 100).toFixed(1)}pp`;
+                  return (
+                    <Card key={g.gamePk} style={{ padding: "12px 14px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 4 }}>
+                            <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{g.away?.abbr} @ {g.home?.abbr}</div>
+                            {g.model?.hasEdge && (
+                              <span style={{ background: "rgba(52,211,153,0.14)", border: "1px solid rgba(52,211,153,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#34d399", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                                EDGE
+                              </span>
+                            )}
+                            {g.dataWarning && (
+                              <span style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.30)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#fbbf24", fontFamily: "monospace" }}>
+                                PARTIAL DATA
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 7 }}>
+                            {g.awayPitcher?.name} vs {g.homePitcher?.name}
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: isNarrowPhone ? "1fr" : "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                            <div style={{ background: "#1a1c2e", border: "1px solid #1f2437", borderRadius: 10, padding: "8px 10px" }}>
+                              <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{g.away?.abbr} starter</div>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", marginBottom: 3 }}>{g.awayPitcher?.name}</div>
+                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 9, fontFamily: "monospace" }}>
+                                <span style={{ color: "#f59e0b" }}>ERA {g.awayPitcher?.era != null ? g.awayPitcher.era.toFixed(2) : "—"}</span>
+                                <span style={{ color: "#22c55e" }}>WHIP {g.awayPitcher?.whip != null ? g.awayPitcher.whip.toFixed(2) : "—"}</span>
+                                <span style={{ color: "#9ca3af" }}>L3 ERA {g.awayPitcher?.lastThreeEra != null ? g.awayPitcher.lastThreeEra.toFixed(2) : "—"}</span>
+                              </div>
+                            </div>
+                            <div style={{ background: "#1a1c2e", border: "1px solid #1f2437", borderRadius: 10, padding: "8px 10px" }}>
+                              <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 4 }}>{g.home?.abbr} starter</div>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: "#f9fafb", marginBottom: 3 }}>{g.homePitcher?.name}</div>
+                              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", fontSize: 9, fontFamily: "monospace" }}>
+                                <span style={{ color: "#f59e0b" }}>ERA {g.homePitcher?.era != null ? g.homePitcher.era.toFixed(2) : "—"}</span>
+                                <span style={{ color: "#22c55e" }}>WHIP {g.homePitcher?.whip != null ? g.homePitcher.whip.toFixed(2) : "—"}</span>
+                                <span style={{ color: "#9ca3af" }}>L3 ERA {g.homePitcher?.lastThreeEra != null ? g.homePitcher.lastThreeEra.toFixed(2) : "—"}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                            <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                              Ump {g.umpire?.name ?? "TBD"}
+                            </span>
+                            <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                              K tendency {g.umpire?.kTendency != null ? `${g.umpire.kTendency >= 0 ? "+" : ""}${g.umpire.kTendency.toFixed(2)}` : "—"}
+                            </span>
+                            <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                              ERA Δ {g.model?.features?.eraDiff != null ? `${g.model.features.eraDiff >= 0 ? "+" : ""}${g.model.features.eraDiff.toFixed(2)}` : "—"}
+                            </span>
+                            <span style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
+                              WHIP Δ {g.model?.features?.whipDiff != null ? `${g.model.features.whipDiff >= 0 ? "+" : ""}${g.model.features.whipDiff.toFixed(2)}` : "—"}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div style={{ minWidth: 118, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 7, flexShrink: 0 }}>
+                          <div style={{ background: `${edgeColor}15`, border: `1px solid ${edgeColor}33`, borderRadius: 10, padding: "7px 10px", textAlign: "right", minWidth: 110 }}>
+                            <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace", marginBottom: 2 }}>{leanTeam?.abbr} F5 ML</div>
+                            <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
+                            <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>Book {bookProbPct} · {bookLine ?? "—"}</div>
+                          </div>
+                          <div style={{ fontSize: 11, fontWeight: 800, color: edgeColor, fontFamily: "monospace" }}>{edgeLabel}</div>
+                          <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", textAlign: "right" }}>
+                            {g.away?.abbr} {awayProbPct} / {g.home?.abbr} {homeProbPct}
+                          </div>
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {view === "scout" && isScoutUser && (
           <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
-                <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🎯 THE SCOUT</div>
-                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>AI-generated picks · Not financial advice</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🎯 THE SCOUT</div>
+                  <TierBadge tier="ai" />
+                </div>
+                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>LLM-assisted picks · Not financial advice</div>
               </div>
               <button
                 onClick={handleScoutRegenerate}
@@ -5835,9 +6200,12 @@ export default function App() {
             {/* ── Header row ── */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
-                <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>⚾ HR SCOUT</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>⚾ HR SCOUT</div>
+                  <TierBadge tier="projection" />
+                </div>
                 <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
-                  Algorithm + AI · HR prop research · Not financial advice
+                  Projection-based HR prop research · Not financial advice
                   {hrScoutGeneratedAt && (
                     <span style={{ marginLeft: 8, color: "#374151" }}>
                       · {new Date(hrScoutGeneratedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -6588,9 +6956,12 @@ export default function App() {
             const facingPitcher = lineupSide === "away"
               ? pitcher
               : (game.awayPitcher ?? { name: "Away Starter", arsenal: [] });
-            const label = lineupSide === "away"
-              ? `${game.away.abbr} Lineup vs ${facingPitcher.name}`
-              : `${game.home.abbr} Lineup vs ${facingPitcher.name}`;
+            const isRosterFallback = liveLineups[gamePkKey]?.source === "roster";
+            const label = isRosterFallback
+              ? `${lineupSide === "away" ? game.away.abbr : game.home.abbr} Roster (Lineup Pending)`
+              : (lineupSide === "away"
+                ? `${game.away.abbr} Lineup vs ${facingPitcher.name}`
+                : `${game.home.abbr} Lineup vs ${facingPitcher.name}`);
             const lineupConfirmed = liveLineups[gamePkKey]?.confirmed === true;
 
             return (<>
@@ -6632,6 +7003,24 @@ export default function App() {
 
               {/* Batter rows */}
               <Card style={{ padding: "8px" }}>
+                {isRosterFallback && (
+                  <div style={{
+                    background: "rgba(245,158,11,0.08)",
+                    border: "1px solid rgba(245,158,11,0.25)",
+                    borderRadius: 8,
+                    padding: "8px 12px",
+                    marginBottom: 10,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                  }}>
+                    <span style={{ fontSize: 14 }}>📋</span>
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "#fbbf24" }}>Lineup Not Yet Posted</div>
+                      <div style={{ fontSize: 10, color: "#9ca3af" }}>Showing active roster · Batting order TBD · Check back closer to first pitch</div>
+                    </div>
+                  </div>
+                )}
                 {lineup.length === 0 ? (
                   <div style={{ textAlign: "center", padding: "22px 0" }}>
                     <div style={{ fontSize: 26, marginBottom: 8 }}>📋</div>
@@ -6674,7 +7063,20 @@ export default function App() {
                       <div onClick={() => { const opening = !isExpanded; setExpandedBatter(opening ? i : null); onBatterExpand(b, opening, facingPitcher?.id); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 8px", cursor: "pointer", borderRadius: 8, background: isExpanded ? "rgba(34,197,94,0.05)" : "transparent", transition: "background 0.15s" }}>
 
                         {/* Order number */}
-                        <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#6b7280", flexShrink: 0 }}>{b.order}</div>
+                        <div style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: 6,
+                          background: "#1e2030",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 11,
+                          fontWeight: isRosterFallback ? 600 : 700,
+                          color: isRosterFallback ? "#6b7280" : "#6b7280",
+                          flexShrink: 0,
+                          fontFamily: isRosterFallback ? "inherit" : "inherit",
+                        }}>{isRosterFallback && b.order === null ? (b.pos ?? "—") : b.order}</div>
 
                         {/* Name + position */}
                         <div style={{ flex: 1, minWidth: 0 }}>
@@ -7373,6 +7775,7 @@ export default function App() {
           {tab === "props" && (<>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <SLabel style={{ marginBottom: 0 }}>Prop Confidence Meters</SLabel>
+              <TierBadge tier="ai" />
               {liveProps.length > 0
                 ? <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>
                 : <span style={{ fontSize: 8, fontWeight: 700, color: "#f59e0b", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 4, padding: "2px 6px" }}>DEMO</span>
@@ -7484,16 +7887,14 @@ export default function App() {
                         <div style={{ display: "flex", alignItems: "center", gap: 5, flex: 1, paddingRight: 8, minWidth: 0, flexWrap: "wrap" }}>
                           <span style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", lineHeight: 1.4 }}>{p.label}</span>
                           {entry.kind === "algo" && (
-                            <span style={{ fontSize: 7, fontWeight: 800, color: "#94a3b8", background: "rgba(148,163,184,0.08)", border: "1px solid rgba(148,163,184,0.2)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em", flexShrink: 0 }}
-                              title="Algorithmic pick — generated by the scoring model using Statcast + sportsbook data. No AI/LLM involved.">⚙ ALGO</span>
+                            <TierBadge tier="projection" />
                           )}
                           {entry.kind === "ai" && (
-                            <span style={{ fontSize: 7, fontWeight: 800, color: "#818cf8", background: "rgba(129,140,248,0.08)", border: "1px solid rgba(129,140,248,0.2)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", letterSpacing: "0.04em", flexShrink: 0 }}
-                              title="AI-powered pick — generated by Claude analyzing pitcher stats, lineup matchups, and park factors.">✦ AI</span>
+                            <TierBadge tier="ai" />
                           )}
                           {bothAgree && (
                             <span style={{ fontSize: 7, fontWeight: 800, color: "#818cf8", background: "rgba(129,140,248,0.12)", border: "1px solid rgba(129,140,248,0.4)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace", flexShrink: 0 }}
-                              title="Both the algorithmic model and AI analysis agree on this pick.">✦ BOTH AGREE</span>
+                              title="The projection and AI-assisted analysis agree on this pick.">✦ BOTH AGREE</span>
                           )}
                         </div>
                         <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
@@ -7543,7 +7944,7 @@ export default function App() {
                 return (
                   <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 4px" }}>
                     <span style={{ fontSize: 9, color: "#818cf8", fontFamily: "monospace" }}>✦</span>
-                    <span style={{ fontSize: 10, color: "#4b5563" }}>AI analysis loading…</span>
+                    <span style={{ fontSize: 10, color: "#4b5563" }}>AI-assisted analysis loading…</span>
                   </div>
                 );
               })()}
@@ -8870,6 +9271,28 @@ export default function App() {
               return null;
             }
 
+            if (type === "f5ml" || type === "f5spread") {
+              const box = liveBoxscores[item.gamePk];
+              const innings = box?.linescore?.innings ?? [];
+              if (innings.length < 5) return null;
+
+              const f5AwayScore = innings.slice(0, 5).reduce((sum, inn) => sum + (inn?.away ?? 0), 0);
+              const f5HomeScore = innings.slice(0, 5).reduce((sum, inn) => sum + (inn?.home ?? 0), 0);
+
+              if (type === "f5ml") {
+                if (f5AwayScore === f5HomeScore) return null;
+                if (item.lean === "HOME") return f5HomeScore > f5AwayScore;
+                if (item.lean === "AWAY") return f5AwayScore > f5HomeScore;
+                return null;
+              }
+
+              const line = parseFloat(item.line);
+              if (!Number.isFinite(line)) return null;
+              if (item.lean === "HOME") return (f5HomeScore + line) > f5AwayScore;
+              if (item.lean === "AWAY") return (f5AwayScore + line) > f5HomeScore;
+              return null;
+            }
+
             return null;
           };
 
@@ -8887,12 +9310,26 @@ export default function App() {
           const gameSubtabHitSummary = {
             nrfi: gameHitSummary("nrfi", computeGameBoard("nrfi", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
             total: gameHitSummary("total", computeGameBoard("total", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+            spread: gameHitSummary("spread", computeGameBoard("spread", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+            ml: gameHitSummary("ml", computeGameBoard("ml", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+            f5ml: gameHitSummary("f5ml", computeGameBoard("f5ml", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+            f5spread: gameHitSummary("f5spread", computeGameBoard("f5spread", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+          };
+
+          const displayedGameBoardScore = (item) => {
+            if (!item) return 0;
+            const lean = item.lean;
+            return lean === "YRFI" || lean === "UNDER" || lean === "AWAY"
+              ? 100 - (item.score ?? 0)
+              : (item.score ?? 0);
           };
 
           // Lean color for game board cards
-          const leanColor = (lean) =>
-            lean === "NRFI" || lean === "OVER" || lean === "HOME" ? "#22c55e"
-            : lean === "YRFI" || lean === "UNDER" || lean === "AWAY" ? "#ef4444"
+          const leanColor = (lean, leanAbbr = null) =>
+            leanAbbr
+              ? "#22c55e"
+              : lean === "NRFI" || lean === "OVER" || lean === "HOME" ? "#22c55e"
+              : lean === "YRFI" || lean === "UNDER" || lean === "AWAY" ? "#ef4444"
             : "#f9fafb";
 
           return (
@@ -8918,7 +9355,7 @@ export default function App() {
               {/* Games sub-tab row */}
               {isGameBoard && (
                 <div style={{ display: "flex", gap: 5, marginBottom: 10 }}>
-                  {[["nrfi", "NRFI"], ["total", "O/U Total"], ["spread", "Run Line"], ["ml", "Moneyline"]].map(([sub, label]) => (
+                  {[["nrfi", "NRFI"], ["total", "O/U Total"], ["spread", "Run Line"], ["ml", "Moneyline"], ["f5ml", "F5 ML"], ["f5spread", "F5 RL"]].map(([sub, label]) => (
                     <button key={sub} onClick={() => setGameSubTab(sub)}
                       style={{ position: "relative", flex: 1, background: gameSubTab === sub ? "rgba(129,140,248,0.18)" : "rgba(255,255,255,0.03)",
                         border: `1px solid ${gameSubTab === sub ? "#818cf8" : "#1f2437"}`,
@@ -8937,17 +9374,22 @@ export default function App() {
 
               {/* Sub-header */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                <span style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                  {isGameBoard
-                    ? (gameSubTab === "nrfi" ? "Ranked by edge · SP ERA · park · weather · umpire"
-                       : gameSubTab === "total" ? "Ranked by edge · both SPs ERA · park · weather"
-                       : gameSubTab === "spread" ? "Ranked by edge · SP differential · home field · market"
-                       : "Ranked by edge · SP matchup · home field · market implied")
-                    : boardTab === "hr" ? "Ranked by power · park · wind · matchup"
-                    : boardTab === "hits" ? "Ranked by avg · recent form · park · matchup"
-                    : boardTab === "k" ? "Ranked by K/9 · umpire · pitch mix · park · recent form"
-                    : "Ranked by avg IP · control · recent workload · park"}
-                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                  {(isGameBoard || isPitcherBoard) && <TierBadge tier="algorithmic" />}
+                  <span style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                    {isGameBoard
+                      ? (gameSubTab === "nrfi" ? "Ranked by edge · SP ERA · park · weather · umpire"
+                         : gameSubTab === "total" ? "Ranked by edge · both SPs ERA · park · weather"
+                         : gameSubTab === "spread" ? "Ranked by edge · SP differential · home field · market"
+                         : gameSubTab === "ml" ? "Ranked by edge · SP matchup · home field · market implied"
+                         : gameSubTab === "f5ml" ? "Ranked by edge · F5 SP matchup · command · umpire · market"
+                         : "Ranked by edge · F5 SP differential · command · umpire · market")
+                      : boardTab === "hr" ? "Ranked by power · park · wind · matchup"
+                      : boardTab === "hits" ? "Ranked by avg · recent form · park · matchup"
+                      : boardTab === "k" ? "Ranked by K/9 · umpire · pitch mix · park · recent form"
+                      : "Ranked by avg IP · control · recent workload · park"}
+                  </span>
+                </div>
                 <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace" }}>
                   {isGameBoard
                     ? `${(activeSlate ?? []).length} games`
@@ -8970,14 +9412,15 @@ export default function App() {
                 return (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {gameBoardCandidates.map((c, i) => {
-                      const sc = scoreColor(c.score);
-                      const lc = leanColor(c.lean);
+                      const displayScore = displayedGameBoardScore(c);
+                      const sc = scoreColor(displayScore);
+                      const lc = leanColor(c.lean, c.leanAbbr);
                       const gameStatus = getBoardGameStatus(c.gamePk);
                       const liveScore = liveScores[c.gamePk];
                       const finalTotalRuns = gameSubTab === "total" && gameStatus === "FINAL" && liveScore
                         ? (liveScore.awayScore ?? 0) + (liveScore.homeScore ?? 0)
                         : null;
-                      const gameHit = (gameSubTab === "nrfi" || gameSubTab === "total" || gameSubTab === "spread" || gameSubTab === "ml")
+                      const gameHit = (gameSubTab === "nrfi" || gameSubTab === "total" || gameSubTab === "spread" || gameSubTab === "ml" || gameSubTab === "f5ml" || gameSubTab === "f5spread")
                         ? gameBoardOutcome(gameSubTab, c)
                         : null;
                       const resultBorderColor = gameHit === null ? null : (gameHit ? "#22c55e" : "#ef4444");
@@ -8991,12 +9434,13 @@ export default function App() {
                             {/* Rank + score */}
                             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
                               <div style={{ width: 24, height: 24, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280" }}>{i + 1}</div>
-                              <div style={{ fontSize: 14, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</div>
+                              <div style={{ fontSize: 14, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{displayScore}</div>
                             </div>
                             {/* Main */}
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
                                 <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{c.away?.abbr ?? "?"} @ {c.home?.abbr ?? "?"}</span>
+                                <TierBadge tier="algorithmic" />
                                 {gameStatus && (
                                   <span style={{ fontSize: 8, fontWeight: 800, color: gameStatus === "LIVE" ? "#22c55e" : "#6b7280", background: gameStatus === "LIVE" ? "rgba(34,197,94,0.12)" : "#1e2030", border: `1px solid ${gameStatus === "LIVE" ? "rgba(34,197,94,0.35)" : "#374151"}`, borderRadius: 4, padding: "1px 5px" }}>{gameStatus}</span>
                                 )}
@@ -9058,6 +9502,13 @@ export default function App() {
                                     } else if (gameSubTab === "ml") {
                                       const ml = isAwayLean ? bd.awayML : bd.homeML;
                                       if (ml) lineText = ml;
+                                    } else if (gameSubTab === "f5ml") {
+                                      const ml = isAwayLean ? bd.f5AwayML : bd.f5HomeML;
+                                      if (ml) lineText = `F5 ${ml}`;
+                                    } else if (gameSubTab === "f5spread") {
+                                      const sp = isAwayLean ? bd.f5AwaySpread : bd.f5HomeSpread;
+                                      const spOd = isAwayLean ? bd.f5AwaySpreadOdds : bd.f5HomeSpreadOdds;
+                                      if (sp) lineText = `F5 ${sp}${spOd ? ` ${spOd}` : ""}`;
                                     }
                                     if (!lineText) return null;
                                     return { bk, color, lineText };
@@ -9121,24 +9572,31 @@ export default function App() {
                   const todayResult = liveBoardResults[c.id] ?? null;
                   const hasResolvedResult = !!todayResult && !todayResult.live;
                   const propLineValue = c.propLine?.line ?? c.suggestedLine;
+                  const boardLean = c.score >= 55 ? "OVER" : "UNDER";
+                  const boardLeanPositive = boardLean === "OVER";
                   const pitcherHit = hasResolvedResult && propLineValue !== null && propLineValue !== undefined && (
                     boardTab === "k"
-                      ? ((c.score >= 55 ? "OVER" : "UNDER") === "UNDER" ? todayResult.k < propLineValue : todayResult.k > propLineValue)
-                      : ((c.score >= 55 ? "OVER" : "UNDER") === "UNDER" ? todayResult.outs < propLineValue : todayResult.outs > propLineValue)
+                      ? (boardLean === "UNDER" ? todayResult.k < propLineValue : todayResult.k > propLineValue)
+                      : (boardLean === "UNDER" ? todayResult.outs < propLineValue : todayResult.outs > propLineValue)
                   );
                   const resultBorderColor = hasResolvedResult ? (pitcherHit ? "#22c55e" : "#ef4444") : null;
                   const resultCardStyle = resultBorderColor
                     ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
                     : {};
+                  const propBadgeLine = propLineValue !== null && propLineValue !== undefined ? `${propLineValue}` : "—";
                   return (
                     <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-                        {/* Rank */}
-                        <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", flexShrink: 0, marginTop: 1 }}>{i + 1}</div>
+                        {/* Rank + score */}
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                          <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", marginTop: 1 }}>{i + 1}</div>
+                          <div style={{ fontSize: 14, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</div>
+                        </div>
                         {/* Main info */}
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                             <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
+                            <TierBadge tier="algorithmic" />
                             <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
                             <span style={{ fontSize: 9, color: "#9ca3af" }}>{c.hand}HP</span>
                             {boardGameStatus === "LIVE" && (
@@ -9195,8 +9653,8 @@ export default function App() {
                             {(() => {
                               const line = c.propLine ? c.propLine.line : c.suggestedLine;
                               if (line === null) return null;
-                              const lean = c.score >= 55 ? "OVER" : "UNDER";
-                              const positive = lean === "OVER";
+                              const lean = boardLean;
+                              const positive = boardLeanPositive;
                               const conf = Math.min(85, Math.round(50 + (c.score - 40) * 35 / 55));
                               const color  = positive ? "#22c55e" : "#ef4444";
                               const bg     = positive ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)";
@@ -9249,10 +9707,13 @@ export default function App() {
                             </div>
                           )}
                         </div>
-                        {/* Score badge */}
-                        <div style={{ flexShrink: 0, width: 44, borderRadius: 10, background: `${sc}22`, border: `1px solid ${sc}55`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "5px 0 4px", gap: 2 }}>
-                          <span style={{ fontSize: 13, fontWeight: 800, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</span>
-                          <span style={{ fontSize: 7, fontWeight: 700, color: sc, fontFamily: "monospace", opacity: 0.7, letterSpacing: "0.05em" }}>WHY?</span>
+                        {/* Prop badge */}
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+                          <div style={{ background: `${boardLeanPositive ? "#22c55e" : "#ef4444"}18`, border: `1px solid ${boardLeanPositive ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)"}`, borderRadius: 6, padding: "4px 8px", textAlign: "center", minWidth: 54 }}>
+                            <div style={{ fontSize: 12, fontWeight: 900, color: boardLeanPositive ? "#22c55e" : "#ef4444", fontFamily: "monospace", lineHeight: 1 }}>{boardLean}</div>
+                            <div style={{ fontSize: 8, color: boardLeanPositive ? "#22c55e" : "#ef4444", fontFamily: "monospace", marginTop: 1, opacity: 0.8 }}>{propBadgeLine}</div>
+                          </div>
+                          <span style={{ fontSize: 8, color: "#4b5563" }}>tap for why</span>
                         </div>
                       </div>
                     </Card>
@@ -9536,9 +9997,12 @@ export default function App() {
       {/* ── Why? Modal ── */}
       {whyModal && (() => {
         const { c, type, rank } = whyModal;
-        const isGameType = type === "nrfi" || type === "total" || type === "spread" || type === "ml";
+        const isGameType = type === "nrfi" || type === "total" || type === "spread" || type === "ml" || type === "f5ml" || type === "f5spread";
         const factors = generateWhyFactors(c, type);
-        const sc = c.score >= 70 ? "#22c55e" : c.score >= 55 ? "#f59e0b" : c.score >= 40 ? "#ef4444" : "#6b7280";
+        const displayScore = isGameType
+          ? (c.lean === "YRFI" || c.lean === "UNDER" || c.lean === "AWAY" ? 100 - c.score : c.score)
+          : c.score;
+        const sc = displayScore >= 70 ? "#22c55e" : displayScore >= 55 ? "#f59e0b" : displayScore >= 40 ? "#ef4444" : "#6b7280";
         const conf = Math.min(85, Math.round(50 + (Math.abs(c.score - 50)) * 35 / 30));
         // For game types, use the pre-computed lean; for prop types, derive from score
         const lean = isGameType ? c.lean : (c.score >= 55 ? "OVER" : "UNDER");
@@ -9548,7 +10012,8 @@ export default function App() {
         const typeLabel = type === "k" ? "⚡ K PROPS" : type === "outs" ? "📋 OUTS"
           : type === "hr" ? "⚾ HR" : type === "hits" ? "🎯 HITS"
           : type === "nrfi" ? "🎲 NRFI" : type === "total" ? "🎲 O/U TOTAL"
-          : type === "spread" ? "🎲 RUN LINE" : "🎲 MONEYLINE";
+          : type === "spread" ? "🎲 RUN LINE" : type === "ml" ? "🎲 MONEYLINE"
+          : type === "f5ml" ? "🎲 F5 MONEYLINE" : "🎲 F5 RUN LINE";
         return (
           <div
             onClick={() => setWhyModal(null)}
@@ -9583,7 +10048,7 @@ export default function App() {
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                   <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 22, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</div>
+                    <div style={{ fontSize: 22, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{displayScore}</div>
                     <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 2 }}>SCORE</div>
                   </div>
                   <button
@@ -9622,7 +10087,16 @@ export default function App() {
               {/* Footer */}
               <div style={{ padding: "12px 16px 20px", borderTop: "1px solid #1f2437", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#161827" }}>
                 <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace" }}>
-                  {c.score >= 70 ? "Strong edge — multiple positive signals" : c.score >= 58 ? "Moderate edge — worth a look" : c.score >= 45 ? "Slight lean — marginal edge" : "Weak — limited conviction"}
+                  {(() => {
+                    const top = (c.factors ?? [])
+                      .filter(f => f.pts > 0)
+                      .sort((a, b) => b.pts - a.pts)
+                      .slice(0, 2)
+                      .map(f => f.detail ?? f.label);
+                    if (top.length >= 2) return `${top[0]} · ${top[1]}`;
+                    if (top.length === 1) return top[0];
+                    return displayScore >= 58 ? "Edge — positive signals present" : "Marginal lean";
+                  })()}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                   <div style={{ background: `${leanColor}18`, border: `1px solid ${leanColor}55`, borderRadius: 8, padding: "5px 10px", display: "flex", alignItems: "center", gap: 5 }}>
@@ -9948,7 +10422,7 @@ export default function App() {
                   <div style={{ background: "rgba(129,140,248,0.07)", border: "1px solid rgba(129,140,248,0.25)", borderRadius: 10, padding: "12px 14px" }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: "#818cf8", fontFamily: "monospace", marginBottom: 6 }}>✦ CARD AGREES — Convergence Badge</div>
                     <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
-                      When the purple <span style={{ color: "#818cf8", fontWeight: 700 }}>✦ CARD AGREES</span> badge appears on a Model Pick card, it means the <strong style={{ color: "#f9fafb" }}>Daily Card</strong> (the AI-generated analysis) independently selected the same pitcher for the same prop type. This is a convergence signal — the algorithmic model and the AI analysis reached the same conclusion through separate reasoning paths. Two independent systems agreeing is meaningfully stronger than either alone.
+                      When the purple <span style={{ color: "#818cf8", fontWeight: 700 }}>✦ CARD AGREES</span> badge appears on a Model Pick card, it means the <strong style={{ color: "#f9fafb" }}>Daily Card</strong> (the AI-assisted analysis) independently selected the same pitcher for the same prop type. This is a convergence signal — the algorithmic model and the AI-assisted analysis reached the same conclusion through separate reasoning paths. Two independent systems agreeing is meaningfully stronger than either alone.
                     </div>
                   </div>
                   <div style={{ background: "rgba(34,197,94,0.07)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 8, padding: "10px 12px" }}>

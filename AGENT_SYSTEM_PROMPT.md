@@ -5677,12 +5677,38 @@ When this moves off the backlog later, likely first targets are:
 
 ### Decision
 
-This was explicitly deferred/backlogged for later.
+This is now explicitly on the backlog as a **near-term performance / maintainability refactor**, not just a distant cleanup idea.
 
 Reasoning:
-- current priority is finishing the remaining feature/backlog items
-- bundle cleanup is worthwhile, but lower priority than product work right now
-- when revisited, it should probably be treated as a structured refactor/optimization pass rather than an ad hoc cleanup
+- Vite large-chunk warnings continue to appear on every frontend build
+- the app still works correctly, but the bundle size is now large enough to be worth addressing soon
+- the main goal should be:
+  - reduce initial JS shipped to the browser
+  - improve mobile / lower-powered device load performance
+  - make `prop-scout-v7.jsx` easier to maintain
+- when tackled, this should be a structured refactor / optimization pass rather than an ad hoc cleanup
+
+### Priority when revisited
+
+Recommended first pass:
+
+1. split heavy views into separate modules
+2. lazy-load non-core views / tabs
+3. re-run `npm run build` and compare chunk output
+
+Most likely first lazy-load candidates:
+
+- Scout
+- HR Scout
+- Advisor
+- Chat
+- possibly Board / Model if needed after the first pass
+
+### Status
+
+- backlog item
+- user has explicitly said they want this addressed soon
+- no implementation started yet
 
 ---
 
@@ -9457,3 +9483,1429 @@ All games on the slate are now included in the Advisor's context. On a 15-game d
 ### Commit message
 
 `fix: remove advisor slate cap — include all games in buildAdvisorContext`
+
+---
+
+## BACKLOG TASK 60 — Auto-Grade `isFinal` Detection Bug (K Props Stay Pending)
+
+**Status:** Open — root cause identified
+**LOE:** XS
+**Type:** Backend only — `backend/routes/boxscore.js`
+**Priority:** Medium
+
+### Bug
+
+K prop picks (and potentially other pitcher props) from prior days remain `result === null` indefinitely even after games have finished. The historical catch-up grader (Phase A frontend + Phase B nightly job) fetches the boxscore, `computeGrade` receives the data, but returns `null` because `box.isFinal` is false.
+
+### Root cause
+
+`isFinal` detection in `backend/routes/boxscore.js` (line ~84):
+
+```js
+const isFinal = inningsPlayed > 0 && !ls.currentInning;
+```
+
+For games 2+ days old, the MLB Stats API may return `ls.currentInning` as `0` instead of `undefined`. Once a bad `isFinal: false` value is cached in-memory, all subsequent historical grader retries hit the same stale cache entry and keep returning null indefinitely.
+
+### Fix
+
+```js
+// Before
+const isFinal = inningsPlayed > 0 && !ls.currentInning;
+
+// After
+const isFinal = (inningsPlayed > 0 && !ls.currentInning)
+  || ls.abstractGameState === "Final";
+```
+
+### Workaround until fixed
+
+Manual HIT/MISS buttons on each pick card are fully functional — tap the correct button to settle any stuck pending pick.
+
+---
+
+## HANDOFF NOTE — 2026-05-01 — Backlog Added: Hybrid AI Summary Text for Board / Model Cards
+
+Codex and user aligned on a new backlog direction for improving generic card summary text such as:
+
+- `Strong edge — multiple positive signals`
+
+### Decision
+
+Use a **hybrid** approach instead of pure templates or fully AI-generated explanations.
+
+### Why hybrid
+
+- keep scoring, rankings, confidence, and pick selection fully deterministic
+- improve the readability of the short summary line
+- avoid AI inventing stats or changing the pick rationale
+- keep token usage and cost extremely low
+
+### Recommended implementation shape
+
+1. Existing scoring model stays unchanged
+2. For each card, extract a compact structured payload:
+   - market / prop type
+   - lean
+   - top 2 positive factors
+   - optional top caution / negative factor
+3. Send only that compact payload to a small model rewrite step
+4. AI returns:
+   - one short summary sentence
+   - optionally one caution sentence in cases where caution is meaningful
+
+### Suggested AI constraints
+
+- one sentence
+- roughly 8–16 words
+- only use supplied factors
+- no new stats
+- no hype / marketing phrasing
+- market-specific wording
+
+### Example target output
+
+Input:
+
+- market: Outs
+- lean: Over
+- positives: low WHIP, solid recent depth
+- caution: neutral park
+
+Output:
+
+- `Elite control and solid recent depth support the over on outs.`
+
+### Cost note
+
+Using `gpt-4o-mini` for this kind of tightly constrained rewrite appears inexpensive enough to be practical at slate scale. The decision was to prefer hybrid over full-AI generation for both control and cost efficiency.
+
+### Status
+
+- backlog only
+- no implementation started yet
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — Backlog Added: Show Active Roster Before Confirmed Lineups
+
+User requested a lineup/roster behavior change for the game view and all downstream batter-driven tabs.
+
+### Product direction
+
+When a game does **not** have a confirmed lineup yet:
+
+- still show hitters in the lineup area using the active/team roster
+- label the section as `Roster` instead of `Lineup`
+- once the confirmed batting order is posted, switch the label back to `Lineup`
+
+### Why
+
+User feedback indicates people still want to browse likely batters before official lineups post.
+
+The current experience is too empty early in the day, especially for:
+
+- HR tab
+- Hits tab
+- other batter-facing views that currently depend on confirmed lineups to feel populated
+
+### Desired behavior
+
+- Pre-lineup state:
+  - show active roster hitters
+  - still surface player props / odds if available
+  - still compute algorithmic confidence scores using the available roster players
+  - clearly indicate that the order is not confirmed yet
+- Post-lineup state:
+  - replace roster view with confirmed batting order
+  - re-run or refresh confidence ordering once real lineup slots are known
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — Backlog Added: First 5 Games Board Markets
+
+User requested adding **First 5 innings** game-level markets to the Board → Games experience.
+
+### Product direction
+
+Add two new Board → Games sub-tabs:
+
+- `F5 Moneyline`
+- `F5 Run Line`
+
+These should live alongside the current Games sub-tabs:
+
+- `NRFI`
+- `O/U Total`
+- `Run Line`
+- `Moneyline`
+
+### Why
+
+User wants early-game team-side markets surfaced in the same algorithmic board style as full-game Run Line / Moneyline.
+
+This is specifically intended to give users a cleaner way to evaluate:
+
+- starting pitcher edge
+- first-half game script
+- reduced bullpen influence
+
+### Expected scoring direction
+
+The scoring philosophy should likely mirror the existing full-game Games engine, but with F5-specific weighting:
+
+- heavier emphasis on starting pitcher differential
+- much less or zero bullpen impact
+- home-field effect may still matter, but likely less than full-game ML/RL
+- market-implied odds / line comparison should still be part of the model
+
+### UI expectation
+
+- add F5 sub-tabs under Board → Games rather than creating a separate section
+- cards should follow the same visual pattern as current Games cards
+- lean badge should show team abbreviation, same as current ML / Run Line behavior
+- displayed score should follow the newer side-strength presentation model
+
+### Notes / caution
+
+- F5 was previously removed from other parts of the app, so this should be treated as a **new scoped re-introduction** only for Board → Games
+- if implemented later, grading / historical settlement logic may also need an F5 branch if these picks become loggable
+- no implementation started yet
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — Backlog Added: Clarify Algorithmic vs Projection vs AI-Assisted Labels
+
+User wants clearer product language so people can immediately tell what kind of system is powering each recommendation.
+
+### Problem
+
+Right now the app mixes together several different intelligence modes:
+
+- deterministic algorithmic scoring
+- rule-based / heuristic projected values
+- AI-assisted analysis and synthesis
+
+Users can reasonably confuse these, especially when they see:
+
+- Model Picks confidence + projected values
+- Board scores
+- Scout / HR Scout / Advisor outputs
+- merged Algo + AI props cards
+
+### Recommended terminology
+
+Use a simple 3-part labeling system:
+
+1. `⚙ Algorithmic`
+   - deterministic scoring rules
+   - same inputs = same output
+   - no LLM involvement
+
+2. `Estimated Projection`
+   - rule-based stat estimate
+   - not a trained predictive model
+   - examples: projected K / projected Outs
+
+3. `✦ AI-Assisted`
+   - AI-generated synthesis / reasoning
+   - built from structured slate + matchup context
+
+### Likely app mapping
+
+- `Board`
+  - label / describe as `⚙ Algorithmic`
+- `Model Picks`
+  - label / describe as `⚙ Algorithmic`
+  - projected stat numbers should be described as `Estimated Projection`
+- `Scout`
+  - label / describe as `✦ AI-Assisted`
+- `HR Scout`
+  - label / describe as `✦ AI-Assisted`
+- `Advisor`
+  - label / describe as `✦ AI-Assisted`
+- merged Props view
+  - preserve distinction between algorithmic and AI-generated picks
+
+### Suggested helper copy
+
+- `⚙ Algorithmic`
+  - `Generated by deterministic scoring rules using stats, odds, and matchup data.`
+- `Estimated Projection`
+  - `Rule-based stat estimate, not a trained predictive model.`
+- `✦ AI-Assisted`
+  - `AI-generated analysis built from structured slate and matchup context.`
+
+### Status
+
+- backlog item
+- no implementation started yet
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — Backlog Added: Private Predictive Models Tab (Start with F5 Moneyline)
+
+User wants to explore a **separate predictive-modeling lane** that does **not** change the core product philosophy of Prop Scout as a research-first app.
+
+### Product direction
+
+If implemented, this should be:
+
+- a **new private / gated tab**
+- visible only to the user for now
+- clearly separated from the main research / heuristic / AI-assisted views
+
+This is **not** intended to replace:
+
+- Board
+- Model Picks
+- Scout
+- HR Scout
+- Advisor
+
+It is an experimental predictive layer built alongside them.
+
+### First predictive market to pursue
+
+Start with:
+
+- `F5 Moneyline`
+
+Reasoning:
+
+- cleaner modeling problem than HR props
+- simpler target than player props
+- much less bullpen noise than full-game moneyline
+- strongly aligned with the app’s existing starting-pitcher / early-game research strengths
+
+### Important modeling constraint
+
+Use **only data / features already provided by Prop Scout**.
+
+That means:
+
+- no external random feature pipeline
+- no separate non-PS data dependency as the first version
+- the predictive model should sit on top of the PS data ecosystem
+
+### Intended architecture
+
+- Prop Scout data = **feature/input layer**
+- predictive model = **separate modeling layer**
+- new private tab = **output / experiment surface**
+
+This means the model can use PS-derived inputs such as:
+
+- starting pitcher quality / recent form
+- WHIP / walk profile / contact suppression metrics
+- lineup strength / handedness context
+- weather / park context
+- injuries
+- existing game-level context already assembled by the app
+
+But the final predictive output should be its **own model result**, not just a relabeled PS heuristic score.
+
+### Explicit product philosophy
+
+Main app:
+
+- research-first
+- transparent
+- heuristic / algorithmic / AI-assisted depending on tab
+
+Predictive tab:
+
+- experimental
+- private
+- model-driven
+- clearly labeled as distinct from the core app
+
+### Status
+
+- backlog item
+- user and Codex aligned on direction
+- no implementation started yet
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — Board / Slate UI Polish + Games Score Semantics
+
+Several frontend-only UX fixes were completed on `2026-05-02` in `prop-scout-v7.jsx`.
+
+### Scope
+
+- no backend changes
+- no schema changes
+- all work was limited to UI / render / ranking behavior
+
+### Completed changes
+
+1. **Slate cards now show probable starters**
+   - added a compact `SP` row under the time / stadium line
+   - format uses team abbreviation + pitcher last name
+   - only renders when probable starters are available
+
+2. **Board → Games hit badges extended**
+   - the `#/# hit` badge now appears on:
+     - `Run Line`
+     - `Moneyline`
+   - previously only `NRFI` / `O/U Total` were summarized
+
+3. **Board → K / Outs card layout updated**
+   - score moved to the left rail under rank
+   - right-side badge now shows the prop side / line (similar to Games board cards)
+   - this was a presentation-only change; no scoring math changed
+
+4. **Games → Moneyline / Run Line lean badge color fix**
+   - after switching badge text from `HOME/AWAY` to team abbreviations, away-side plays were still inheriting old red styling
+   - badge color logic now respects `leanAbbr` so team-side badges render correctly
+
+5. **Games board displayed score semantics updated**
+   - internal game model remains home-centered
+   - displayed score now reflects the selected side’s strength:
+     - `HOME` / `OVER` / `NRFI` show raw score
+     - `AWAY` / `UNDER` / `YRFI` show `100 - raw score`
+   - example:
+     - an away lean that internally scored `30` now displays as `70`
+
+6. **Games board ordering now matches displayed scores**
+   - after changing displayed score semantics, `computeGameBoard()` sorting was updated so cards rank by the displayed side-strength score rather than the old raw home-centered score
+
+7. **Board pitcher prop sportsbook badges preserved during batter-prop retries**
+   - recent HR/Hits retry logic could temporarily wipe shared game prop payloads by replacing them with `"loading"`
+   - this caused K / Outs cards to lose sportsbook chips locally even when pitcher lines were already present
+   - retry logic now preserves any existing props payload while continuing background retries for missing batter props
+
+8. **Historical K / Outs auto-grading name matching hardened**
+   - old pending picks with weak / partial pitcher metadata could fail to settle because grading fallback logic only matched the first token of the label
+   - pitcher name parsing was improved in:
+     - frontend `computeGrade(...)`
+     - backend `gradePicksJob.js`
+   - this specifically helps labels like `JR Ritchie Strikeouts OVER 4.5`
+
+### Verification
+
+- `npm run build` passed after each frontend pass
+- `node --check backend/jobs/gradePicksJob.js` passed for the grading matcher update
+
+### Notes
+
+- the recurring Vite large-chunk warning still appears during frontend builds
+- no functionality was removed; these were UX / reliability fixes on top of the existing behavior
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — CW Fixes: Task 58 + Task 60 (XS)
+
+Two XS fixes applied directly by CW (not sent to Codex).
+
+### Task 60 — isFinal Detection Bug (`backend/routes/boxscore.js`)
+
+**Problem:** Pending picks from prior days stayed ungraded because `isFinal` could evaluate false for finished games when the MLB API returned `currentInning: 0` instead of `undefined`.
+
+**Fix (line ~84):**
+```js
+// Before
+const isFinal = inningsPlayed > 0 && !ls.currentInning;
+
+// After
+const isFinal = (inningsPlayed > 0 && !ls.currentInning)
+  || ls.abstractGameState === "Final";
+```
+
+### Task 58 — Games Board Summary Text (`prop-scout-v7.jsx`)
+
+**Problem:** Games Board card footer showed a generic score-bucket string like `"Strong edge — multiple positive signals"` regardless of what signals actually drove the score.
+
+**Fix:** Replace the ternary with a snippet built from the card's existing `factors[]` array — pulls the top 2 positive factors by `pts` weight and joins their `detail` strings. Falls back to a generic phrase only when no factors are present.
+
+```jsx
+{(() => {
+  const top = (c.factors ?? [])
+    .filter(f => f.pts > 0)
+    .sort((a, b) => b.pts - a.pts)
+    .slice(0, 2)
+    .map(f => f.detail ?? f.label);
+  if (top.length >= 2) return `${top[0]} · ${top[1]}`;
+  if (top.length === 1) return top[0];
+  return displayScore >= 58 ? "Edge — positive signals present" : "Marginal lean";
+})()}
+```
+
+### Verification
+- `node --check backend/routes/boxscore.js` ✓
+- JSX edit visually verified in context
+
+---
+
+## CODEX TASK 61 — F5 Board Markets (F5 Moneyline + F5 Run Line) ✅ COMPLETED
+
+**LOE:** Medium
+**Files:** `backend/routes/odds.js`, `prop-scout-v7.jsx`
+**Priority:** Medium
+
+Add two new sub-tabs to Board → Games: `F5 Moneyline` and `F5 Run Line`. This is a scoped re-introduction of F5 markets — F5 was removed from all other areas of the app (Props tab, Model Picks, etc.) and this change does NOT bring it back anywhere else.
+
+---
+
+### Step 1 — Backend: parse F5 ML + F5 RL odds (`backend/routes/odds.js`)
+
+In `extractBook`, the `h2h_h1` (F5 moneyline) and `spreads_h1` (F5 run line) markets are not currently extracted. Add them alongside the existing `totals_h1` block:
+
+```js
+// After the existing totalsH1 block (line ~43):
+const h2hH1 = bk.markets.find(m => m.key === "h2h_h1");
+if (h2hH1) {
+  const awayOut = h2hH1.outcomes.find(o => o.name === awayTeam);
+  const homeOut = h2hH1.outcomes.find(o => o.name !== awayTeam);
+  if (awayOut) f5AwayML = fmtPrice(awayOut.price);
+  if (homeOut) f5HomeML = fmtPrice(homeOut.price);
+}
+
+const spreadsH1 = bk.markets.find(m => m.key === "spreads_h1");
+if (spreadsH1) {
+  const awayOut = spreadsH1.outcomes.find(o => o.name === awayTeam);
+  const homeOut = spreadsH1.outcomes.find(o => o.name !== awayTeam);
+  if (awayOut) { f5AwaySpread = awayOut.point >= 0 ? `+${awayOut.point}` : `${awayOut.point}`; f5AwaySpreadOdds = fmtPrice(awayOut.price); }
+  if (homeOut) { f5HomeSpread = homeOut.point >= 0 ? `+${homeOut.point}` : `${homeOut.point}`; f5HomeSpreadOdds = fmtPrice(homeOut.price); }
+}
+```
+
+Initialize `f5AwayML`, `f5HomeML`, `f5AwaySpread`, `f5HomeSpread`, `f5AwaySpreadOdds`, `f5HomeSpreadOdds` as `null` alongside the existing declarations at the top of `extractBook`. Include them in the return object.
+
+**No changes needed to the Odds API request URL** — `h2h_h1` and `spreads_h1` are already returned by the existing markets fetch alongside `h2h`, `totals`, and `spreads` when available. The API request already includes `markets=h2h,totals,spreads,totals_h1` — add `h2h_h1,spreads_h1` to that markets param string if they are not already included.
+
+---
+
+### Step 2 — Frontend: add scoring cases to `computeGameBoard` (`prop-scout-v7.jsx`)
+
+`computeGameBoard` currently handles `type: "nrfi" | "total" | "spread" | "ml"`. Add two new type handlers inside the same `forEach` loop, after the `ml` block:
+
+#### `type === "f5ml"` — F5 Moneyline
+
+Score > 50 = HOME lean. Mirrors the full-game ML but with heavier SP weighting and zero bullpen/late-game signals.
+
+```js
+} else if (type === "f5ml") {
+  const f5HomeML = odds.f5HomeML ?? null;
+  const f5AwayML = odds.f5AwayML ?? null;
+  const homeImpl = f5HomeML ? mlToImplied(f5HomeML) : 0.5;
+  const awayImpl = f5AwayML ? mlToImplied(f5AwayML) : 0.5;
+
+  // SP ERA differential — primary signal, higher weight than full-game ML
+  if (homeEra !== null && awayEra !== null) {
+    const diff = awayEra - homeEra;
+    const d = diff > 2.0 ? 20 : diff > 1.0 ? 13 : diff > 0.5 ? 7 : diff < -2.0 ? -20 : diff < -1.0 ? -13 : diff < -0.5 ? -7 : 0;
+    score += d;
+    factors.push({ label: "SP ERA Matchup", pts: d, max: 20,
+      value: `${game.home.abbr} SP ${homeEra.toFixed(2)} vs ${game.away.abbr} SP ${awayEra.toFixed(2)}`,
+      detail: diff > 1.0 ? "Home pitcher has a clear F5 edge" : diff < -1.0 ? "Away pitcher is dominant through 5" : "Even F5 pitching matchup" });
+  }
+
+  // WHIP differential
+  if (homeWhip !== null && awayWhip !== null) {
+    const wDiff = awayWhip - homeWhip;
+    const wPts = wDiff > 0.25 ? 8 : wDiff > 0.1 ? 4 : wDiff < -0.25 ? -8 : wDiff < -0.1 ? -4 : 0;
+    score += wPts;
+    factors.push({ label: "SP Command (WHIP)", pts: wPts, max: 8,
+      value: `${game.home.abbr} ${homeWhip.toFixed(2)} vs ${game.away.abbr} ${awayWhip.toFixed(2)}`,
+      detail: wDiff > 0.15 ? "Home SP has better control through 5" : wDiff < -0.15 ? "Away SP commands the zone better" : "Similar command" });
+  }
+
+  // Umpire — still pitching in F5
+  if (umpire?.rating === "pitcher") { score += 5; factors.push({ label: "Umpire Tendency", pts: 5, max: 5, value: umpire.name ?? "HP Ump", detail: "Pitcher-friendly zone — suppresses F5 offense" }); }
+  else if (umpire?.rating === "hitter") { score -= 4; factors.push({ label: "Umpire Tendency", pts: -4, max: 5, value: umpire.name ?? "HP Ump", detail: "Hitter-friendly zone — opens up F5 scoring" }); }
+
+  // Home field (modest — less pronounced in F5 than full game)
+  score += 2;
+  factors.push({ label: "Home Field", pts: 2, max: 2, value: game.home.abbr, detail: "Slight home edge in early innings" });
+
+  // Market vs model edge
+  if (f5HomeML && f5AwayML) {
+    const modelHome = score / 100;
+    const edge = modelHome - homeImpl;
+    const edgePts = edge > 0.12 ? 8 : edge > 0.06 ? 4 : edge < -0.12 ? -8 : edge < -0.06 ? -4 : 0;
+    score += edgePts;
+    factors.push({ label: "Model vs Market Edge", pts: edgePts, max: 8,
+      value: `Market: ${game.home.abbr} ${(homeImpl * 100).toFixed(0)}% / ${game.away.abbr} ${(awayImpl * 100).toFixed(0)}%`,
+      detail: edgePts > 0 ? "Model likes home more than F5 market" : edgePts < 0 ? "Market has home well-priced already" : "Model and market aligned" });
+  }
+
+  score = Math.round(Math.max(30, Math.min(78, score)));
+  const lean = score >= 50 ? "HOME" : "AWAY";
+  const leanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr;
+  const mlLine = lean === "HOME" ? (f5HomeML ?? "—") : (f5AwayML ?? "—");
+  games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
+    gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
+    score, lean, leanAbbr, leanLabel: `${leanAbbr} F5 ML ${mlLine}`, line: mlLine, odds,
+    factors, homeSP, awaySP, weather: wx, stadium: game.stadium });
+```
+
+#### `type === "f5spread"` — F5 Run Line
+
+Mirrors F5 ML with the same signal stack but scored for -0.5 spread coverage. Add immediately after the `f5ml` block, same pattern. Use `f5HomeSpread` / `f5AwaySpread` for the line display. The lean is still HOME/AWAY. `leanLabel` should show e.g. `ATL F5 RL -0.5 (-115)`.
+
+---
+
+### Step 3 — Frontend: update `gameSubTab` state and sub-tab UI (`prop-scout-v7.jsx`)
+
+**State default** (line ~3053):
+```js
+// No change needed — default stays "nrfi"
+const [gameSubTab, setGameSubTab] = useState("nrfi");
+```
+
+**Sub-tab row** (line ~8978) — add two entries to the array:
+```js
+[["nrfi", "NRFI"], ["total", "O/U Total"], ["spread", "Run Line"], ["ml", "Moneyline"], ["f5ml", "F5 ML"], ["f5spread", "F5 RL"]]
+```
+
+**Hit summary block** (lines ~8933–8936) — add:
+```js
+f5ml:    gameHitSummary("f5ml",    computeGameBoard("f5ml",    activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+f5spread: gameHitSummary("f5spread", computeGameBoard("f5spread", activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires)),
+```
+
+**`isGameType` check** (line ~527) — add the new types:
+```js
+if (type === "nrfi" || type === "total" || type === "spread" || type === "ml" || type === "f5ml" || type === "f5spread") {
+```
+
+**`gameDisplayScore`** (line ~2402) — add F5 AWAY lean to the away/under inversion check:
+```js
+const gameDisplayScore = (g) =>
+  g?.lean === "YRFI" || g?.lean === "UNDER" || g?.lean === "AWAY"
+    ? 100 - (g.score ?? 0)
+    : (g.score ?? 0);
+```
+(No change needed — AWAY lean already handled.)
+
+---
+
+### Step 4 — Grading (future consideration, not in this task)
+
+F5 ML and F5 RL picks are **not loggable** in this version — do not add them to the pick log flow. The backlog note flags that grading logic would need an F5 settlement branch if logging is added later.
+
+---
+
+### Constraints
+
+- F5 markets only appear in Board → Games — do not introduce F5 anywhere else in the app
+- If `f5HomeML` / `f5AwayML` are both null for a game (book hasn't posted the market), skip that game for f5ml (same pattern as how spread/ml handle missing odds)
+- `npm run build` must pass with zero new warnings
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 61 handoff note
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — CODEX TASK 61 COMPLETED (F5 Board Markets)
+
+Completed the scoped F5 re-introduction for **Board → Games only**.
+
+### Files changed
+
+- `backend/routes/odds.js`
+- `prop-scout-v7.jsx`
+
+### What was built
+
+1. **Backend odds parsing**
+   - `extractBook()` now parses:
+     - `h2h_h1` → `f5AwayML` / `f5HomeML`
+     - `spreads_h1` → `f5AwaySpread` / `f5HomeSpread` and odds
+   - Odds API fetch now requests:
+     - `h2h_h1`
+     - `spreads_h1`
+     - `totals_h1` (already used for F5 totals context)
+
+2. **Board → Games sub-tabs**
+   - added:
+     - `F5 ML`
+     - `F5 RL`
+
+3. **Game scoring**
+   - `computeGameBoard()` now supports:
+     - `type === "f5ml"`
+     - `type === "f5spread"`
+   - Both markets use a more early-game-focused signal stack:
+     - starting pitcher ERA differential
+     - WHIP / command differential
+     - umpire tendency
+     - modest home-field effect
+     - model vs market edge
+   - No bullpen factor is used in the F5 branches
+
+4. **UI integration**
+   - F5 cards flow through the existing Games board card renderer
+   - Why modal recognizes both new game types
+   - sportsbook chip row on game cards now supports:
+     - F5 moneyline chips
+     - F5 run line chips
+   - Games sub-tab `#/# hit` badges now also work for:
+     - `F5 ML`
+     - `F5 RL`
+   - F5 badge grading uses the first 5 innings from `liveBoxscores[gamePk].linescore.innings`
+   - tied F5 moneylines resolve to `null` (no graded result)
+
+### Scope constraints preserved
+
+- F5 markets were **not** reintroduced anywhere else in the app
+- no Props tab changes
+- no Model Picks changes
+- no pick-log / grading support added for F5 in this task
+
+### Verification
+
+- `node --check backend/routes/odds.js` ✓
+- `npm run build` ✓
+
+### Note
+
+- Vite large-chunk warning still appears during build, but there were no new build errors and the build exited cleanly
+
+---
+
+## SESSION 57 — CW Review: CODEX TASK 61 Approved (2026-05-02)
+
+CW reviewed the complete F5 Board Markets implementation. All deliverables confirmed:
+
+- `backend/routes/odds.js` — `extractBook` parses `h2h_h1` and `spreads_h1` correctly; all 6 new fields initialized and returned; markets param string updated
+- `prop-scout-v7.jsx` — `isGameType` guard includes `f5ml` + `f5spread`; both scoring blocks match the spec (ERA diff ±20, WHIP, umpire, home field +2, market edge ±8); sub-tabs added to Games tab row; `gameSubtabHitSummary` includes both new types; no pick logging wired (correct)
+- Codex bonus: live F5 outcome tracker sums innings 1–5 from `liveBoxscores` linescore — confirmed correct, not in original spec
+
+`node --check` passed on both `.js` backend files. No follow-up fixes needed.
+
+**Next backlog item:** CODEX TASK 62 — Clarify Algorithmic vs Projection vs AI Labels (Small, see below)
+
+---
+
+## CODEX TASK 62 — Clarify Algorithmic vs Projection vs AI Labels ✅ COMPLETED
+
+**LOE:** Small
+**Files:** `prop-scout-v7.jsx` only
+**Priority:** Low-Medium (polish + transparency)
+
+### Background
+
+The app currently uses the word "Algorithmic" inconsistently — some sections label picks as "Algorithmic" when they are actually model projections, and the AI-powered sections (Props tab, Advisor, Scout) don't always make clear that they call an LLM. Users who care about the distinction (sharp bettors) would benefit from a consistent 3-tier labeling system.
+
+### 3-Tier Label System
+
+| Tier | Label | Meaning | Where Used |
+|---|---|---|---|
+| 1 | `ALGORITHMIC` | Pure deterministic scoring, no AI, no projection | Board (K, Outs, Games), Model Picks |
+| 2 | `PROJECTION` | Stats-based projection with no LLM call (synthetic lines, etc.) | Synthetic book line fallbacks, HR Scout |
+| 3 | `AI-ASSISTED` | LLM call involved in generating the output | Props tab, Advisor, Scout |
+
+### What to Change
+
+1. **Board cards** — badge currently reads "Algorithmic Model" → change to `ALGORITHMIC`
+2. **Model Picks cards** — ensure all model pick cards carry the `ALGORITHMIC` badge
+3. **HR Scout cards** — if currently labeled "Algorithmic", change to `PROJECTION` (HR scores are projection-style)
+4. **Props tab header / card labels** — add `AI-ASSISTED` badge or tooltip near AI-generated prop recommendations
+5. **Advisor tab** — add `AI-ASSISTED` label near the recommendation text
+6. **Scout tab** — add `AI-ASSISTED` label near Scout analysis output
+7. **Tooltip on hover for each tier** — brief 1-sentence explanation so users know what the label means (e.g., "Deterministic formula — no AI or predictions involved")
+
+### Scope
+
+- No backend changes
+- No scoring logic changes
+- Label text + tooltip copy only
+- Existing badge component can be reused; just swap the label string and color if needed (suggest: ALGORITHMIC = blue, PROJECTION = teal, AI-ASSISTED = purple)
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — CODEX TASK 62 COMPLETED (Algorithmic / Projection / AI Labels)
+
+Completed the scoped label-only transparency pass in `prop-scout-v7.jsx`.
+
+### Files changed
+
+- `prop-scout-v7.jsx`
+- `AGENT_SYSTEM_PROMPT.md`
+
+### What changed
+
+1. Added a reusable `TierBadge` primitive with hover tooltips for:
+   - `ALGORITHMIC` — deterministic formula, no LLM
+   - `PROJECTION` — stats-based estimate / synthetic fallback, no LLM
+   - `AI-ASSISTED` — LLM-assisted analysis
+2. Model Picks now show `ALGORITHMIC` in the view header and on individual model pick cards.
+3. Board K / Outs / Games surfaces now show `ALGORITHMIC` in the board context and on K / Outs / Games cards.
+4. HR Scout now shows `PROJECTION` and the subcopy no longer implies an AI call.
+5. Props tab now shows `AI-ASSISTED` in the tab header, uses `AI-ASSISTED` for AI prop cards, and uses `PROJECTION` for non-LLM prop confidence cards.
+6. Advisor and Scout headers now show `AI-ASSISTED` badges.
+7. Legacy `ALGO`, `AI-powered`, and `AI-generated` UI language was cleaned up where it affected the pick surfaces.
+
+### Scope constraints preserved
+
+- No backend changes
+- No scoring logic changes
+- UI label / tooltip copy only
+
+### Verification
+
+- `npm run build` passed
+- Existing Vite chunk-size warning may still appear; it is pre-existing and not related to this task
+
+---
+
+## CODEX TASK 63 — Active Roster Fallback Before Confirmed Lineups ✅ COMPLETED
+
+**LOE:** Medium
+**Files:** `backend/routes/lineups.js`, `prop-scout-v7.jsx`
+**Priority:** Medium
+
+### Background
+
+The Lineup tab in Game view currently shows an empty state ("Lineups Not Yet Posted") when the official batting order hasn't been published yet. This makes the app feel thin in the morning — the Lineup tab, the matchup vulnerability card, and batter rows are all blank until first pitch approaches. The fix: when no confirmed lineup is available, fall back to the active 26-man roster and display it with clear "ROSTER" labeling so users can still browse likely batters.
+
+**Scope is limited to the Lineup tab display only.** Model Picks, Board batter scoring, and K/Outs matchup logic all continue to require `confirmed === true` — roster-only batters should not feed into algorithmic scores in this task.
+
+---
+
+### Step 1 — Backend: return active roster when lineup is unconfirmed (`backend/routes/lineups.js`)
+
+**Current behavior:** When `battingOrder` is empty, `transformTeam` returns `[]`. The result has `confirmed: false, away: [], home: []`.
+
+**New behavior:** When `confirmed === false`, make an additional MLB Stats API call to fetch the active roster for each team, then return those players as an unordered fallback.
+
+#### 1a. Extract teamId from the boxscore response
+
+The boxscore `data.teams.away.team.id` and `data.teams.home.team.id` already contain the MLB team IDs needed for the roster endpoint. Extract them after the boxscore fetch.
+
+#### 1b. Fetch active roster from MLB Stats API
+
+When `confirmed === false`, make two parallel calls:
+
+```
+GET /api/v1/teams/{awayTeamId}/roster?rosterType=active&season=2026&hydrate=person
+GET /api/v1/teams/{homeTeamId}/roster?rosterType=active&season=2026&hydrate=person
+```
+
+MLB Stats API base URL is already set up in `../services/mlbApi`. This is a standard free endpoint.
+
+The response shape is `{ roster: [ { person: { id, fullName }, position: { abbreviation, type }, jerseyNumber, status: { code } }, ... ] }`.
+
+#### 1c. Transform roster into batter array
+
+Build a `transformRoster(rosterData)` helper that:
+- Filters to players where `position.type !== "Pitcher"` and `status.code === "A"` (active)
+- Sorts by `parseInt(jerseyNumber)` ascending (jersey order as a stable proxy for display)
+- Returns the same shape as `transformTeam` but with `order: null` (no slot known yet) and without `powerProfile` or `recentForm` (skip enrichment for roster fallback — too slow and unnecessary at this stage)
+
+```js
+const transformRoster = (rosterData) => {
+  return (rosterData.roster ?? [])
+    .filter(p => p.position?.type !== "Pitcher" && p.status?.code === "A")
+    .sort((a, b) => parseInt(a.jerseyNumber ?? 99) - parseInt(b.jerseyNumber ?? 99))
+    .map(p => ({
+      order:      null,           // not known until lineup posts
+      id:         p.person.id,
+      name:       p.person.fullName,
+      pos:        p.position.abbreviation,
+      primaryPos: p.person.primaryPosition?.abbreviation ?? null,
+      hand:       p.batSide?.code ?? "?",
+      // no powerProfile or recentForm — skip enrichment for roster fallback
+    }));
+};
+```
+
+#### 1d. Update the result object
+
+Add a `source` field to the result:
+
+```js
+const result = {
+  gamePk:    parseInt(gamePk),
+  confirmed, // still false
+  source:    confirmed ? "lineup" : "roster",  // NEW field
+  away:      confirmed ? awayLineup : awayRoster,
+  home:      confirmed ? homeLineup : homeRoster,
+};
+```
+
+Keep the TTL logic unchanged: roster fallback also uses the 1-minute TTL (same as unconfirmed lineup) so it stays fresh.
+
+#### 1e. Error handling
+
+If the roster fetch fails, log a warning and fall back to the existing `away: [], home: []` empty behavior — don't let a roster API error break the lineup endpoint.
+
+---
+
+### Step 2 — Frontend: show ROSTER label and unconfirmed banner (`prop-scout-v7.jsx`)
+
+#### 2a. Detect roster-fallback state
+
+Add a derived variable in the Lineup tab:
+
+```js
+const isRosterFallback = liveLineups[gamePkKey]?.source === "roster";
+```
+
+#### 2b. Update the section label
+
+The `label` variable at line ~6773 currently always says `"${abbr} Lineup vs ${pitcherName}"`. Change it to:
+
+```js
+const label = isRosterFallback
+  ? `${lineupSide === "away" ? game.away.abbr : game.home.abbr} Roster (Lineup Pending)`
+  : (lineupSide === "away"
+    ? `${game.away.abbr} Lineup vs ${facingPitcher.name}`
+    : `${game.home.abbr} Lineup vs ${facingPitcher.name}`);
+```
+
+#### 2c. Add an unconfirmed banner above the batter rows
+
+When `isRosterFallback === true`, render a notice above the batter card:
+
+```jsx
+{isRosterFallback && (
+  <div style={{
+    background: "rgba(245,158,11,0.08)",
+    border: "1px solid rgba(245,158,11,0.25)",
+    borderRadius: 8,
+    padding: "8px 12px",
+    marginBottom: 10,
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  }}>
+    <span style={{ fontSize: 14 }}>📋</span>
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#fbbf24" }}>Lineup Not Yet Posted</div>
+      <div style={{ fontSize: 10, color: "#9ca3af" }}>Showing active roster · Batting order TBD · Check back closer to first pitch</div>
+    </div>
+  </div>
+)}
+```
+
+#### 2d. Adjust batting order display in batter rows
+
+The batter rows currently show the lineup slot number (`b.order`). When `isRosterFallback === true` and `b.order === null`, display the position abbreviation (`b.pos`) in place of the slot number, and style it slightly differently (lighter color, no monospace weight) so it's visually clear it's not a confirmed slot.
+
+Change the order badge display logic (wherever `{b.order}` is rendered in the batter row) to:
+
+```jsx
+<div style={{ ...orderBadgeStyle, color: isRosterFallback ? "#6b7280" : existingColor }}>
+  {isRosterFallback ? (b.pos ?? "—") : b.order}
+</div>
+```
+
+#### 2e. Remove "LIVE" badge from toggle buttons when roster fallback
+
+The away/home toggle buttons show a "LIVE" badge when `lineupConfirmed`. Keep that logic unchanged — `lineupConfirmed` is still `false` when roster-only, so no badge appears. No change needed here.
+
+#### 2f. Empty state fallback still needed
+
+Keep the existing `lineup.length === 0` empty state as the last fallback (in case even the roster API call fails). This is now only reached if `source === "roster"` AND the roster array is empty (API failure path).
+
+---
+
+### Scope constraints
+
+- **Do not** feed roster-only batters into Model Picks, Board scores, or K/Outs matchup calculations — those still gate on `confirmed === true`
+- **Do not** run `fetchBatterPowerProfile` or `fetchBatterRecentForm` on roster players — enrichment is only for confirmed lineups
+- **Do not** change the Lineup Vulnerability summary card behavior — it uses `facingPitcher.arsenal` cross-referenced against `b.vsPitches` which is populated from enrichment. When roster players have no `vsPitches`, the card will show "mixed" for all pitch types — that's acceptable
+- **No backend routes other than `lineups.js`**
+- **No changes to TTL logic, cache keys, or polling intervals**
+
+---
+
+### Verification
+
+- `node --check backend/routes/lineups.js` must pass
+- `npm run build` must pass with no new warnings
+- When roster fallback is active, the Lineup tab should show players sorted by jersey number under a yellow "Lineup Not Yet Posted" banner, with position abbreviations in the slot column instead of numbers
+- When lineup posts and `confirmed` flips to `true`, the roster view is replaced by the real batting order on the next poll (1-min TTL)
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 63 handoff note
+
+---
+
+## HANDOFF NOTE — 2026-05-02 — CODEX TASK 63 COMPLETED (Active Roster Fallback Before Confirmed Lineups)
+
+Completed the roster fallback for the Game view Lineup tab so the app is no longer empty in the morning before official batting orders are posted.
+
+### Files changed
+
+- `backend/routes/lineups.js`
+- `prop-scout-v7.jsx`
+
+### What was built
+
+1. **Backend roster fallback**
+   - When the MLB boxscore has no posted `battingOrder`, the lineup route now fetches each team’s active roster using the existing MLB API client
+   - Team IDs are taken from:
+     - `data.teams.away.team.id`
+     - `data.teams.home.team.id`
+   - Roster players are filtered to:
+     - non-pitchers
+     - active status only (`status.code === "A"`)
+   - Display order is stable via jersey-number sort
+   - Fallback rows return:
+     - `order: null`
+     - `id`
+     - `name`
+     - `pos`
+     - `primaryPos`
+     - `hand`
+   - No `powerProfile` or `recentForm` enrichment is run for roster fallback
+
+2. **Route response shape**
+   - Added:
+     - `source: "lineup" | "roster"`
+   - Confirmed lineups still return enriched batting-order data
+   - Unconfirmed games now return roster players instead of empty arrays when the roster call succeeds
+
+3. **Failure behavior**
+   - If roster fetch fails, the route logs a warning and falls back to the old empty behavior
+   - Endpoint does not fail just because the roster endpoint is unavailable
+
+4. **Frontend Lineup tab**
+   - Detects roster mode via:
+     - `liveLineups[gamePkKey]?.source === "roster"`
+   - Section label changes to:
+     - `ABBR Roster (Lineup Pending)`
+   - Added an amber banner above the player rows:
+     - `📋 Lineup Not Yet Posted`
+     - `Showing active roster · Batting order TBD`
+   - When roster fallback is active and `order === null`, the slot badge shows the player’s position abbreviation instead of a lineup number
+
+### Scope constraints preserved
+
+- No Model Picks changes
+- No Board batter scoring changes
+- No K / Outs matchup scoring changes
+- No lineup polling / TTL / cache-key changes
+- Existing empty-state fallback remains in place if roster fetch also returns nothing
+
+### Verification
+
+- `node --check backend/routes/lineups.js` ✓
+- `npm run build` ✓
+
+### Note
+
+- Frontend build still shows the existing Vite large-chunk warning, but there were no new build errors and the build exited cleanly
+
+---
+
+## SESSION 61 — CW: CODEX TASK 64 Spec (🔬 Lab — F5 ML Predictive Model Tab)
+
+Architecture decisions confirmed with user (2026-05-02):
+- Output format: win probability % (not 0–95 score)
+- Access gate: `isScoutUser` only
+- Card filter: all games shown, edge games badged
+- Tab name: 🔬 Lab
+
+---
+
+## CODEX TASK 64 — 🔬 Lab Tab: F5 Moneyline Predictive Model ✅ COMPLETED
+
+**LOE:** Large
+**Files:** `backend/routes/modelF5.js` (new), `backend/server.js`, `prop-scout-v7.jsx`
+**Priority:** High (next major feature)
+**Access:** `isScoutUser` only
+
+### Overview
+
+Add a new private "🔬 Lab" tab, visible only to `isScoutUser` users, that runs a calibrated logistic regression model over today's F5 Moneyline matchups and surfaces win probabilities alongside the book's implied probability. Every game on the slate is shown. Games where the model edge vs. book is ≥ 4 percentage points get an `EDGE` badge. This is explicitly labeled as an experimental predictive layer — separate from the Board's heuristic scoring and from the AI-assisted tabs.
+
+The model uses only data already available through the Prop Scout API ecosystem. No external data dependencies. No training pipeline needed — coefficients are pre-calibrated and hard-coded.
+
+---
+
+### Step 1 — New backend route: `backend/routes/modelF5.js`
+
+Create a new file. This route fetches today's slate, pulls SP stats + umpire data + odds for each game, builds a feature vector per game, runs logistic inference, and returns a ranked list of F5 ML predictions.
+
+#### 1a. Imports and setup
+
+```js
+const express = require("express");
+const router  = express.Router();
+const axios   = require("axios");
+const cache   = require("../services/cache");
+
+const BASE_URL = process.env.BACKEND_URL ?? "http://localhost:3001";
+const CACHE_TTL = 10 * 60 * 1000; // 10-minute cache
+```
+
+#### 1b. Logistic regression coefficients
+
+These are pre-calibrated coefficients derived from historical F5 MLB research. Hard-code them as a constant:
+
+```js
+// Pre-calibrated logistic regression coefficients for F5 Moneyline prediction.
+// Positive values favor the HOME team winning F5; the away probability = 1 - homeProb.
+// Intercept is near 0 (slight home field prior baked into HOME_FIELD coeff).
+// All features are described below.
+const COEFF = {
+  INTERCEPT:      -0.08,  // slight away-lean baseline (home wins F5 ~50.5% historically)
+  ERA_DIFF:        0.18,  // per run of ERA advantage (away ERA - home ERA); positive = home advantage
+  WHIP_DIFF:       0.22,  // per unit of WHIP advantage (away WHIP - home WHIP); positive = home advantage
+  HOME_FIELD:      0.12,  // constant home-field bonus
+  UMP_K_TENDENCY:  0.06,  // umpire K% tendency: high-K ump slightly favors the better pitcher
+  FORM_DIFF:       0.10,  // recent form differential: (away SP last3 ERA - season ERA) minus (home SP last3 ERA - season ERA)
+};
+```
+
+**Feature definitions:**
+- `ERA_DIFF` = `awaySpEra - homeSpEra` (positive means home SP has lower ERA → home advantage)
+- `WHIP_DIFF` = `awaySpWhip - homeSpWhip` (positive means home SP has lower WHIP → home advantage)
+- `HOME_FIELD` = always `1.0`
+- `UMP_K_TENDENCY` = umpire's season K/9 tendency above league average (use the umpire's `kFavor` or equivalent field from `/api/umpires`). Cap at ±0.5 to limit leverage.
+- `FORM_DIFF` = `(awayLastThreeEra - awaySeasonEra) - (homeLastThreeEra - homeSeasonEra)`. Positive means home SP has better recent form relative to season baseline. Derive `lastThreeEra` from the player gamelog endpoint (average ERA across last 3 starts).
+
+#### 1c. Logistic function
+
+```js
+const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+
+const predictHomeProb = (features) => {
+  const z = COEFF.INTERCEPT
+    + COEFF.ERA_DIFF        * features.eraDiff
+    + COEFF.WHIP_DIFF       * features.whipDiff
+    + COEFF.HOME_FIELD      * features.homeField
+    + COEFF.UMP_K_TENDENCY  * features.umpKTendency
+    + COEFF.FORM_DIFF       * features.formDiff;
+  return sigmoid(z);
+};
+```
+
+#### 1d. American odds → implied probability helper
+
+```js
+// Convert American moneyline to implied probability (no vig removal).
+const mlToImplied = (ml) => {
+  if (!ml || ml === "N/A") return null;
+  const n = parseInt(String(ml).replace("+", ""), 10);
+  if (isNaN(n)) return null;
+  return n < 0 ? (-n) / (-n + 100) : 100 / (n + 100);
+};
+```
+
+#### 1e. GET /api/model/f5 route handler
+
+```
+GET /api/model/f5
+```
+
+**Steps:**
+1. Fetch today's schedule from `/api/schedule`
+2. For each game with a probable home and away pitcher, fetch in parallel (use `Promise.allSettled` so one failing game doesn't abort the rest):
+   - `GET /api/players/:awayPitcherId/stats?group=pitching` (season ERA, WHIP)
+   - `GET /api/players/:awayPitcherId/gamelog?group=pitching` (last 3 starts)
+   - `GET /api/players/:homePitcherId/stats?group=pitching`
+   - `GET /api/players/:homePitcherId/gamelog?group=pitching`
+   - `GET /api/umpires` (for today's ump assignments)
+   - `GET /api/odds/:gamePk` (for F5 ML lines)
+3. Build feature vector for each game
+4. Run `predictHomeProb(features)` → `homeProb`; `awayProb = 1 - homeProb`
+5. Compute edge vs. book:
+   - `awayImplied = mlToImplied(odds.f5AwayML)`
+   - `homeImplied = mlToImplied(odds.f5HomeML)`
+   - `awayEdge = awayProb - awayImplied` (positive = model favors away more than book)
+   - `homeEdge = homeProb - homeImplied`
+   - `leanSide = Math.abs(awayEdge) >= Math.abs(homeEdge) ? "away" : "home"`
+   - `leanEdge = leanSide === "away" ? awayEdge : homeEdge`
+   - `hasEdge = Math.abs(leanEdge) >= 0.04` (≥ 4 percentage points)
+
+6. Sort results by `Math.abs(leanEdge)` descending — biggest edge games at top
+7. Return array of game objects
+
+**Return shape per game:**
+```js
+{
+  gamePk,
+  gameTime,
+  away: { abbr, fullName },
+  home: { abbr, fullName },
+  awayPitcher: { id, name, era, whip, lastThreeEra },
+  homePitcher: { id, name, era, whip, lastThreeEra },
+  umpire: { name, kTendency },        // null if not found
+  odds: { f5AwayML, f5HomeML },       // raw American lines
+  model: {
+    awayProb,                          // 0–1 float, e.g. 0.57
+    homeProb,                          // 0–1 float, e.g. 0.43
+    awayImplied,                       // 0–1 float from book (null if no line)
+    homeImplied,
+    awayEdge,                          // awayProb - awayImplied (null if no line)
+    homeEdge,
+    leanSide,                          // "away" | "home"
+    leanEdge,                          // signed edge for lean side
+    hasEdge,                           // boolean, true if |leanEdge| >= 0.04
+    features,                          // { eraDiff, whipDiff, homeField, umpKTendency, formDiff }
+  },
+}
+```
+
+**Error handling:** If pitcher stats or odds are unavailable for a game, set missing features to `0` (neutral) and include the game anyway with a `dataWarning: true` flag — don't silently drop games.
+
+**Cache:** 10-minute TTL. Cache key: `model:f5`.
+
+---
+
+### Step 2 — Mount in server.js
+
+Add one line after the existing scout route:
+
+```js
+app.use("/api/model", require("./routes/modelF5"));
+```
+
+---
+
+### Step 3 — Frontend: 🔬 Lab tab (`prop-scout-v7.jsx`)
+
+#### 3a. State
+
+Add two new state variables near the top of the main component state block:
+
+```js
+const [labData, setLabData]       = useState(null);
+const [labLoading, setLabLoading] = useState(false);
+```
+
+#### 3b. Data fetch
+
+Add a `fetchLabData` function and call it when `view === "lab"`:
+
+```js
+const fetchLabData = async () => {
+  setLabLoading(true);
+  try {
+    const res = await fetch(`${API}/model/f5`);
+    const json = await res.json();
+    setLabData(json);
+  } catch (e) {
+    console.error("Lab fetch failed:", e);
+  } finally {
+    setLabLoading(false);
+  }
+};
+
+useEffect(() => {
+  if (view === "lab" && !labData) fetchLabData();
+}, [view]);
+```
+
+#### 3c. Nav button
+
+Add a Lab nav button gated on `isScoutUser`, placed after the Advisor button in the nav bar. Use accent color `#34d399` (emerald) to visually distinguish it from Scout (blue), HR Scout (orange), Advisor (amber):
+
+```jsx
+{isScoutUser && (
+  <button
+    onClick={() => setView("lab")}
+    style={{
+      background: view === "lab" ? "#34d399" : "#161827",
+      border: `1px solid ${view === "lab" ? "#34d399" : "#1f2437"}`,
+      borderRadius: 8,
+      padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+      fontSize: isNarrowPhone ? 9 : 10,
+      color: view === "lab" ? "#000" : "#9ca3af",
+      fontFamily: "monospace",
+      fontWeight: 700,
+      cursor: "pointer",
+      textTransform: "uppercase",
+    }}
+  >
+    🔬 Lab
+  </button>
+)}
+```
+
+#### 3d. Lab view render
+
+Add a new `{view === "lab" && isScoutUser && (...)}` block. Structure:
+
+**Header:**
+```jsx
+<div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+  <div>
+    <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+      <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🔬 LAB</div>
+      <TierBadge tier="predictive" />   {/* new 4th tier — see 3e */}
+    </div>
+    <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
+      F5 Moneyline · Logistic model · Pre-calibrated coefficients · Experimental
+    </div>
+  </div>
+  <button onClick={fetchLabData} style={{ /* same refresh button style as Scout */ }}>↺ Refresh</button>
+</div>
+```
+
+**Disclaimer banner** (render always, above card list):
+```jsx
+<div style={{
+  background: "rgba(52,211,153,0.06)",
+  border: "1px solid rgba(52,211,153,0.2)",
+  borderRadius: 8,
+  padding: "8px 12px",
+  marginBottom: 12,
+}}>
+  <div style={{ fontSize: 10, color: "#34d399", fontWeight: 700, marginBottom: 2 }}>⚗ EXPERIMENTAL MODEL</div>
+  <div style={{ fontSize: 10, color: "#6b7280" }}>
+    Win probabilities generated by a pre-calibrated logistic regression using SP quality, command, form, umpire, and home field. 
+    Not a trained ML system. Not financial advice. Edge = model prob minus book implied prob.
+  </div>
+</div>
+```
+
+**Cards:** For each game in `labData`, render a card. Layout:
+
+```
+[ AWAY ABBR SP NAME ]   vs   [ HOME ABBR SP NAME ]
+  Away: 54%  ←  Model                  Home: 46%
+  Book implied: 51%               Book implied: 49%
+  Edge: +3pp                      Edge: -3pp
+  [EDGE badge if hasEdge]
+  ──────────────────────────────────
+  ERA: 3.45 / 2.90    WHIP: 1.22 / 1.08
+  Umpire: Jon Bailey · K-tendency: +0.3
+```
+
+- Probabilities displayed as `XX%` (multiply float by 100, round to nearest integer)
+- Edge displayed as `+Xpp` or `−Xpp` (pp = percentage points) with green for positive edge, red for negative
+- If `hasEdge === true`: show a `EDGE` badge in emerald (`#34d399`) next to the lean side's probability
+- If `odds.f5AwayML === null`: show `— No line` instead of implied prob and edge
+- If `dataWarning === true`: show a small amber `⚠ partial data` label on the card
+
+**Loading state:** Show a simple centered spinner / "Running model…" text while `labLoading`.
+
+**Empty state:** If `labData` is an empty array, show "No games on today's slate."
+
+#### 3e. Add `predictive` tier to TIER_BADGES
+
+Add a 4th tier to the existing `TIER_BADGES` object:
+
+```js
+predictive: {
+  label: "PREDICTIVE",
+  color: "#34d399",
+  tooltip: "Logistic regression model with pre-calibrated coefficients — outputs win probability, not a heuristic score.",
+},
+```
+
+---
+
+### Scope constraints
+
+- **No changes to Board, Model Picks, Scout, HR Scout, or Advisor** — Lab is fully additive
+- **No user pick logging for Lab** in this version
+- **No Picks tab integration** — model outputs are research-only for now
+- **No training pipeline** — coefficients are hard-coded constants
+- **`isScoutUser` gate must be present in BOTH the nav button AND the view render block** — double-gated
+
+---
+
+### Verification
+
+- `node --check backend/routes/modelF5.js` must pass
+- `npm run build` must pass with no new warnings
+- Lab tab must not appear in the nav for non-Scout users
+- All games on today's slate should render cards (no silent drops)
+- Games with `hasEdge: true` should show the emerald EDGE badge
+- After completing, update `AGENT_SYSTEM_PROMPT.md` with a CODEX TASK 64 handoff note
+
+## HANDOFF NOTE — 2026-05-02 — CODEX TASK 64 COMPLETED (🔬 Lab — F5 ML Predictive Model)
+
+Completed the first private predictive-model lane as a gated `🔬 Lab` tab for Scout users only. This is fully additive and does **not** change Board, Model Picks, Scout, HR Scout, Advisor, or Picks behavior.
+
+### Backend
+
+- Added new route: `backend/routes/modelF5.js`
+- Mounted in `backend/server.js`:
+  - `app.use("/api/model", require("./routes/modelF5"));`
+- Exposes:
+  - `GET /api/model/f5`
+- Route behavior:
+  - fetches today’s slate from `/api/schedule`
+  - loads current odds from `/api/odds`
+  - per game, uses `Promise.allSettled` to fetch:
+    - away SP season pitching stats
+    - away SP pitching gamelog
+    - home SP season pitching stats
+    - home SP pitching gamelog
+    - umpire assignment / tendency
+  - never drops a slate game due to one failed sub-fetch
+  - neutral-fills missing features with `0`
+  - marks incomplete rows with `dataWarning: true`
+  - runs a hard-coded logistic regression over:
+    - `eraDiff`
+    - `whipDiff`
+    - `homeField`
+    - `umpKTendency`
+    - `formDiff`
+  - returns:
+    - `homeProb`
+    - `awayProb`
+    - implied probabilities from `f5HomeML / f5AwayML`
+    - edge vs book
+    - `leanSide`
+    - `leanEdge`
+    - `hasEdge`
+  - sorts by `Math.abs(leanEdge)` descending
+  - caches response for `10 minutes` with key:
+    - `model:f5`
+
+### Frontend
+
+- Added new `predictive` tier to `TIER_BADGES`
+  - color: `#34d399`
+  - tooltip explicitly explains this is logistic regression probability output, not a heuristic score
+- Added state:
+  - `labData`
+  - `labLoading`
+- Added `fetchLabData()` helper
+  - auto-loads when `view === "lab"`
+  - supports manual refresh
+- Added new nav button:
+  - `🔬 Lab`
+  - gated on `isScoutUser`
+  - placed after `Advisor`
+  - emerald accent `#34d399`
+- Added `view === "lab" && isScoutUser` render block
+  - header with predictive badge
+  - refresh button
+  - experimental/disclaimer banner
+  - loading state
+  - error state
+  - empty state
+  - per-game cards showing:
+    - both teams
+    - both starting pitchers
+    - model win %
+    - book implied %
+    - edge in percentage points
+    - emerald `EDGE` badge when `hasEdge`
+    - umpire name + K tendency
+    - ERA / WHIP / L3 ERA context
+    - amber partial-data badge when needed
+
+### Scope / behavior notes
+
+- Double-gated:
+  - nav button requires `isScoutUser`
+  - view block requires `isScoutUser`
+- No pick logging
+- No Picks tab integration
+- No training pipeline
+- No changes to the main app’s research-first identity
+- This is a separate private predictive layer built only from Prop Scout data/features
+
+### Verification
+
+- `node --check backend/routes/modelF5.js` ✓
+- `npm run build` ✓
+
+### CW Hotfix Applied (Session 62)
+
+Codex left `modelProbPct` undefined — it was referenced in the card render (line ~5985) but never assigned. The variable `modelProb` was defined (lean-side probability as a 0–1 float) but never converted to a display string. CW added the missing line:
+
+```js
+const modelProbPct = modelProb != null ? `${Math.round(modelProb * 100)}%` : "—";
+```
+
+This is the large probability figure displayed on each game card. Without this fix the field renders blank. All other logic was correct.

@@ -79,9 +79,12 @@ router.get("/:gamePk", async (req, res) => {
     const bs = bsRes.data;
     const ls = lsRes.data;
 
-    // Game is final when innings have been played and there's no current inning
+    // Game is final when innings have been played and there's no current inning.
+    // Also check abstractGameState as a fallback — old games can return currentInning: 0
+    // which makes !ls.currentInning truthy but is not a reliable final signal alone.
     const inningsPlayed = (ls.innings ?? []).length;
-    const isFinal = inningsPlayed > 0 && !ls.currentInning;
+    const isFinal = (inningsPlayed > 0 && !ls.currentInning)
+      || ls.abstractGameState === "Final";
 
     // Linescore grid — inning-by-inning
     const innings = (ls.innings ?? []).map(inn => ({

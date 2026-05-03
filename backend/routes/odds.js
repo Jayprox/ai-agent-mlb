@@ -15,10 +15,14 @@ const TARGET_BOOKS = [
 
 const fmtPrice = (p) => (p == null ? null : p > 0 ? `+${p}` : String(p));
 const todayHonolulu = () => new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+const PRIMARY_MARKETS = "h2h,totals,spreads,totals_h1,h2h_h1,spreads_h1";
+const FALLBACK_MARKETS = "h2h,totals,spreads";
 
 const extractBook = (bk, awayTeam) => {
   let awayML = null, homeML = null, total = null, overOdds = null, underOdds = null,
-      f5Total = null, awaySpread = null, awaySpreadOdds = null, homeSpread = null, homeSpreadOdds = null;
+      f5Total = null, f5AwayML = null, f5HomeML = null,
+      awaySpread = null, awaySpreadOdds = null, homeSpread = null, homeSpreadOdds = null,
+      f5AwaySpread = null, f5AwaySpreadOdds = null, f5HomeSpread = null, f5HomeSpreadOdds = null;
 
   const h2h = bk.markets.find(m => m.key === "h2h");
   if (h2h) {
@@ -42,6 +46,14 @@ const extractBook = (bk, awayTeam) => {
     if (f5Over) f5Total = String(f5Over.point);
   }
 
+  const h2hH1 = bk.markets.find(m => m.key === "h2h_h1");
+  if (h2hH1) {
+    const awayOut = h2hH1.outcomes.find(o => o.name === awayTeam);
+    const homeOut = h2hH1.outcomes.find(o => o.name !== awayTeam);
+    if (awayOut) f5AwayML = fmtPrice(awayOut.price);
+    if (homeOut) f5HomeML = fmtPrice(homeOut.price);
+  }
+
   const spreads = bk.markets.find(m => m.key === "spreads");
   if (spreads) {
     const awayOut = spreads.outcomes.find(o => o.name === awayTeam);
@@ -50,7 +62,19 @@ const extractBook = (bk, awayTeam) => {
     if (homeOut) { homeSpread = homeOut.point >= 0 ? `+${homeOut.point}` : `${homeOut.point}`; homeSpreadOdds = fmtPrice(homeOut.price); }
   }
 
-  return { awayML, homeML, total, overOdds, underOdds, f5Total, awaySpread, awaySpreadOdds, homeSpread, homeSpreadOdds };
+  const spreadsH1 = bk.markets.find(m => m.key === "spreads_h1");
+  if (spreadsH1) {
+    const awayOut = spreadsH1.outcomes.find(o => o.name === awayTeam);
+    const homeOut = spreadsH1.outcomes.find(o => o.name !== awayTeam);
+    if (awayOut) { f5AwaySpread = awayOut.point >= 0 ? `+${awayOut.point}` : `${awayOut.point}`; f5AwaySpreadOdds = fmtPrice(awayOut.price); }
+    if (homeOut) { f5HomeSpread = homeOut.point >= 0 ? `+${homeOut.point}` : `${homeOut.point}`; f5HomeSpreadOdds = fmtPrice(homeOut.price); }
+  }
+
+  return {
+    awayML, homeML, total, overOdds, underOdds, f5Total, f5AwayML, f5HomeML,
+    awaySpread, awaySpreadOdds, homeSpread, homeSpreadOdds,
+    f5AwaySpread, f5AwaySpreadOdds, f5HomeSpread, f5HomeSpreadOdds,
+  };
 };
 
 const buildOddsPayload = (games, meta = {}) => {
@@ -143,13 +167,26 @@ router.get("/", async (req, res) => {
   if (!apiKey) return res.status(503).json({ error: "ODDS_API_KEY not configured" });
 
   try {
-    const response = await axios.get(
+    const fetchOdds = async (markets) => axios.get(
       `https://api.the-odds-api.com/v4/sports/baseball_mlb/odds`,
       {
-        params: { apiKey, regions: "us", markets: "h2h,totals,spreads", oddsFormat: "american", dateFormat: "iso" },
+        params: { apiKey, regions: "us", markets, oddsFormat: "american", dateFormat: "iso" },
         timeout: 12000,
       }
     );
+
+    let response;
+    let partialMarkets = false;
+    try {
+      response = await fetchOdds(PRIMARY_MARKETS);
+    } catch (err) {
+      const detail = err.response?.data?.message ?? err.message;
+      const unsupportedH1 = /not supported by this endpoint/i.test(detail) && /h2h_h1|spreads_h1|totals_h1/i.test(detail);
+      if (!unsupportedH1) throw err;
+      console.warn(`  ⚠ Odds API fallback: ${detail}`);
+      response = await fetchOdds(FALLBACK_MARKETS);
+      partialMarkets = true;
+    }
 
     const remaining = response.headers["x-requests-remaining"] ?? null;
     const used      = response.headers["x-requests-used"]      ?? null;
@@ -160,6 +197,8 @@ router.get("/", async (req, res) => {
       used,
       fetchedAt: new Date().toISOString(),
     });
+
+    if (partialMarkets) result.partialMarkets = true;
 
     cache.set(cacheKey, result, TTL_MS);
     res.setHeader("X-Cache", "MISS");
