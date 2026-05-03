@@ -2429,9 +2429,10 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
     } else if (type === "f5ml") {
       const f5HomeML = odds.f5HomeML ?? null;
       const f5AwayML = odds.f5AwayML ?? null;
-      if (!f5HomeML && !f5AwayML) return;
-      const homeImpl = f5HomeML ? mlToImplied(f5HomeML) : 0.5;
-      const awayImpl = f5AwayML ? mlToImplied(f5AwayML) : 0.5;
+      const marketHomeML = f5HomeML ?? odds.homeML ?? game.odds?.homeML ?? null;
+      const marketAwayML = f5AwayML ?? odds.awayML ?? game.odds?.awayML ?? null;
+      const homeImpl = marketHomeML ? mlToImplied(marketHomeML) : 0.5;
+      const awayImpl = marketAwayML ? mlToImplied(marketAwayML) : 0.5;
 
       if (homeEra !== null && awayEra !== null) {
         const diff = awayEra - homeEra;
@@ -2462,7 +2463,7 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
       score += 2;
       factors.push({ label: "Home Field", pts: 2, max: 2, value: game.home.abbr, detail: "Slight home edge in early innings" });
 
-      if (f5HomeML && f5AwayML) {
+      if (marketHomeML && marketAwayML) {
         const modelHome = score / 100;
         const edge = modelHome - homeImpl;
         const edgePts = edge > 0.12 ? 8 : edge > 0.06 ? 4 : edge < -0.12 ? -8 : edge < -0.06 ? -4 : 0;
@@ -2475,7 +2476,7 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
       score = Math.round(Math.max(30, Math.min(78, score)));
       const lean = score >= 50 ? "HOME" : "AWAY";
       const leanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr;
-      const mlLine = lean === "HOME" ? (f5HomeML ?? "—") : (f5AwayML ?? "—");
+      const mlLine = lean === "HOME" ? (f5HomeML ?? marketHomeML ?? "—") : (f5AwayML ?? marketAwayML ?? "—");
       games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
         gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
         score, lean, leanAbbr, leanLabel: `${leanAbbr} F5 ML ${mlLine}`, line: mlLine, odds,
@@ -2487,7 +2488,10 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
       const f5HomeSpread = odds.f5HomeSpread ?? null;
       const f5AwaySpreadOdds = odds.f5AwaySpreadOdds ?? null;
       const f5HomeSpreadOdds = odds.f5HomeSpreadOdds ?? null;
-      if (!f5AwaySpread && !f5HomeSpread) return;
+      const marketAwaySpread = f5AwaySpread ?? odds.awaySpread ?? game.odds?.awaySpread ?? null;
+      const marketHomeSpread = f5HomeSpread ?? odds.homeSpread ?? game.odds?.homeSpread ?? null;
+      const marketAwaySpreadOdds = f5AwaySpreadOdds ?? odds.awaySpreadOdds ?? game.odds?.awaySpreadOdds ?? null;
+      const marketHomeSpreadOdds = f5HomeSpreadOdds ?? odds.homeSpreadOdds ?? game.odds?.homeSpreadOdds ?? null;
 
       if (homeEra !== null && awayEra !== null) {
         const diff = awayEra - homeEra;
@@ -2518,22 +2522,22 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
       score += 2;
       factors.push({ label: "Home Field", pts: 2, max: 2, value: game.home.abbr, detail: "Slight home edge in early innings" });
 
-      if (f5HomeSpreadOdds && f5AwaySpreadOdds) {
-        const homeImpl = mlToImplied(f5HomeSpreadOdds);
+      if (marketHomeSpreadOdds && marketAwaySpreadOdds) {
+        const homeImpl = mlToImplied(marketHomeSpreadOdds);
         const modelHome = score / 100;
         const edge = modelHome - homeImpl;
         const edgePts = edge > 0.12 ? 8 : edge > 0.06 ? 4 : edge < -0.12 ? -8 : edge < -0.06 ? -4 : 0;
         score += edgePts;
         factors.push({ label: "Model vs Market Edge", pts: edgePts, max: 8,
-          value: `Market RL: ${game.home.abbr} ${f5HomeSpread ?? "—"} (${f5HomeSpreadOdds ?? "—"}) / ${game.away.abbr} ${f5AwaySpread ?? "—"} (${f5AwaySpreadOdds ?? "—"})`,
+          value: `Market RL: ${game.home.abbr} ${marketHomeSpread ?? "—"} (${marketHomeSpreadOdds ?? "—"}) / ${game.away.abbr} ${marketAwaySpread ?? "—"} (${marketAwaySpreadOdds ?? "—"})`,
           detail: edgePts > 0 ? "Model likes home F5 run line more than market" : edgePts < 0 ? "Market already prices the home F5 edge" : "Model and market aligned" });
       }
 
       score = Math.round(Math.max(30, Math.min(78, score)));
       const lean = score >= 50 ? "HOME" : "AWAY";
       const leanAbbr = lean === "HOME" ? game.home.abbr : game.away.abbr;
-      const spreadLine = lean === "HOME" ? (f5HomeSpread ?? "—") : (f5AwaySpread ?? "—");
-      const spreadOdds = lean === "HOME" ? f5HomeSpreadOdds : f5AwaySpreadOdds;
+      const spreadLine = lean === "HOME" ? (marketHomeSpread ?? "—") : (marketAwaySpread ?? "—");
+      const spreadOdds = lean === "HOME" ? marketHomeSpreadOdds : marketAwaySpreadOdds;
       games.push({ gamePk: game.gamePk, name: `${game.away.abbr} @ ${game.home.abbr}`,
         gameLabel: `${game.away.abbr} @ ${game.home.abbr}`, away: game.away, home: game.home,
         score, lean, leanAbbr, leanLabel: `${leanAbbr} F5 RL ${spreadLine}${spreadOdds ? ` (${spreadOdds})` : ""}`, line: spreadLine, odds,
@@ -10295,11 +10299,17 @@ export default function App() {
                                       const ml = isAwayLean ? bd.awayML : bd.homeML;
                                       if (ml) lineText = ml;
                                     } else if (gameSubTab === "f5ml") {
-                                      const ml = isAwayLean ? bd.f5AwayML : bd.f5HomeML;
+                                      const ml = isAwayLean
+                                        ? (bd.f5AwayML ?? bd.awayML)
+                                        : (bd.f5HomeML ?? bd.homeML);
                                       if (ml) lineText = `F5 ${ml}`;
                                     } else if (gameSubTab === "f5spread") {
-                                      const sp = isAwayLean ? bd.f5AwaySpread : bd.f5HomeSpread;
-                                      const spOd = isAwayLean ? bd.f5AwaySpreadOdds : bd.f5HomeSpreadOdds;
+                                      const sp = isAwayLean
+                                        ? (bd.f5AwaySpread ?? bd.awaySpread)
+                                        : (bd.f5HomeSpread ?? bd.homeSpread);
+                                      const spOd = isAwayLean
+                                        ? (bd.f5AwaySpreadOdds ?? bd.awaySpreadOdds)
+                                        : (bd.f5HomeSpreadOdds ?? bd.homeSpreadOdds);
                                       if (sp) lineText = `F5 ${sp}${spOd ? ` ${spOd}` : ""}`;
                                     }
                                     if (!lineText) return null;

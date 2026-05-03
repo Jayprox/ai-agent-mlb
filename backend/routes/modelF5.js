@@ -310,8 +310,8 @@ router.get("/f5", async (_req, res) => {
       oddsSelector: (odds) => ({
         f5AwayML: odds.f5AwayML ?? null,
         f5HomeML: odds.f5HomeML ?? null,
-        awayML: odds.f5AwayML ?? null,
-        homeML: odds.f5HomeML ?? null,
+        awayML: odds.f5AwayML ?? odds.awayML ?? null,
+        homeML: odds.f5HomeML ?? odds.homeML ?? null,
       }),
       coeff: COEFF,
       includeBullpen: false,
