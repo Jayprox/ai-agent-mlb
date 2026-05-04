@@ -1645,8 +1645,9 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
   liveSlate.forEach(sg => {
     const sgGameLabel = `${sg.away?.abbr ?? "?"} @ ${sg.home?.abbr ?? "?"}`;
     const sgLu        = liveLineups[sg.gamePk];
-    const sgConfirmed = sgLu?.confirmed ?? false;
-    const sgWx        = liveWeather[sg.gamePk];
+    const sgConfirmed  = sgLu?.confirmed ?? false;
+    const sgHasLineup  = sgConfirmed || sgLu?.source === "roster";
+    const sgWx         = liveWeather[sg.gamePk];
     const sgPf        = PARK_FACTORS[sg.home?.abbr] ?? NEUTRAL_PARK;
 
     // Score both starters: home pitcher faces away batters, away pitcher faces home batters
@@ -1683,7 +1684,7 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
       // ── Lineup platoon adjustment ──────────────────────────────────────────
       let lineupAdj    = 0;
       let lineupSignal = null;
-      if (sgConfirmed && opposingBatters.length >= 7) {
+      if (sgHasLineup && opposingBatters.length >= 7) {
         const pHand    = pitcher.hand ?? "R";
         const oppCount = opposingBatters.filter(b => b.hand && b.hand !== pHand && b.hand !== "?").length;
         const oppPct   = oppCount / opposingBatters.length;
@@ -2056,7 +2057,7 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
   const candidates = [];
   (liveSlate ?? []).forEach(game => {
     const lu = liveLineups[game.gamePk];
-    if (!lu?.confirmed) return; // skip games without a confirmed lineup
+    if (!lu?.confirmed && lu?.source !== "roster") return; // skip games without lineup or roster fallback
     const pf = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
     const wx = liveWeather[game.gamePk];
     const wxFav = !!(wx?.hrFavorable);
@@ -4203,7 +4204,9 @@ export default function App() {
     // Lineups: swap in confirmed live batting order
     lineups: (() => {
       const ll = liveLineups[gamePkKey];
-      return ll?.confirmed ? { away: ll.away, home: ll.home } : baseGame.lineups;
+      return (ll?.confirmed || ll?.source === "roster")
+        ? { away: ll.away ?? [], home: ll.home ?? [] }
+        : baseGame.lineups;
     })(),
     // Umpire: prefer real UmpScorecards accuracy data; keep UMPIRE_STATS static
     // lookup alongside it for zone tendency text + kRate (used by K prop engine).

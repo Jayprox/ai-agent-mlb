@@ -9965,6 +9965,107 @@ This is worth pursuing, but should likely happen **after**:
 
 ---
 
+## HANDOFF NOTE — 2026-05-03 — Backlog Added: Chat / Advisor Can Reason Over Prop Scout Recommendation Surfaces
+
+User wants the conversational tabs to be able to answer questions grounded in the actual Prop Scout recommendation surfaces, for example:
+
+- "Take the players listed in the `Board > Hits` tab and come up with 10 2-player parlay slips"
+- similar requests for:
+  - `Board > K`
+  - `Board > Outs`
+  - `Board > Games` (`Run Line`, `Moneyline`, `Totals`, `F5`)
+  - other surfaced recommendation pools / shortlists
+
+### Current limitation
+
+This is **not reliably grounded today** because the `Chat` backend does **not** currently receive the actual ranked recommendation outputs from Prop Scout surfaces.
+
+Current Chat context includes:
+
+- slate
+- pitcher stats
+- umpire context
+- odds
+- props
+- matched game/pitcher detail
+
+But it does **not** include:
+
+- actual `Board` candidate lists
+- board scores / ranking order
+- filtered players/games currently surfaced in each tab
+- `Model Picks` shortlist context
+- `Scout` / `HR Scout` surfaced picks as structured source pools
+
+So Chat can speak from raw prop/slate context, but not confidently from the **same surfaced recommendation set the user is seeing in the app**.
+
+### Advisor note
+
+`Advisor` is in a similar situation:
+
+- it has richer per-game slate context than Chat
+- but it still does **not** currently ingest the actual `Board > Hits` ranked output
+- so it also cannot reliably answer that request as "use the exact hitters shown in Board > Hits"
+
+Advisor could answer the spirit of the question today, but it would be using its own slate context rather than the actual Board shortlist.
+
+### Feasibility
+
+This is **feasible** with a medium backend context upgrade.
+
+### Recommended implementation direction
+
+Add structured recommendation-context blocks derived from the same logic that powers the app surfaces, such as:
+
+- rank
+- subject (player/team/game)
+- team
+- score / confidence / tier
+- matchup notes
+- recent form context
+- posted line / odds
+- source surface
+
+Likely sources to expose:
+
+- `BOARD_HITS_CANDIDATES`
+- `BOARD_K_CANDIDATES`
+- `BOARD_OUTS_CANDIDATES`
+- `BOARD_GAMES_CANDIDATES`
+- `MODEL_PICKS`
+- optional later:
+  - `SCOUT_PICKS`
+  - `HR_SCOUT_PICKS`
+
+Example conceptual block:
+
+- `BOARD HITS CANDIDATES`
+- `#1 Luis Arraez — MIA — score 84 — hits line 1.5 — recent hit rate 4/5`
+- etc.
+
+Then allow `Chat` / `Advisor` to generate:
+
+- 10 two-leg slips
+- safer vs more aggressive slip sets
+- optional correlation rules later (e.g. avoid same-game pairings if desired)
+
+### Product note
+
+This should be framed as:
+
+- Chat / Advisor using Prop Scout recommendation pools as source pools
+- not as the LLM independently inventing its own shortlist disconnected from the UI
+
+That keeps the result aligned with what the user is already seeing in the app.
+
+### Status
+
+- backlog item
+- feasibility confirmed
+- no implementation started yet
+
+---
+
 ## HANDOFF NOTE — 2026-05-02 — Board / Slate UI Polish + Games Score Semantics
 
 Several frontend-only UX fixes were completed on `2026-05-02` in `prop-scout-v7.jsx`.
@@ -12491,7 +12592,7 @@ HANDOFF NOTE — 2026-05-03 — CODEX TASK 69 COMPLETED (Lab: K Prop Predictive 
 
 ---
 
-## CODEX TASK 72 — Lab: Nightly Calibration Resolver Job (S)
+## CODEX TASK 72 — Lab: Nightly Calibration Resolver Job (S) ✅ COMPLETED
 
 **Status:** Pending
 **Files:** `backend/jobs/resolveLabCalibrationJob.js` (new), `backend/jobs/scheduler.js`, `backend/routes/modelF5.js`, `backend/server.js`, `prop-scout-v7.jsx`

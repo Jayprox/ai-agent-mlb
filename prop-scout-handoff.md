@@ -3574,3 +3574,28 @@ Also fixes two payload gaps discovered during spec:
 5. Admin endpoint `GET /api/admin/jobs/resolve-lab-calibration` for manual trigger
 
 *Updated 2026-05-03 — Session 69 complete · CODEX TASK 72 specced*
+
+---
+
+## ✅ Session 70 — CW: Review + Approve CODEX TASK 72
+
+**Review status:** Approved ✅
+
+### Task 72 — Nightly Calibration Resolver ✅
+
+**`resolveLabCalibrationJob.js`** — `isFinal` detection matches the hardened Task 60 pattern. `gradeEntry` handles all four models correctly: f5ml uses innings 1–5 slice, fullgame uses final linescore totals, kprop does last-name substring match on `box.pitching[subjectKey]` array, totals sums `awayRuns + homeRuns`. Graceful `null` on missing fields → skipped count, not errors. Groups by `gamePk` before fetching — one boxscore call per game regardless of how many model entries exist for it.
+
+**`scheduler.js`** — Import clean, cron at `30 4 * * *` Pacific/Honolulu is correctly 30 min after `gradePendingPicks`.
+
+**`modelF5.js`** — `bookLine`, `bookTotal`, `pitcherLastName` type-guarded and passed into `appendEntry`. Additive — existing entries without these fields keep `null` and are skipped gracefully.
+
+**`prop-scout-v7.jsx`** — kprop forEach destructure adds `pitcher` correctly (line 3672). `bookLine: prop.bookLine ?? null` and `pitcherLastName: String(pitcher?.name ?? "").split(" ").pop() || null` on the record payload (lines 3688–3689). Totals record adds `bookTotal: g.model.bookTotal ?? null` (line 3710).
+
+**`server.js`** — Admin endpoint uses `x-admin-secret` header check, consistent with the existing `grade-picks` endpoint.
+
+All `node --check` passes.
+
+### What's next
+Named backlog fully clear. Remaining items: mobile layout pass, multi-user picks architecture. Recalibration is now unblocked infrastructure-wise — just needs data to accumulate.
+
+*Updated 2026-05-03 — Session 70 complete · CODEX TASK 72 approved*
