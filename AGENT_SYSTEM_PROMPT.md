@@ -9828,6 +9828,143 @@ Predictive tab:
 
 ---
 
+## HANDOFF NOTE — 2026-05-03 — Backlog Added: Move Lab Calibration Storage from JSON to DB
+
+Current Lab calibration / Track Record persistence is backend-side, but file-based:
+
+- storage file: `backend/data/lab-outcomes.json`
+- service layer: `backend/services/labCalibration.js`
+
+This is good enough for local use and simple server persistence, but it is **not** as durable as a database-backed solution. It may be vulnerable on ephemeral filesystems or certain redeploy/restart patterns even though normal frontend changes will not affect it.
+
+### Requested follow-up
+
+Move Lab calibration storage from flat JSON into the backend database.
+
+### Preserve current behavior
+
+The DB-backed version should preserve the current Lab calibration concepts:
+
+- prediction records
+- resolved outcomes
+- `model`
+- `gamePk`
+- `subjectKey`
+- probabilities / edge / flags
+- timestamps
+
+### Compatibility goals
+
+- keep the current frontend Track Record UI unchanged if possible
+- keep the nightly resolver flow compatible:
+  - `backend/jobs/resolveLabCalibrationJob.js`
+- keep manual/admin calibration access patterns working
+
+### Why this matters
+
+- makes Lab track record data durable across redeploys and restarts
+- reduces risk of losing calibration history as Lab usage grows
+- upgrades the predictive-modeling lane from “good local persistence” to “real production persistence”
+
+### Status
+
+- backlog item
+- no implementation started yet
+
+---
+
+## HANDOFF NOTE — 2026-05-03 — Backlog Added: Global Track Record Across All Tabs
+
+User wants to explore expanding Track Record beyond the Lab tab so the app can measure hit rates across **all major recommendation surfaces**, not just predictive-model outputs.
+
+### Feasibility
+
+This is **feasible**, but it should be treated as a larger product/data architecture task rather than a simple UI add-on.
+
+The current Lab Track Record works because:
+
+- predictions are structured
+- each card has a clear `model`
+- each pick has a well-defined settlement path
+- outcomes are stored and later resolved
+
+Doing the same app-wide is possible, but the main challenge is normalizing very different output types.
+
+### Desired long-term direction
+
+Keep a historical track record for hits / misses produced by tabs such as:
+
+- `Board`
+- `Model Picks`
+- `Scout`
+- `HR Scout`
+- `Advisor`
+- merged Props / other future predictive surfaces
+
+### Key design challenge
+
+Not every tab produces the same kind of “pick” today:
+
+- some are ranked cards
+- some are algorithmic leans
+- some are AI-selected picks
+- some are only research surfaces unless the user explicitly logs them
+
+So this likely requires defining a shared concept such as:
+
+- `generated recommendation`
+- source tab / source model
+- market type
+- subject key
+- timestamp / slate date
+- settlement rule
+- resolved result
+
+### Likely architecture direction
+
+If pursued, the cleanest long-term design is:
+
+- a backend-backed recommendation history table/log
+- per-source identifiers:
+  - `board_hr`
+  - `board_hits`
+  - `board_k`
+  - `board_outs`
+  - `board_games_ml`
+  - `model_picks`
+  - `scout`
+  - `hr_scout`
+  - `advisor`
+  - `lab_*`
+- unified resolver logic where possible
+- per-tab and global summary views
+
+### Important product decision to make later
+
+Need to decide whether Track Record means:
+
+1. **every surfaced recommendation is auto-recorded**, even if the user never logs/clicks it
+2. only **top recommendations / featured cards** are recorded
+3. only **explicitly user-logged picks** count toward track record
+
+This choice has big implications for fairness, sample size, and how “hit rate” is interpreted.
+
+### Recommendation
+
+This is worth pursuing, but should likely happen **after**:
+
+- Lab calibration storage is moved to the DB
+- a shared recommendation schema is defined
+- settlement rules are standardized across recommendation types
+
+### Status
+
+- backlog item
+- feasibility confirmed in principle
+- no implementation started yet
+
+---
+
 ## HANDOFF NOTE — 2026-05-02 — Board / Slate UI Polish + Games Score Semantics
 
 Several frontend-only UX fixes were completed on `2026-05-02` in `prop-scout-v7.jsx`.

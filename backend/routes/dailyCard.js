@@ -383,11 +383,19 @@ router.get("/", async (req, res) => {
     console.warn(`Daily Card DB lookup skipped: ${dbErr.message}`);
   }
 
-  res.status(202).json({
-    status: "pending",
-    error: "Daily Card not ready yet. Try again shortly.",
-    cap: capStatus(),
-  });
+  try {
+    const generated = await generateDailyCard();
+    res.setHeader("X-Cache", "MISS");
+    return res.json({ ...generated, cap: capStatus() });
+  } catch (err) {
+    const msg = err.message ?? "Daily Card generation failed";
+    const status = /cap reached/i.test(msg) ? 429 : 502;
+    return res.status(status).json({
+      error: status === 429 ? "Daily analysis cap reached" : "Daily Card unavailable",
+      detail: msg,
+      cap: capStatus(),
+    });
+  }
 });
 
 module.exports = { router, regenerateDailyCard, generateDailyCard, readDailyCardSnapshot };

@@ -20,25 +20,6 @@
       "userId": "user2"
     },
     {
-      "id": "1777165283982_pk6k1",
-      "timestamp": "2026-04-26T01:01:23.982Z",
-      "date": "Apr 25",
-      "game": "BOS @ BAL",
-      "gamePk": 824851,
-      "label": "F5 O/U",
-      "lean": "OVER",
-      "confidence": 50,
-      "propType": "F5",
-      "homeTeam": "BAL",
-      "awayTeam": "BOS",
-      "pitcherId": 669432,
-      "pitcherName": "Trevor Rogers",
-      "playerId": null,
-      "playerName": null,
-      "result": "hit",
-      "userId": "user10"
-    },
-    {
       "id": "1777785861369_ylfn0",
       "timestamp": "2026-05-03T05:24:21.369Z",
       "date": "May 2",
