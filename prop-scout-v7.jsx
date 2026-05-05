@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─────────────────────────────────────────────
 // STADIUM DATA — coordinates + orientation
@@ -2034,6 +2034,7 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
         hand:         p.hand ?? "R",
         gamePk:       game.gamePk,
         gameLabel:    `${game.away?.abbr ?? "?"} @ ${game.home?.abbr ?? "?"}`,
+        gameTime:     game.gameTime ?? null,
         facingTeam:   facingTeam ?? "?",
         score,
         era:          merged.era   ?? "—",
@@ -2100,6 +2101,7 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
           team:         side === "away" ? (game.away?.abbr ?? "?") : (game.home?.abbr ?? "?"),
           gamePk:       game.gamePk,
           gameLabel:    `${game.away?.abbr ?? "?"} @ ${game.home?.abbr ?? "?"}`,
+          gameTime:     game.gameTime ?? null,
           pitcher:      facingPitcher?.name ?? "—",
           pitcherHand,
           park:         game.stadium ?? "—",
@@ -3267,19 +3269,29 @@ export default function App() {
       .finally(() => setSlateLoading(false));
   }, [slateDate]);
 
-  // Hydrate pick log from backend on mount (Option A: backend-first, localStorage fallback)
+  // Hydrate pick log from backend — fires once authToken is available, then again each time
+  // the Picks tab is opened so overnight nightly-graded results always appear.
+  // Uses apiFetch (sends Bearer token) — bare fetch() was silently returning 401.
+  const hydratePicksFromServer = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const data = await apiFetch("/api/picks");
+      if (!data?.picks?.length) { setPicksServerReachable(true); return; }
+      setPicksServerReachable(true);
+      setPropLog(data.picks);
+      localStorage.setItem("propscout_log", JSON.stringify(data.picks));
+    } catch (_) {
+      setPicksServerReachable(false);
+    }
+  }, [authToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // On auth token available (covers initial mount + login)
+  useEffect(() => { hydratePicksFromServer(); }, [hydratePicksFromServer]);
+
+  // Re-hydrate when user opens Picks tab — surfaces nightly-graded results without a full reload
   useEffect(() => {
-    fetch(`${API_BASE}/api/picks`)
-      .then(r => r.ok ? r.json() : null)
-      .then(data => {
-        if (!data?.picks) return;
-        setPicksServerReachable(true);
-        if (!data?.picks?.length) return; // backend empty or down → keep localStorage as-is
-        setPropLog(data.picks);
-        localStorage.setItem("propscout_log", JSON.stringify(data.picks));
-      })
-      .catch(() => { setPicksServerReachable(false); }); // silent — localStorage already loaded as initial state
-  }, []);
+    if (view === "picks") hydratePicksFromServer();
+  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch recent IL / DL placements for lineup flags
   useEffect(() => {
@@ -10430,7 +10442,7 @@ export default function App() {
                             )}
                           </div>
                           <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
-                            vs {c.facingTeam} · {c.gameLabel}
+                            vs {c.facingTeam} · {c.gameLabel}{c.gameTime ? ` ${formatLocalTime(c.gameTime)}` : ""}
                             {c.umpire && <span style={{ color: "#4b5563" }}> · {c.umpire}</span>}
                           </div>
                           {/* Pitcher stats row */}
@@ -10577,7 +10589,7 @@ export default function App() {
                           )}
                         </div>
                         <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
-                          vs {c.pitcher} ({c.pitcherHand}HP) · {c.gameLabel}
+                          vs {c.pitcher} ({c.pitcherHand}HP) · {c.gameLabel}{c.gameTime ? ` ${formatLocalTime(c.gameTime)}` : ""}
                         </div>
                         {/* Stats row */}
                         <div style={{ display: "flex", gap: 10, marginTop: 5, flexWrap: "wrap" }}>
