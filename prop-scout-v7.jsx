@@ -1711,7 +1711,7 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
     const sgGameLabel = `${sg.away?.abbr ?? "?"} @ ${sg.home?.abbr ?? "?"}`;
     const sgLu        = liveLineups[sg.gamePk];
     const sgConfirmed  = sgLu?.confirmed ?? false;
-    const sgHasLineup  = sgConfirmed || sgLu?.source === "roster";
+    const sgHasLineup  = sgConfirmed;
     const sgWx         = liveWeather[sg.gamePk];
     const sgPf        = PARK_FACTORS[sg.home?.abbr] ?? NEUTRAL_PARK;
 
@@ -2123,7 +2123,7 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
   const candidates = [];
   (liveSlate ?? []).forEach(game => {
     const lu = liveLineups[game.gamePk];
-    if (!lu?.confirmed && lu?.source !== "roster") return; // skip games without lineup or roster fallback
+    if (!lu?.confirmed) return; // skip games without confirmed lineup
     const pf = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
     const wx = liveWeather[game.gamePk];
     const wxFav = !!(wx?.hrFavorable);
@@ -4302,7 +4302,7 @@ export default function App() {
     // Lineups: swap in confirmed live batting order
     lineups: (() => {
       const ll = liveLineups[gamePkKey];
-      return (ll?.confirmed || ll?.source === "roster")
+      return ll?.confirmed
         ? { away: ll.away ?? [], home: ll.home ?? [] }
         : baseGame.lineups;
     })(),
@@ -8212,6 +8212,7 @@ export default function App() {
                 ? `${game.away.abbr} Lineup vs ${facingPitcher.name}`
                 : `${game.home.abbr} Lineup vs ${facingPitcher.name}`);
             const lineupConfirmed = liveLineups[gamePkKey]?.confirmed === true;
+            const displayLineup = lineupConfirmed ? lineup : [];
 
             return (<>
               {/* Toggle */}
@@ -8231,11 +8232,11 @@ export default function App() {
                 <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Lineup Vulnerability vs {facingPitcher.name}</div>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                   {facingPitcher.arsenal.map(a => {
-                    const weakCount = lineup.filter(b => {
+                    const weakCount = displayLineup.filter(b => {
                       const avg = b.vsPitches?.[a.abbr];
                       return avg && parseFloat(avg) < 0.22;
                     }).length;
-                    const strongCount = lineup.filter(b => {
+                    const strongCount = displayLineup.filter(b => {
                       const avg = b.vsPitches?.[a.abbr];
                       return avg && parseFloat(avg) >= 0.28;
                     }).length;
@@ -8273,31 +8274,13 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {isRosterFallback && (
-                  <div style={{
-                    background: "rgba(245,158,11,0.08)",
-                    border: "1px solid rgba(245,158,11,0.25)",
-                    borderRadius: 8,
-                    padding: "8px 12px",
-                    marginBottom: 10,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                  }}>
-                    <span style={{ fontSize: 14 }}>📋</span>
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 700, color: "#fbbf24" }}>Lineup Not Yet Posted</div>
-                      <div style={{ fontSize: 10, color: "#9ca3af" }}>Showing active roster · Batting order TBD · Check back closer to first pitch</div>
-                    </div>
-                  </div>
-                )}
-                {lineup.length === 0 ? (
+                {displayLineup.length === 0 ? (
                   <div style={{ textAlign: "center", padding: "22px 0" }}>
                     <div style={{ fontSize: 26, marginBottom: 8 }}>📋</div>
                     <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", marginBottom: 6 }}>Lineups Not Yet Posted</div>
                     <div style={{ fontSize: 11, color: "#6b7280" }}>Check back closer to first pitch.</div>
                   </div>
-                ) : lineup.map((rawB, i) => {
+                ) : displayLineup.map((rawB, i) => {
                   const hittingLog = rawB.id ? liveHittingLog[rawB.id] : null;
                   // Merge season stats from hitting log into batter so stat boxes populate
                   const rawBEnriched = hittingLog ? {

@@ -13336,6 +13336,46 @@ Cards show:
 
 - `npm run build` ✅
 
+## HANDOFF NOTE — 2026-05-06 — CODEX TASK 83 COMPLETED + TASK 74 FINAL GAPS VERIFIED
+
+Completed the requested frontend-only follow-up in `prop-scout-v7.jsx`.
+
+### Task 83 — Revert roster fallback behavior
+
+Reverted the lineup/board/model usage of roster fallback so batter-facing surfaces only activate once lineups are officially confirmed.
+
+Applied the exact requested changes:
+
+- `computeTopSlatePicks(...)`
+  - `const sgHasLineup = sgConfirmed;`
+- `computeBatterBoard(...)`
+  - now skips any game without `lu?.confirmed`
+- lineup swap block in the live `game` object
+  - now only swaps in `liveLineups` when `ll?.confirmed`
+- Lineup tab render
+  - roster fallback no longer renders batter rows
+  - unconfirmed roster fallback now shows the existing waiting-for-lineups empty state
+
+No backend files or scoring logic were touched.
+
+### Task 74 — final 3 gaps
+
+Audited the three requested JSX-only label gaps.
+
+Result:
+
+- Scout pick cards already had `TierBadge tier="ai"` in the collapsed row
+- HR Scout pick cards already had `TierBadge tier="projection"` in the collapsed row
+- Model Picks projected values already showed:
+  - `TierBadge tier="projection"`
+  - `Est. {p.projectedValue}`
+
+So no further Task 74 badge changes were needed beyond preserving the current implementation.
+
+### Verification
+
+- `npm run build` ✅
+
 ## HANDOFF NOTE — 2026-05-06 — CODEX TASK 82 COMPLETED (DB-First Migration: Picks + Auth)
 
 Implemented Task 82 exactly per spec in backend only. No frontend files, `middleware/auth.js`, or `backend/services/labCalibration.js` were touched.
