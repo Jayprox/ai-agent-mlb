@@ -5416,3 +5416,51 @@ module.exports = router;
 3. Test login with an existing account — JWT should return as before
 4. Add a pick, reload the app — pick should persist (coming from DB now)
 5. Check Railway logs for any `query` errors on startup
+
+---
+
+## ✅ Session 77 — CW: Task 83–87 Catch-Up + Task 88 Specced
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+---
+
+### Task 83 — Revert Roster Fallback (Confirmed-Only) ✅
+Reverted batter board to show batters only when lineup is confirmed. Roster fallback (pre-confirmation) removed from HR/Hits/Lineup tabs. Codex-approved.
+
+### Task 74 — TierBadge Label Gaps (3 remaining) ✅
+- Scout pick cards → `<TierBadge tier="ai" />`
+- HR Scout pick cards → `<TierBadge tier="projection" />`
+- `proj:` prefix in Model Picks → `Est.` with `<TierBadge tier="projection" />`
+Codex-approved.
+
+### Task 84 — Batter Board Card Summaries with H2H Matchup Context ✅
+`matchup` object added to batter candidates in `computeBatterBoard`:
+- `batterHand`, `pitcherHand`, `batterVsHand` (avg/ops vs pitcher handedness), `pitcherTopPitches` (top 2 by usage), `batterVsPitches` (batter avg vs those pitches)
+- `buildBoardSummaryRequest` and `hydrateCardSummaries` pass `matchup` through to POST
+- `cardSummary.js` system prompt updated with H2H instruction + example; `matchup` included in cache hash
+Codex-approved.
+
+### Task 85 — Roster Mode on Board (HR/Hits) with Badges ✅
+Board (HR/Hits tabs) shows roster players pre-confirmation with `LINEUP TBD` (gray) badge; `✓ CONFIRMED` (green) when confirmed. Badges hidden once game goes LIVE or FINAL.
+
+### Task 86 — Lineup Tab Shows Roster Players ✅
+Lineup tab inside game cards now shows roster players before lineup confirmation, with a `ROSTER` chip in the tab toggle. Vulnerability analysis card gated on `lineupConfirmed` (confirmed-only); placeholder shown for roster state.
+
+### Task 87 — Browser Refresh Logout Fix + Soft Refresh Button ✅
+**Part A:** `_authToken` initialized from localStorage at module level (not inside useEffect), eliminating the 401-on-reload logout bug.
+**Part B:** Soft refresh button (circular ↻) added to top nav bar after the Board tab button. `handleSoftRefresh` resets all live data states. Spinner animation while refreshing. "X min ago" / "just now" timestamp label appears after first refresh.
+
+---
+
+### CODEX TASK 88 — Lab: Season Overview Panel + Calibration Curves (pending Codex)
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 88**.
+
+**Summary:**
+- **Part A** — Season Overview panel above the sub-tab buttons: ROI simulation (edge picks only, +100/-110 juice), combined stats (accuracy, Brier, total settled), 4-row model comparison table
+- **Part B** — Calibration curve SVG after each model's Track Record stats grid: confidence buckets (50–54%, 55–64%, 65–74%, 75–84%, 85%+) vs actual hit rate, with diagonal reference line
+- Pure frontend — no backend changes; data already in `labCalibration.entries` + `labCalibration.summary`
+- One new state: `showLabSeasonOverview` (boolean, default `true`)
+
+*Updated 2026-05-06 — Session 77 complete · CODEX TASK 88 specced*

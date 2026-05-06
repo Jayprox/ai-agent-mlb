@@ -13445,3 +13445,135 @@ Implemented Task 82 exactly per spec in backend only. No frontend files, `middle
   - `computeGrade(...)` ✅
   - `fetchBoxForGrading(...)` ✅
   - `module.exports = { gradePendingPicks }` ✅
+
+---
+
+## CODEX TASK 88 — Lab: Season Overview Panel + Calibration Curves
+
+**Size:** M  
+**File:** `prop-scout-v7.jsx` only — no backend changes  
+**Prereqs:** `labCalibration` state already contains `{ entries: [], summary: { f5ml, fullgame, kprop, totals, combined } }` fetched from `/api/model/calibration`. Both `entries` and `summary` are already loaded into state.
+
+---
+
+### Overview
+
+Two additive enhancements to the Lab tab. No existing UI is removed or modified — only new JSX is added in two places.
+
+---
+
+### Part A — Season Overview Panel
+
+**Where:** Insert a new `<div>` block immediately **above** the sub-tab button row (`[["f5ml","F5 ML"], ...]`) in the Lab view, gated on `labCalibration` being non-null.
+
+**What it shows:**
+
+1. **ROI Simulation** — Computed from `labCalibration.entries`:
+   - Filter: `e.hasEdge === true && (e.result === "HIT" || e.result === "MISS")`
+   - P&L: `+100` per HIT, `-110` per MISS (standard -110 juice)
+   - `roi = net / (edgePicks.length * 110) * 100` — round to one decimal
+   - Display: `Net: +$X` (green `#22c55e`) or `Net: -$X` (red `#f87171`) and `ROI: X.X%` below it
+   - If zero edge picks: show `—`
+
+2. **Combined stats** — from `labCalibration.summary.combined`:
+   - Accuracy %, Brier score, total settled picks (`hits + misses`)
+   - If `brierScore < 0.22`: label "Well-calibrated ✓" in green; if `> 0.25`: "Needs data" in gray
+
+3. **Model comparison mini-table** — 4 rows, one per model (f5ml / fullgame / kprop / totals):
+   - Each row: model name | `X-Y` record | `XX%` accuracy (or `—` if no data)
+   - Highlight the row with the highest accuracy in teal
+
+**Styling:**
+- Dark card: `background: "#0f1117"`, `border: "1px solid #1f2437"`, `borderRadius: 10`, `padding: "10px 12px"`, `marginBottom: 12`
+- Section label: `fontSize: 9`, `fontWeight: 800`, `color: "#34d399"`, `textTransform: "uppercase"`, `letterSpacing: "0.06em"`
+- Collapsible toggle (same pattern as existing Track Record toggle): `showLabSeasonOverview` state, defaulting to `true`
+
+---
+
+### Part B — Calibration Curves
+
+**Where:** Inside the existing expanded Track Record panel (`showLabTrackRecord === true`), after each model's stats grid (after the `sampleSmall` warning div), add a calibration chart for that model.
+
+**What it shows:** A small inline SVG bar chart showing actual hit rate vs expected hit rate per confidence bucket.
+
+**Data computation (do this inside the render, not in an effect):**
+
+```js
+function buildCalibrationBuckets(entries, model) {
+  const BUCKETS = [
+    { label: "50–54%", min: 0.50, max: 0.55 },
+    { label: "55–64%", min: 0.55, max: 0.65 },
+    { label: "65–74%", min: 0.65, max: 0.75 },
+    { label: "75–84%", min: 0.75, max: 0.85 },
+    { label: "85%+",   min: 0.85, max: 1.01 },
+  ];
+  const filtered = entries.filter(e =>
+    e.model === model &&
+    (e.result === "HIT" || e.result === "MISS") &&
+    e.leanProb != null
+  );
+  return BUCKETS.map(b => {
+    const inBucket = filtered.filter(e => e.leanProb >= b.min && e.leanProb < b.max);
+    const hits = inBucket.filter(e => e.result === "HIT").length;
+    const total = inBucket.length;
+    const midpoint = (b.min + b.max) / 2;
+    return {
+      label: b.label,
+      expected: midpoint,          // e.g. 0.70 for 65–74% bucket
+      actual: total > 0 ? hits / total : null,
+      n: total,
+    };
+  });
+}
+```
+
+**SVG chart spec:**
+
+- Dimensions: `width="100%"` with `viewBox="0 0 220 90"`, `preserveAspectRatio="xMidYMid meet"`
+- Chart area: left margin 10, right margin 10, top margin 8, bottom margin 22 (for x-axis labels)
+- Y-axis range: 0 to 1.0 (0% to 100%)
+- Bar width: `(220 - 20) / 5 = 40px`, gap `4px` between bars
+- For each bucket:
+  - If `n === 0`: render a faint outline bar (no fill) at `expected` height
+  - If `n >= 1`: render a filled teal bar (`#34d399`, opacity 0.7) at `actual` height
+  - Render a small white diamond (◆) or horizontal tick at the `expected` height (the model's own predicted probability for that bucket midpoint) — this is the "perfect calibration" reference point
+  - Below the bar: label (e.g. "65–74%") in `fontSize: 5` gray, and `n=X` count in `fontSize: 5` muted
+- Y-axis gridlines at 0%, 50%, 100% — dashed, `stroke: "#1f2437"`
+- Chart title: `"Confidence vs Actual Hit Rate"` in `fontSize: 7`, `color: "#4b5563"`, above the SVG
+- Only render the chart if the model has at least 3 total settled entries; otherwise skip
+- No recharts — pure SVG only
+
+**Reference line:** A diagonal from `(0, chartH)` to `(chartW, 0)` in dashed `#374151` — represents perfect calibration (where expected = actual). This line should be rendered behind the bars.
+
+---
+
+### State additions
+
+Add one new state variable near the existing `showLabTrackRecord` state:
+
+```js
+const [showLabSeasonOverview, setShowLabSeasonOverview] = useState(true);
+```
+
+Search for `showLabTrackRecord` — it's already declared nearby. Add the new state on the line immediately after it.
+
+---
+
+### Do NOT
+
+- Do not modify `buildCalibrationSummary` in `modelF5.js` or any backend file
+- Do not change the existing Track Record toggle (`showLabTrackRecord`) or its stats grid
+- Do not add any new state fetches or `useEffect` hooks — all data is already in `labCalibration`
+- Do not change any other view (models, slate, game, picks, etc.)
+- Do not add recharts or any chart library import
+
+---
+
+### Verification
+
+1. `node --check prop-scout-v7.jsx` passes
+2. Season Overview panel appears above the sub-tab buttons when `labCalibration` is loaded
+3. ROI shows `—` when no edge picks exist (empty entries array case)
+4. Track Record panel still renders all 4 model grids unchanged
+5. Calibration chart SVG renders after each model's stats grid (only if ≥3 settled entries)
+6. No console errors

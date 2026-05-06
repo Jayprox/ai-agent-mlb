@@ -423,8 +423,10 @@ const IS_STATS_SANDBOX = false; // flip to false to enable live MLB stats
 // set false when backend is running so Savant routes are active too.
 const IS_SAVANT_SANDBOX = IS_STATS_SANDBOX;
 
-// Module-level auth token — set by App on login/logout so every fetch auto-includes it
-let _authToken = null;
+// Module-level auth token — set by App on login/logout so every fetch auto-includes it.
+// Initialized directly from localStorage so it's available before any useEffect runs,
+// preventing a 401 race on page reload that would log the user out.
+let _authToken = (() => { try { return localStorage.getItem("propscout_token") || null; } catch { return null; } })();
 
 const apiFetch = async (path) => {
   const headers = {};
@@ -3343,6 +3345,8 @@ export default function App() {
   const chatBottomRef = useRef(null);
   const advisorBottomRef = useRef(null);
   const labCalibrationRecorded = useRef(new Set());
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState(null);
   const labCalibrationResolved = useRef(new Set());
 
   // Fetch weather when a game card is opened
@@ -3659,6 +3663,22 @@ export default function App() {
         : "Connection error — is the server running?");
     }
     setLoginLoading(false);
+  };
+
+  const handleSoftRefresh = () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    oddsCache.ts = 0;
+    setLiveSlate(null);
+    setLiveOddsMap({});
+    setLivePredMarkets(null);
+    setLiveNrfiData({});
+    setLiveScores({});
+    setLiveInjuries([]);
+    setLiveBoardResults({});
+    setAiCardSummaries({});
+    setLastRefreshed(new Date());
+    setTimeout(() => setIsRefreshing(false), 2000);
   };
 
   const handleLogout = () => {
@@ -5736,6 +5756,40 @@ export default function App() {
               <button onClick={() => setView("chat")} style={{ background: view === "chat" ? "#a78bfa" : "#161827", border: `1px solid ${view === "chat" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>💬 Chat</button>
             )}
             <button onClick={() => setView("board")} style={{ background: view === "board" ? "#fbbf24" : "#161827", border: `1px solid ${view === "board" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "board" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Board</button>
+            {/* ── Soft Refresh button ── */}
+            <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
+              <button
+                onClick={handleSoftRefresh}
+                disabled={isRefreshing}
+                title="Refresh data"
+                style={{
+                  background: "transparent",
+                  border: "1px solid #1f2437",
+                  borderRadius: "50%",
+                  width: 28,
+                  height: 28,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: isRefreshing ? "default" : "pointer",
+                  color: isRefreshing ? "#4b5563" : "#6b7280",
+                  fontSize: 14,
+                  flexShrink: 0,
+                  transition: "color 0.2s",
+                }}
+              >
+                <span style={{ display: "inline-block", animation: isRefreshing ? "spin 1s linear infinite" : "none" }}>↻</span>
+              </button>
+              {lastRefreshed && (
+                <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace", whiteSpace: "nowrap" }}>
+                  {(() => {
+                    const diffMs = Date.now() - lastRefreshed.getTime();
+                    const mins = Math.floor(diffMs / 60000);
+                    return mins < 1 ? "just now" : `${mins}m ago`;
+                  })()}
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -6419,6 +6473,116 @@ export default function App() {
           const activeLabData = isLabF5 ? labData : isLabFullGame ? labFgData : isLabKProp ? labKData : labTotalsData;
           const activeLabLoading = isLabF5 ? labLoading : isLabFullGame ? labFgLoading : isLabKProp ? labKLoading : labTotalsLoading;
           const refreshLab = () => (isLabF5 ? fetchLabData(true) : isLabFullGame ? fetchLabFgData(true) : isLabKProp ? fetchLabKData(true) : fetchLabTotalsData(true));
+          const calibrationEntries = Array.isArray(labCalibration?.entries) ? labCalibration.entries : [];
+          const combinedSummary = labCalibration?.summary?.combined ?? null;
+          const labModelRows = [
+            { key: "f5ml", title: "F5 ML", color: "#34d399", summary: labCalibration?.summary?.f5ml ?? null },
+            { key: "fullgame", title: "Full-Game ML", color: "#a78bfa", summary: labCalibration?.summary?.fullgame ?? null },
+            { key: "kprop", title: "K Prop", color: "#38bdf8", summary: labCalibration?.summary?.kprop ?? null },
+            { key: "totals", title: "Totals", color: "#fbbf24", summary: labCalibration?.summary?.totals ?? null },
+          ];
+          const bestLabModelKey = labModelRows
+            .filter(({ summary }) => (summary?.total ?? 0) > 0 && summary?.accuracy != null)
+            .sort((a, b) => (b.summary?.accuracy ?? -1) - (a.summary?.accuracy ?? -1))[0]?.key ?? null;
+          const edgeHits = combinedSummary?.edgeHits ?? 0;
+          const edgeMisses = Math.max(0, (combinedSummary?.edgeTotal ?? 0) - edgeHits);
+          const edgeRoi = (edgeHits * 100) - (edgeMisses * 110);
+          const edgeRoiLabel = `${edgeRoi >= 0 ? "+" : "-"}$${Math.abs(edgeRoi).toLocaleString()}`;
+          const settledPicks = combinedSummary?.total ?? 0;
+          const calibrationBuckets = [
+            { label: "50-54%", min: 0.50, max: 0.55 },
+            { label: "55-64%", min: 0.55, max: 0.65 },
+            { label: "65-74%", min: 0.65, max: 0.75 },
+            { label: "75-84%", min: 0.75, max: 0.85 },
+            { label: "85%+", min: 0.85, max: 1.01 },
+          ];
+          const getCalibrationSeries = (modelKey) => {
+            const settled = calibrationEntries.filter((entry) =>
+              entry?.model === modelKey &&
+              (entry?.result === "HIT" || entry?.result === "MISS") &&
+              typeof entry?.leanProb === "number" &&
+              entry.leanProb >= 0.5
+            );
+            return calibrationBuckets.map((bucket) => {
+              const rows = settled.filter((entry) => entry.leanProb >= bucket.min && entry.leanProb < bucket.max);
+              const count = rows.length;
+              const hits = rows.filter((entry) => entry.result === "HIT").length;
+              const expectedPct = count ? (rows.reduce((sum, entry) => sum + ((entry.leanProb ?? 0) * 100), 0) / count) : null;
+              const actualPct = count ? ((hits / count) * 100) : null;
+              return { ...bucket, count, expectedPct, actualPct };
+            });
+          };
+          const renderCalibrationCurve = (modelKey) => {
+            const series = getCalibrationSeries(modelKey);
+            const hasPoints = series.some((bucket) => bucket.count > 0);
+            if (!hasPoints) {
+              return (
+                <div style={{ background: "#141726", border: "1px solid #1f2437", borderRadius: 8, padding: "10px 12px", fontSize: 9, color: "#6b7280" }}>
+                  No settled picks yet for calibration buckets.
+                </div>
+              );
+            }
+
+            const svgWidth = 320;
+            const svgHeight = 150;
+            const left = 26;
+            const right = 10;
+            const top = 12;
+            const bottom = 34;
+            const chartWidth = svgWidth - left - right;
+            const chartHeight = svgHeight - top - bottom;
+            const barWidth = chartWidth / series.length;
+            const yForPct = (pct) => top + chartHeight - ((pct / 100) * chartHeight);
+
+            return (
+              <div style={{ background: "#141726", border: "1px solid #1f2437", borderRadius: 8, padding: "8px 8px 4px", marginTop: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                  <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em" }}>Calibration Curve</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 8, background: "#14b8a6", borderRadius: 2, display: "inline-block" }} /> actual</span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 8, background: "#f9fafb", transform: "rotate(45deg)", display: "inline-block" }} /> expected</span>
+                  </div>
+                </div>
+                <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} style={{ width: "100%", height: "auto", display: "block" }}>
+                  <line x1={left} y1={yForPct(0)} x2={left + chartWidth} y2={yForPct(100)} stroke="rgba(255,255,255,0.18)" strokeWidth="1" strokeDasharray="4 4" />
+                  {[0, 50, 100].map((pct) => (
+                    <g key={pct}>
+                      <line x1={left} y1={yForPct(pct)} x2={left + chartWidth} y2={yForPct(pct)} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />
+                      <text x={left - 6} y={yForPct(pct) + 3} textAnchor="end" fill="#4b5563" fontSize="8" fontFamily="monospace">{pct}</text>
+                    </g>
+                  ))}
+                  {series.map((bucket, idx) => {
+                    const cx = left + (idx * barWidth) + (barWidth / 2);
+                    const rectWidth = Math.max(18, barWidth - 14);
+                    const actualY = bucket.actualPct != null ? yForPct(bucket.actualPct) : yForPct(0);
+                    const actualHeight = bucket.actualPct != null ? (top + chartHeight - actualY) : 0;
+                    const expectedY = bucket.expectedPct != null ? yForPct(bucket.expectedPct) : null;
+                    return (
+                      <g key={bucket.label}>
+                        <rect
+                          x={cx - (rectWidth / 2)}
+                          y={actualY}
+                          width={rectWidth}
+                          height={actualHeight}
+                          rx="4"
+                          fill="#14b8a6"
+                          fillOpacity={bucket.count > 0 ? 0.9 : 0.2}
+                        />
+                        {expectedY != null && (
+                          <polygon
+                            points={`${cx},${expectedY - 6} ${cx + 6},${expectedY} ${cx},${expectedY + 6} ${cx - 6},${expectedY}`}
+                            fill="#f9fafb"
+                          />
+                        )}
+                        <text x={cx} y={svgHeight - 14} textAnchor="middle" fill="#9ca3af" fontSize="8" fontFamily="monospace">{bucket.label}</text>
+                        <text x={cx} y={svgHeight - 4} textAnchor="middle" fill="#4b5563" fontSize="7" fontFamily="monospace">{bucket.count}p</text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+            );
+          };
 
           return (
             <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
@@ -6455,6 +6619,89 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              {(labCalibration || labCalibrationLoading) && (
+                <Card style={{ padding: "12px 14px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>📈 Season Overview</div>
+                      <span style={{ fontSize: 8, fontWeight: 700, color: "#34d399", background: "rgba(52,211,153,0.12)", border: "1px solid rgba(52,211,153,0.28)", borderRadius: 999, padding: "2px 7px", fontFamily: "monospace" }}>
+                        EDGE ROI SIM
+                      </span>
+                    </div>
+                    {labCalibrationLoading && <span style={{ fontSize: 8, color: "#6b7280" }}>refreshing calibration…</span>}
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: isNarrowPhone ? "1fr 1fr" : "repeat(4, 1fr)", gap: 8, marginBottom: 10 }}>
+                    <div style={{ background: "#1e2030", borderRadius: 10, padding: "9px 10px", textAlign: "center" }}>
+                      <div style={{ fontSize: 14, fontWeight: 900, color: edgeRoi >= 0 ? "#34d399" : "#f87171", fontFamily: "monospace" }}>{edgeRoiLabel}</div>
+                      <div style={{ fontSize: 8, color: "#6b7280", marginTop: 2 }}>Edge ROI</div>
+                    </div>
+                    <div style={{ background: "#1e2030", borderRadius: 10, padding: "9px 10px", textAlign: "center" }}>
+                      <div style={{ fontSize: 14, fontWeight: 900, color: "#34d399", fontFamily: "monospace" }}>{combinedSummary?.accuracy != null ? `${combinedSummary.accuracy}%` : "—"}</div>
+                      <div style={{ fontSize: 8, color: "#6b7280", marginTop: 2 }}>Combined Accuracy</div>
+                    </div>
+                    <div style={{ background: "#1e2030", borderRadius: 10, padding: "9px 10px", textAlign: "center" }}>
+                      <div style={{ fontSize: 14, fontWeight: 900, color: "#fbbf24", fontFamily: "monospace" }}>{combinedSummary?.brierScore != null ? combinedSummary.brierScore.toFixed(2) : "—"}</div>
+                      <div style={{ fontSize: 8, color: "#6b7280", marginTop: 2 }}>Brier Score</div>
+                    </div>
+                    <div style={{ background: "#1e2030", borderRadius: 10, padding: "9px 10px", textAlign: "center" }}>
+                      <div style={{ fontSize: 14, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace" }}>{settledPicks}</div>
+                      <div style={{ fontSize: 8, color: "#6b7280", marginTop: 2 }}>Settled Picks</div>
+                    </div>
+                  </div>
+
+                  <div style={{ border: "1px solid #1f2437", borderRadius: 10, overflow: "hidden" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "minmax(86px, 1.2fr) repeat(4, 1fr)", gap: 0, background: "#141726", borderBottom: "1px solid #1f2437" }}>
+                      {["Model", "Record", "Accuracy", "Brier", "Edge ROI"].map((label) => (
+                        <div key={label} style={{ padding: "8px 10px", fontSize: 8, fontWeight: 800, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "monospace" }}>
+                          {label}
+                        </div>
+                      ))}
+                    </div>
+                    {labModelRows.map(({ key, title, color, summary }) => {
+                      const rowEdgeHits = summary?.edgeHits ?? 0;
+                      const rowEdgeMisses = Math.max(0, (summary?.edgeTotal ?? 0) - rowEdgeHits);
+                      const rowEdgeRoi = (rowEdgeHits * 100) - (rowEdgeMisses * 110);
+                      const isBest = bestLabModelKey === key && (summary?.total ?? 0) > 0;
+                      return (
+                        <div
+                          key={key}
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "minmax(86px, 1.2fr) repeat(4, 1fr)",
+                            gap: 0,
+                            background: isBest ? `${color}12` : "#11131c",
+                            borderTop: "1px solid #1f2437",
+                          }}
+                        >
+                          <div style={{ padding: "9px 10px", display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                            <span style={{ width: 8, height: 8, borderRadius: 999, background: color, flexShrink: 0 }} />
+                            <span style={{ fontSize: 9, fontWeight: 800, color: isBest ? "#f9fafb" : "#d1d5db", fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</span>
+                            {isBest && (
+                              <span style={{ fontSize: 7, fontWeight: 800, color: color, background: `${color}18`, border: `1px solid ${color}33`, borderRadius: 999, padding: "1px 5px", fontFamily: "monospace" }}>
+                                BEST
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ padding: "9px 10px", fontSize: 9, color: "#f9fafb", fontFamily: "monospace" }}>
+                            {summary ? `${summary.hits}-${summary.misses}` : "—"}
+                          </div>
+                          <div style={{ padding: "9px 10px", fontSize: 9, color: color, fontFamily: "monospace", fontWeight: 800 }}>
+                            {summary?.accuracy != null ? `${summary.accuracy}%` : "—"}
+                          </div>
+                          <div style={{ padding: "9px 10px", fontSize: 9, color: "#fbbf24", fontFamily: "monospace", fontWeight: 800 }}>
+                            {summary?.brierScore != null ? summary.brierScore.toFixed(2) : "—"}
+                          </div>
+                          <div style={{ padding: "9px 10px", fontSize: 9, color: rowEdgeRoi >= 0 ? "#34d399" : "#f87171", fontFamily: "monospace", fontWeight: 800 }}>
+                            {summary ? `${rowEdgeRoi >= 0 ? "+" : "-"}$${Math.abs(rowEdgeRoi)}` : "—"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              )}
 
               <div style={{ display: "flex", gap: 6 }}>
                 {[["f5ml", "F5 ML"], ["fullgame", "Full-Game ML"], ["kprop", "K Prop"], ["totals", "Totals"]].map(([key, label]) => (
@@ -6938,9 +7185,8 @@ export default function App() {
 
                   {showLabTrackRecord && (
                     <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "10px 12px" }}>
-                      {["f5ml", "fullgame", "kprop", "totals"].map((modelKey) => {
+                      {labModelRows.map(({ key: modelKey, title }) => {
                         const summary = labCalibration?.summary?.[modelKey];
-                        const title = modelKey === "f5ml" ? "F5 ML" : modelKey === "fullgame" ? "Full-Game ML" : modelKey === "kprop" ? "K Prop" : "Totals";
                         if (!summary) return null;
                         const sampleSmall = (summary.total ?? 0) < 20;
                         return (
@@ -6968,8 +7214,9 @@ export default function App() {
                                 <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>Edge Acc.</div>
                               </div>
                             </div>
+                            {renderCalibrationCurve(modelKey)}
                             {sampleSmall && (
-                              <div style={{ fontSize: 9, color: "#6b7280" }}>Small sample — calibration improves over time.</div>
+                              <div style={{ fontSize: 9, color: "#6b7280", marginTop: 6 }}>Small sample — calibration improves over time.</div>
                             )}
                           </div>
                         );
