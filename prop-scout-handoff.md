@@ -3599,3 +3599,1820 @@ All `node --check` passes.
 Named backlog fully clear. Remaining items: mobile layout pass, multi-user picks architecture. Recalibration is now unblocked infrastructure-wise — just needs data to accumulate.
 
 *Updated 2026-05-03 — Session 70 complete · CODEX TASK 72 approved*
+
+---
+
+## ✅ Session 71 — CW: Roster Fallback Expansion + Picks Grading Fix + Board Start Time
+
+**Files changed:** `prop-scout-v7.jsx`
+
+---
+
+### Roster Fallback — Expanded to All Tabs
+
+Previously the lineup fix (Session 70) only rendered roster fallback players in the Lineup tab. This session expanded it to all lineup-dependent views.
+
+**`computeBatterBoard` (line 2060):**
+```js
+// Before
+if (!lu?.confirmed) return;
+// After
+if (!lu?.confirmed && lu?.source !== "roster") return;
+```
+
+**`computeTopSlatePicks` (line 1648–1686):**
+```js
+const sgHasLineup = sgConfirmed || sgLu?.source === "roster";
+// ...
+if (sgHasLineup && opposingBatters.length >= 7) { // platoon scoring
+```
+`lineupConfirmed: sgConfirmed` on pick cards is preserved — green ✓ LINEUP badge only shows for officially confirmed lineups.
+
+---
+
+### Picks Grading Fix (Task 42)
+
+**Root cause diagnosed and fixed.**
+
+The initial picks hydration at mount used bare `fetch()` instead of `apiFetch()`. Since `/api/picks` requires a Bearer token (`requireAuth`), every hydration call was silently returning 401. The app permanently ran off `localStorage`, meaning grades written by the nightly `gradePendingPicks` job never reached the UI.
+
+A second compounding issue: even if `apiFetch()` were used, `_authToken` is null at mount time (the sync `useEffect` hasn't run yet), so the call would fail anyway.
+
+**Fix — replaced the broken hydration block with:**
+```js
+const hydratePicksFromServer = useCallback(async () => {
+  if (!authToken) return;
+  try {
+    const data = await apiFetch("/api/picks");
+    if (!data?.picks?.length) { setPicksServerReachable(true); return; }
+    setPicksServerReachable(true);
+    setPropLog(data.picks);
+    localStorage.setItem("propscout_log", JSON.stringify(data.picks));
+  } catch (_) {
+    setPicksServerReachable(false);
+  }
+}, [authToken]);
+
+// Fires once token is available (covers mount + login)
+useEffect(() => { hydratePicksFromServer(); }, [hydratePicksFromServer]);
+
+// Re-hydrates when Picks tab opens — surfaces nightly-graded results
+useEffect(() => {
+  if (view === "picks") hydratePicksFromServer();
+}, [view]);
+```
+
+Also added `useCallback` to the React import line (line 1).
+
+---
+
+### Board Card Start Time — PARTIAL (Codex to finish)
+
+**What CW did:** Added `gameTime: game.gameTime ?? null` to candidate objects in both `computePitcherBoard` (line 2037) and `computeBatterBoard` (line 2104). Updated the two subtitle render lines to call `formatLocalTime(c.gameTime)` inline.
+
+**What's not working:** Time is not displaying. `game.gameTime` may be `undefined` on the slate objects as consumed by the scoring functions, or the field name from the backend differs. `formatLocalTime` already exists and works (used elsewhere on line 1266 as `formatLocalTime(sg.gameTime)`).
+
+**Codex task:** Trace why `c.gameTime` is null/undefined on board cards. Check: (1) what field name the schedule snapshot uses (`gameTime` vs `time` vs `gameDateTimeLocal`), (2) whether `activeSlate` games have the field populated when passed to `computeBatterBoard`/`computePitcherBoard`, (3) fix the field name if mismatched. Desired output: `NYM @ COL 2:40 PM PDT` on the subtitle line of HR, Hits, K, and Outs board cards.
+
+**Files to check:** `prop-scout-v7.jsx` lines 1266, 2036–2037, 2102–2104, 10445, 10592. Also `backend/jobs/snapshotJobs.js` to confirm field name on stored game objects.
+
+---
+
+## Codex Tasks Ready
+
+### CODEX TASK 73 — Fix Board Card Start Time
+
+**Status:** Ready
+**LOE:** Small — field name trace + 1–2 line fix
+**Type:** Frontend only
+
+See "Board Card Start Time — PARTIAL" above. CW already added `gameTime` to candidate objects and the display lines — just needs the correct field name confirmed and patched.
+
+---
+
+### CODEX TASK 74 — Clarify Algorithmic vs Projection vs AI Labels
+
+**Status:** Ready
+**LOE:** Low — frontend label/badge changes only
+**Type:** Frontend only
+
+Replace inconsistent summary labels across the app with a 3-tier system:
+- `⚙ Algorithmic` — Board (HR, Hits, K, Outs, Games), Model Picks
+- `Estimated Projection` — projected stat values (e.g. "Proj 6.2 Ks")
+- `✦ AI-Assisted` — Scout, HR Scout, Advisor
+
+No scoring logic changes. Find all places where "Algorithmic", "AI-powered", "Model", or similar labels appear on cards and unify. The `TierBadge` component already exists and handles `"algorithmic"` — extend it if needed for the other two tiers.
+
+---
+
+### CODEX TASK 75 — Hybrid AI Summary Text for Board / Model Cards
+
+**Status:** Ready (after Task 74)
+**LOE:** Medium — new backend endpoint + frontend wiring
+**Type:** Full-stack
+
+**Problem:** Board and Model pick cards show generic footers like `Strong edge — multiple positive signals`.
+
+**Implementation:**
+1. New backend route `POST /api/summarize-pick` — accepts `{ propType, lean, factors[] }` payload, calls Claude Haiku with a constrained prompt, returns `{ summary: "..." }` (8–16 words, uses only supplied factors, no hype)
+2. Cache per `(propType + lean + top2FactorKeys)` — avoid re-calling for identical signal combos
+3. Frontend: swap the static summary string on Board and Model pick cards with the AI-generated sentence. Show static text as fallback while loading.
+
+**Prompt constraint:** "Write one sentence (8–16 words) summarizing this pick using only these factors. No hype words. No new statistics."
+
+---
+
+### CODEX TASK 76 — Injury Flags + Lineup Scratch Alerts
+
+**Status:** Ready
+**LOE:** Medium — backend diff logic + frontend badge
+**Type:** Full-stack
+
+**Problem:** No signal when a player is scratched from a previously confirmed lineup.
+
+**Implementation:**
+1. Backend `GET /api/lineups/:gamePk` — when a confirmed lineup is saved, store previous confirmed lineup in DB snapshot. On subsequent calls, diff current vs previous confirmed. Return `scratched: [{ id, name, position }]` array.
+2. Frontend: in the Lineup tab, show a red `SCRATCHED` badge next to missing players. Recalculate matchup confidence for affected props (reduce confidence by 10–15 pts if a key batter is missing).
+3. Extend the lineup polling interval to check more frequently (every 5 min) when a game is within 90 min of first pitch.
+
+*Updated 2026-05-05 — Session 71 complete · Roster fallback expanded · Picks grading fixed · Board time partial · Codex tasks 73–76 queued*
+
+---
+
+## ✅ Session 72 — CW: Review Codex Tasks 73, 74, 75, 76
+
+### Task 73 — Fix Board Card Start Time ✅ Approved
+
+Root cause correctly identified: `activeSlate` transformation called `formatLocalTime(sg.gameTime)` for the `time` field but never forwarded the raw ISO string. Fix threads `gameTime: sg.gameTime ?? null` through the slate transform and all six `computeGameBoard` game pushes. Combined with CW's earlier candidate field additions, the full chain is complete.
+
+### Task 75 — Hybrid AI Summary Text ✅ Approved
+
+`cardSummary.js` is clean. Anthropic Haiku primary → OpenAI fallback → deterministic string fallback if neither key is set. MD5 hash cache keyed on `(market + lean + positives + caution)`. Temperature 0.2 correct for factual output. Frontend hydration fires on Board/Model tab open with in-flight deduplication via `aiSummaryInFlight` ref Set.
+
+**Minor note (non-blocking):** `hydrateCardSummaries` has `[aiCardSummaries]` in `useCallback` deps — effect re-runs on every summary resolution but `aiCardSummaries[req.id]` check prevents API re-calls. No loop, just slightly noisy re-renders. Can be cleaned up if perf becomes a concern.
+
+### Task 76 — Injury Flags + Lineup Scratch Alerts ✅ Approved
+
+Backend: 12h cache stores previous confirmed lineup per game, `diffScratches` does set-difference by player ID, `scratches: { away, home }` always present in response. Frontend: red Scratch Alert banner in Lineup tab (correctly gated on `!isRosterFallback`), SCRATCHED badge + -20pt confidence penalty on affected prop rows, `normalizeScratchName` fuzzy matching is solid.
+
+### Task 74 — Label Clarification ⚠ Partially done
+
+Only one `TierBadge tier="ai"` addition found. The full label audit (⚙ Algorithmic / Estimated Projection / ✦ AI-Assisted across all Board, Model Picks, Scout, HR Scout, Advisor surfaces) was not completed. Task remains open.
+
+---
+
+## Codex Tasks Ready
+
+### CODEX TASK 74 (continued) — Complete Label Audit: 3 Specific Gaps
+
+**Status:** Partially done — 3 specific gaps remain
+**LOE:** Low — 3 targeted JSX additions, no logic changes
+**Type:** Frontend only — `prop-scout-v7.jsx` only
+
+**Background:** `TIER_BADGES` already defines all four tiers (`algorithmic`, `projection`, `ai`, `predictive`). `TierBadge` is already on tab headers (Advisor, Scout, HR Scout, Board) and most card rows. The three gaps below are the only places where individual pick cards are missing the badge their parent section already declares.
+
+---
+
+**Gap 1 — Scout individual pick cards missing `tier="ai"`**
+
+Location: the `scoutPicks.map((pick, idx) => ...)` block starting at line ~6965.
+
+Inside the collapsed card row (the `<div style={{ display: "flex", justifyContent: "space-between"...}}>` at the top of each card), there is a market color badge and player name but no `TierBadge`. Add `<TierBadge tier="ai" />` in that inner flex row, after the market badge and before or after the player name — consistent with how Model Picks cards do it (see line 5381).
+
+---
+
+**Gap 2 — HR Scout individual pick cards missing `tier="projection"`**
+
+Location: the `picks.map((pick, idx) => ...)` inside the tier 1/2/3 `tierConfig.map` block starting at line ~7185.
+
+Inside the collapsed card row (the `<div style={{ display: "flex", justifyContent: "space-between"...}}>` at the top of each card), there is an `HR {pick.hrScore}` score badge and batter name but no `TierBadge`. Add `<TierBadge tier="projection" />` in that row after the score badge — consistent with how the HR Scout header already declares `tier="projection"`.
+
+---
+
+**Gap 3 — Model Picks projected value label is bare**
+
+Location: line ~5424:
+```jsx
+{p.projectedValue != null && (
+  <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", marginLeft: "auto" }}>proj: {p.projectedValue}</span>
+)}
+```
+
+Change the label prefix from `proj:` to `est.` and wrap in a small `<TierBadge tier="projection" />` next to it, or simply change the prefix text to `Est.` so it reads `Est. 6.2` instead of `proj: 6.2`. Either approach is fine — the goal is to distinguish it visually from a live stat. Preferred: add `<TierBadge tier="projection" />` immediately before the span (consistent with how projection badges are used elsewhere).
+
+---
+
+**Do not change:**
+- Any scoring logic
+- Any backend files
+- Any existing `TierBadge` placements (headers, board cards, Lab cards — all correct)
+- `TIER_BADGES` definition (all four tiers already defined correctly)
+
+---
+
+### CODEX TASK 77 — Private Predictive Models Tab
+
+**Status:** Ready
+**LOE:** Medium — new gated tab reusing existing Lab state and model endpoints
+**Type:** Frontend only
+
+**Goal:** A clean, read-only "Models" tab visible only to `isScoutUser` that surfaces today's model predictions in a polished format. The existing Lab tab is an internal calibration/debugging surface — this tab is the user-facing output layer. Same data, cleaner presentation, no calibration recording, no pick logging.
+
+---
+
+**Context (read before touching anything):**
+- `isScoutUser` is already defined: `const isScoutUser = !!currentUser && SCOUT_ALLOWLIST.includes(scoutIdentity)`
+- The four model state variables **already exist** from the Lab tab: `labData`, `labFgData`, `labKData`, `labTotalsData` (and their loading twins)
+- The four fetch callbacks **already exist**: `fetchLabData`, `fetchLabFgData`, `fetchLabKData`, `fetchLabTotalsData`
+- The fetch `useEffect`s fire when `view === "lab" && labSubTab === "f5ml"` etc. — these need to **also fire for `view === "models"`**
+- `TierBadge tier="predictive"` — already defined, renders a green `PREDICTIVE` chip
+- `formatLocalTime(isoStr)` — already defined, converts ISO game time to "2:40 PM PDT"
+- Nav buttons for Scout, HR Scout, Advisor, Lab are around lines 5641–5671
+
+---
+
+**Step 1 — Add `modelsSubTab` state**
+
+Near where `labSubTab` is declared (search for `const [labSubTab`), add:
+```js
+const [modelsSubTab, setModelsSubTab] = useState("f5ml");
+```
+
+---
+
+**Step 2 — Update Lab fetch useEffects to also trigger for `view === "models"`**
+
+Find the four Lab fetch `useEffect`s. Each currently has a guard like:
+```js
+if (view !== "lab" || labSubTab !== "f5ml" || ...) return;
+```
+
+Change each to also trigger when the Models tab is active with the same sub-tab selected. Replace `view !== "lab"` with `(view !== "lab" && view !== "models")`. Also update the sub-tab reference to check against BOTH `labSubTab` and `modelsSubTab`:
+
+```js
+// F5 effect — change from:
+if (view !== "lab" || labSubTab !== "f5ml" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
+
+// To:
+if ((view !== "lab" && view !== "models") || (view === "lab" ? labSubTab : modelsSubTab) !== "f5ml" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
+```
+
+Apply the same pattern to the fullgame, kprop, and totals effects (checking `"fullgame"`, `"kprop"`, `"totals"` respectively).
+
+Also update the dependency arrays to include `modelsSubTab`:
+```js
+}, [view, labSubTab, modelsSubTab, currentUser, isScoutUser, labData, labLoading]);
+```
+
+---
+
+**Step 3 — Add `📊 Models` nav button**
+
+After the `🔬 Lab` nav button block (around line 5666–5670), add:
+```jsx
+{isScoutUser && (
+  <button
+    onClick={() => setView("models")}
+    style={{
+      background: view === "models" ? "#a78bfa" : "#161827",
+      border: `1px solid ${view === "models" ? "#a78bfa" : "#1f2437"}`,
+      borderRadius: 8,
+      padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+      fontSize: isNarrowPhone ? 9 : 10,
+      color: view === "models" ? "#000" : "#9ca3af",
+      fontFamily: "monospace",
+      fontWeight: 700,
+      cursor: "pointer",
+      textTransform: "uppercase",
+    }}
+  >
+    📊 Models
+  </button>
+)}
+```
+
+---
+
+**Step 4 — Add `view === "models"` render block**
+
+Add the following JSX block immediately after the `{view === "lab" && ...}` render block closes (search for the closing of `{view === "lab" && isScoutUser && (() => {`). Place it at the same nesting level.
+
+The Models tab displays all four models with a clean card layout. Here is the full render block:
+
+```jsx
+{view === "models" && isScoutUser && (() => {
+  const isModF5 = modelsSubTab === "f5ml";
+  const isModFG = modelsSubTab === "fullgame";
+  const isModK  = modelsSubTab === "kprop";
+  const isModTot = modelsSubTab === "totals";
+  const activeData    = isModF5 ? labData    : isModFG ? labFgData    : isModK ? labKData    : labTotalsData;
+  const activeLoading = isModF5 ? labLoading : isModFG ? labFgLoading : isModK ? labKLoading : labTotalsLoading;
+  const doRefresh = () => (isModF5 ? fetchLabData(true) : isModFG ? fetchLabFgData(true) : isModK ? fetchLabKData(true) : fetchLabTotalsData(true));
+
+  // Build top-3 factors from model.features for ML models
+  function getTopFactors(g) {
+    if (isModTot) {
+      const f = g.model?.features ?? {};
+      const factors = [
+        { label: "Home offense", value: f.homeRPG != null ? `${f.homeRPG.toFixed(1)} R/G` : null },
+        { label: "Away offense", value: f.awayRPG != null ? `${f.awayRPG.toFixed(1)} R/G` : null },
+        { label: "Home SP ERA", value: f.homeSpEra != null ? f.homeSpEra.toFixed(2) : null },
+        { label: "Away SP ERA", value: f.awaySpEra != null ? f.awaySpEra.toFixed(2) : null },
+        { label: "Bullpen ERA", value: f.combinedBullpenEra != null ? f.combinedBullpenEra.toFixed(2) : null },
+      ].filter(x => x.value != null).slice(0, 3);
+      return factors;
+    }
+    if (isModK) {
+      // For K prop we have two pitchers — return factors for each
+      return [];
+    }
+    // ML models (F5, Full-Game)
+    const m = g.model ?? {};
+    const f = m.features ?? {};
+    const leanSide = m.leanSide ?? "home";
+    const awayName = g.away?.abbr ?? "Away";
+    const homeName = g.home?.abbr ?? "Home";
+    const rawFactors = [
+      { label: "SP ERA edge", raw: f.eraDiff ?? 0 },
+      { label: "WHIP edge", raw: f.whipDiff ?? 0 },
+      { label: "Form trend", raw: f.formDiff ?? 0 },
+      { label: "Ump tendency", raw: f.umpKTendency ?? 0 },
+      { label: "Bullpen ERA edge", raw: f.bullpenEraDiff ?? 0 },
+    ].filter(x => Math.abs(x.raw) > 0.001);
+    rawFactors.sort((a, b) => Math.abs(b.raw) - Math.abs(a.raw));
+    return rawFactors.slice(0, 3).map(x => ({
+      label: x.label,
+      value: x.raw > 0
+        ? `favors ${awayName} (+${x.raw.toFixed(2)})`
+        : `favors ${homeName} (${x.raw.toFixed(2)})`,
+    }));
+  }
+
+  return (
+    <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>📊 MODELS</div>
+            <TierBadge tier="predictive" />
+            <span style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#fca5a5", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+              EXPERIMENTAL
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
+            Private model output — not for distribution
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
+            {activeData?.date ?? "today"}
+          </div>
+          <button
+            onClick={doRefresh}
+            disabled={activeLoading}
+            style={{
+              background: activeLoading ? "rgba(255,255,255,0.04)" : "rgba(167,139,250,0.15)",
+              border: `1px solid ${activeLoading ? "#2d3148" : "rgba(167,139,250,0.35)"}`,
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 10,
+              fontWeight: 700,
+              color: activeLoading ? "#4b5563" : "#a78bfa",
+              cursor: activeLoading ? "default" : "pointer",
+              fontFamily: "monospace",
+            }}
+          >
+            ↺ Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* Sub-tab selector */}
+      <div style={{ display: "flex", gap: 6 }}>
+        {[["f5ml", "F5 ML"], ["fullgame", "Full-Game ML"], ["kprop", "K Prop"], ["totals", "Totals"]].map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setModelsSubTab(key)}
+            style={{
+              background: modelsSubTab === key ? "rgba(167,139,250,0.18)" : "#161827",
+              border: `1px solid ${modelsSubTab === key ? "rgba(167,139,250,0.45)" : "#1f2437"}`,
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 10,
+              fontWeight: 700,
+              color: modelsSubTab === key ? "#a78bfa" : "#9ca3af",
+              cursor: "pointer",
+              fontFamily: "monospace",
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Loading */}
+      {activeLoading && !activeData && (
+        <Card>
+          <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
+            Running {isModF5 ? "F5" : isModFG ? "full-game" : isModK ? "K prop" : "totals"} model across today&apos;s slate…
+          </div>
+        </Card>
+      )}
+
+      {/* Error */}
+      {activeData?.error && (
+        <div style={{ background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.30)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
+          {activeData.error}
+        </div>
+      )}
+
+      {/* Empty state */}
+      {!activeLoading && activeData && (activeData.games?.length ?? 0) === 0 && !activeData.error && (
+        <Card>
+          <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>
+            No {isModF5 ? "F5" : isModFG ? "full-game" : isModK ? "K prop" : "totals"} model games available yet.
+          </div>
+        </Card>
+      )}
+
+      {/* Game cards */}
+      {activeData?.games?.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {/* ── ML model cards (F5 + Full-Game) ── */}
+          {(isModF5 || isModFG) && activeData.games.map((g) => {
+            const m = g.model ?? {};
+            const lean = m.leanSide === "home" ? g.home?.abbr : g.away?.abbr;
+            const leanProb = m.leanSide === "home" ? m.homeProb : m.awayProb;
+            const probPct = leanProb != null ? `${Math.round(leanProb * 100)}%` : "—";
+            const leanColor = m.hasEdge ? "#a78bfa" : "#9ca3af";
+            const factors = getTopFactors(g);
+            const awayOdds = m.awayEdge != null ? `${m.awayEdge >= 0 ? "+" : ""}${(m.awayEdge * 100).toFixed(0)}` : null;
+            const homeOdds = m.homeEdge != null ? `${m.homeEdge >= 0 ? "+" : ""}${(m.homeEdge * 100).toFixed(0)}` : null;
+            return (
+              <Card key={g.gamePk} style={{ padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    {/* Game + time */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>
+                        {g.away?.abbr ?? "?"} @ {g.home?.abbr ?? "?"}
+                      </div>
+                      {g.gameTime && (
+                        <div style={{ fontSize: 10, color: "#6b7280", fontFamily: "monospace" }}>
+                          {formatLocalTime(g.gameTime)}
+                        </div>
+                      )}
+                      {m.hasEdge && (
+                        <span style={{ background: "rgba(167,139,250,0.14)", border: "1px solid rgba(167,139,250,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#a78bfa", fontFamily: "monospace" }}>
+                          EDGE
+                        </span>
+                      )}
+                      {g.dataWarning && (
+                        <span style={{ background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace" }}>
+                          DATA GAP
+                        </span>
+                      )}
+                    </div>
+                    {/* Pitchers */}
+                    <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 6 }}>
+                      {g.awayPitcher?.name ?? "TBD"} vs {g.homePitcher?.name ?? "TBD"}
+                    </div>
+                    {/* Model output row */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>LEAN</span>
+                        <span style={{ fontSize: 12, fontWeight: 800, color: leanColor, fontFamily: "monospace" }}>{lean ?? "—"}</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: leanColor, fontFamily: "monospace" }}>{probPct}</span>
+                      </div>
+                      {awayOdds && homeOdds && (
+                        <div style={{ fontSize: 10, color: "#4b5563", fontFamily: "monospace" }}>
+                          edge: {g.away?.abbr} {awayOdds}% · {g.home?.abbr} {homeOdds}%
+                        </div>
+                      )}
+                    </div>
+                    {/* Factors */}
+                    {factors.length > 0 && (
+                      <div style={{ marginTop: 7, display: "flex", flexDirection: "column", gap: 2 }}>
+                        {factors.map((f, i) => (
+                          <div key={i} style={{ fontSize: 10, color: "#6b7280" }}>
+                            <span style={{ color: "#4b5563", fontFamily: "monospace" }}>· </span>
+                            <span style={{ color: "#9ca3af" }}>{f.label}: </span>
+                            <span style={{ color: "#d1d5db" }}>{f.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ flexShrink: 0 }}>
+                    <TierBadge tier="predictive" />
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+
+          {/* ── K Prop model cards ── */}
+          {isModK && activeData.games.map((g) => {
+            const umpTend = g.umpire?.kTendency != null ? (g.umpire.kTendency > 0 ? `+${(g.umpire.kTendency * 100).toFixed(0)}% K` : `${(g.umpire.kTendency * 100).toFixed(0)}% K`) : null;
+            const renderKProp = (kp, pitcher, side) => {
+              if (!kp || kp.dataWarning) return null;
+              const edgeColor = kp.hasEdge ? "#a78bfa" : kp.lean === "OVER" ? "#22c55e" : "#ef4444";
+              return (
+                <div key={side} style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "#d1d5db", fontFamily: "monospace" }}>{pitcher?.name ?? side}</span>
+                    <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>line {kp.bookLine ?? "—"} K</span>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: edgeColor, fontFamily: "monospace" }}>
+                      {kp.lean ?? "—"} {kp.predictedKs != null ? kp.predictedKs.toFixed(1) : "—"}
+                    </span>
+                    {kp.hasEdge && (
+                      <span style={{ background: "rgba(167,139,250,0.14)", border: "1px solid rgba(167,139,250,0.35)", borderRadius: 999, padding: "2px 6px", fontSize: 8, fontWeight: 800, color: "#a78bfa", fontFamily: "monospace" }}>EDGE</span>
+                    )}
+                  </div>
+                </div>
+              );
+            };
+            return (
+              <Card key={g.gamePk} style={{ padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>
+                        {g.away?.abbr ?? "?"} @ {g.home?.abbr ?? "?"}
+                      </div>
+                      {g.gameTime && (
+                        <div style={{ fontSize: 10, color: "#6b7280", fontFamily: "monospace" }}>{formatLocalTime(g.gameTime)}</div>
+                      )}
+                      {umpTend && (
+                        <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>ump {umpTend}</span>
+                      )}
+                    </div>
+                    {renderKProp(g.awayKProp, g.awayPitcher, "away")}
+                    {renderKProp(g.homeKProp, g.homePitcher, "home")}
+                    {!g.awayKProp && !g.homeKProp && (
+                      <div style={{ fontSize: 10, color: "#4b5563" }}>No K prop data available</div>
+                    )}
+                  </div>
+                  <TierBadge tier="predictive" />
+                </div>
+              </Card>
+            );
+          })}
+
+          {/* ── Totals model cards ── */}
+          {isModTot && activeData.games.map((g) => {
+            const m = g.model ?? {};
+            const edgeColor = m.hasEdge ? "#a78bfa" : m.lean === "OVER" ? "#22c55e" : "#ef4444";
+            const factors = getTopFactors(g);
+            return (
+              <Card key={g.gamePk} style={{ padding: "12px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>
+                        {g.away?.abbr ?? "?"} @ {g.home?.abbr ?? "?"}
+                      </div>
+                      {g.gameTime && (
+                        <div style={{ fontSize: 10, color: "#6b7280", fontFamily: "monospace" }}>{formatLocalTime(g.gameTime)}</div>
+                      )}
+                      {m.hasEdge && (
+                        <span style={{ background: "rgba(167,139,250,0.14)", border: "1px solid rgba(167,139,250,0.35)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 800, color: "#a78bfa", fontFamily: "monospace" }}>EDGE</span>
+                      )}
+                      {g.dataWarning && (
+                        <span style={{ background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 999, padding: "2px 7px", fontSize: 8, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace" }}>DATA GAP</span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 6 }}>
+                      {g.awayPitcher?.name ?? "TBD"} vs {g.homePitcher?.name ?? "TBD"}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>TOTAL</span>
+                        <span style={{ fontSize: 12, fontWeight: 800, color: edgeColor, fontFamily: "monospace" }}>
+                          {m.lean ?? "—"} {m.predictedTotal != null ? m.predictedTotal.toFixed(1) : "—"}
+                        </span>
+                        <span style={{ fontSize: 10, color: "#4b5563", fontFamily: "monospace" }}>
+                          (book {m.bookTotal ?? "—"})
+                        </span>
+                      </div>
+                    </div>
+                    {factors.length > 0 && (
+                      <div style={{ marginTop: 7, display: "flex", flexDirection: "column", gap: 2 }}>
+                        {factors.map((f, i) => (
+                          <div key={i} style={{ fontSize: 10, color: "#6b7280" }}>
+                            <span style={{ color: "#4b5563", fontFamily: "monospace" }}>· </span>
+                            <span style={{ color: "#9ca3af" }}>{f.label}: </span>
+                            <span style={{ color: "#d1d5db" }}>{f.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <TierBadge tier="predictive" />
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+})()}
+```
+
+---
+
+**Do NOT:**
+- Create any new backend routes — `/api/model/f5`, `/api/model/fullgame`, `/api/model/kprop`, `/api/model/totals` are all already live
+- Add calibration recording (`apiMutate("/api/model/calibration/record", ...)`) — that stays in Lab only
+- Add any "Add to Picks" button — this tab is read-only in v1
+- Change any Lab tab code except the four fetch `useEffect` guards (Step 2)
+- Change `TIER_BADGES` or any existing badge definitions
+
+**Verification:**
+After making changes, run `node --check` on all modified `.js` backend files (none expected to be modified). Visually confirm:
+1. `📊 Models` button appears in nav when `isScoutUser` is true
+2. Sub-tab selector shows F5 ML / Full-Game ML / K Prop / Totals
+3. Each card shows: game abbr, time, pitcher names, lean + prob, top factors, `PREDICTIVE` badge, `EDGE` badge when applicable
+4. `EXPERIMENTAL` red badge in header
+5. No "Add to Picks" button anywhere in the Models tab
+
+---
+
+### CODEX TASK 78 — UmpScorecards Weekly Refresh Job
+
+**Status:** Ready
+**LOE:** Low — backend cron job + admin trigger endpoint
+**Type:** Backend only
+
+**Problem:** `backend/data/umpires.json` is a static file populated manually. Umpire K/BB tendency stats drift across the season and the file never updates without a manual commit.
+
+**Current data shape** (from `getUmpireStatsByName` in `snapshotJobs.js`):
+```json
+{
+  "umpiresByName": {
+    "Angel Hernandez": { "kRate": "19.2%", "bbRate": "9.1%", "tendency": "Tight zone — favors pitchers' ERA but suppresses Ks", "rating": "hitter" },
+    ...
+  }
+}
+```
+
+**Implementation:**
+1. Create `backend/jobs/refreshUmpireDataJob.js`
+   - Fetch umpire stats from UmpScorecards.com (scrape `https://umpscorecards.com/umpires/` or use their available data export — check for a JSON/CSV endpoint at `https://umpscorecards.com` before resorting to HTML scrape)
+   - Map to existing schema: `{ kRate, bbRate, tendency, rating }` per umpire full name
+   - `rating`: derive from kRate — `>= 22% → "pitcher"`, `<= 17% → "hitter"`, else `"neutral"`
+   - `tendency`: generate a short descriptive string consistent with existing entries
+   - Write result to `backend/data/umpires.json` as `{ umpiresByName: { ... }, refreshedAt: ISO_STRING }`
+2. Add cron in `scheduler.js`: every Monday at 3 AM Honolulu (`0 3 * * 1`)
+3. Add admin trigger endpoint in `server.js`:
+   ```
+   GET /api/admin/jobs/refresh-umpire-data
+   ```
+   Same `x-admin-secret` header check as existing admin endpoints.
+
+**Constraint:** Do not change the `umpiresByName[name]` shape — `getUmpireStatsByName` reads it directly and `snapshotUmpires` passes it into DB. Only the data values should update, not the schema.
+
+---
+
+### CODEX TASK 79 — Prediction Market Odds Rows (Kalshi + Polymarket)
+
+**Status:** Ready
+**LOE:** Medium — new backend route + two frontend table rows
+**Type:** Full-stack
+
+**Goal:** Add two rows to the multi-book odds table in the Intel tab — `KALSHI` and `POLY` — showing crowd-sourced win probabilities from each prediction market. No API keys required for either source. Both rows appear only when a matching market is found; they silently omit otherwise.
+
+---
+
+### Source 1 — Kalshi
+
+**API:** `https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXMLBGAME&status=open`
+No auth required for read-only data.
+
+**Ticker format:** `KXMLBGAME-26APR221310CINTB`
+- Strip prefix `KXMLBGAME-` → `26APR221310CINTB`
+- Chars 0–1: year (`26`)
+- Chars 2–4: month (`APR`)
+- Chars 5–6: day (`22`)
+- Chars 7–10: time HHMM (`1310`)
+- Chars 11+: away+home abbrs concatenated (`CINTB` = CIN + TB)
+
+**Team splitting:** Try all splits of the tail string where both parts are in the known Kalshi abbr set. Kalshi uses standard MLB abbreviations — same as our odds map keys.
+
+**Price fields:** `yes_bid`, `yes_ask` (integer cents, 0–100 scale) or `yes_bid_dollars`, `yes_ask_dollars` (float 0–1 scale). Use midpoint: `(yes_bid + yes_ask) / 2` for cents, then divide by 100 for probability. "Yes" = away team wins.
+
+---
+
+### Source 2 — Polymarket
+
+**API:** `https://gamma-api.polymarket.com/markets?active=true&limit=200&start_date_min=TODAY&end_date_max=TOMORROW`
+No auth required.
+
+**Market identification:** Filter for binary Yes/No markets (`outcomes[0]` contains "yes", `outcomes[1]` contains "no"). Both `outcomes` and `outcomePrices` are **stringified JSON arrays** — parse with `JSON.parse()`.
+
+**Team extraction:** Parse `question` field (e.g. "Will the Yankees beat the Red Sox?"). `outcomePrices[0]` is the probability the team named first wins. Multiply decimal string by 100 for %.
+
+**Question patterns to handle:**
+- `"Will [the] [Team A] beat [the] [Team B]?"` → Team A is the "yes" team
+- `"[Team A] to win vs [Team B]"` → Team A is the "yes" team
+
+---
+
+### Backend — create `backend/routes/predictionMarkets.js`** (new file):
+
+```js
+const express = require("express");
+const axios = require("axios");
+const cache = require("../services/cache");
+
+const router = express.Router();
+const CACHE_TTL = 15 * 60 * 1000;
+
+// ── Shared team data ─────────────────────────────────────────────────────────
+// All valid Kalshi/MLB abbreviations (used for ticker splitting)
+const MLB_ABBRS = new Set([
+  "ARI","ATL","BAL","BOS","CWS","CHC","CIN","CLE","COL",
+  "DET","HOU","KC","LAA","LAD","MIA","MIL","MIN","NYM",
+  "NYY","OAK","PHI","PIT","SD","SF","SEA","STL","TB","TEX","TOR","WSH",
+]);
+
+// Full/nickname → abbr for Polymarket question parsing
+const NAME_TO_ABBR = {
+  "arizona diamondbacks":"ARI","atlanta braves":"ATL","baltimore orioles":"BAL",
+  "boston red sox":"BOS","chicago white sox":"CWS","chicago cubs":"CHC",
+  "cincinnati reds":"CIN","cleveland guardians":"CLE","colorado rockies":"COL",
+  "detroit tigers":"DET","houston astros":"HOU","kansas city royals":"KC",
+  "los angeles angels":"LAA","los angeles dodgers":"LAD","miami marlins":"MIA",
+  "milwaukee brewers":"MIL","minnesota twins":"MIN","new york mets":"NYM",
+  "new york yankees":"NYY","oakland athletics":"OAK","philadelphia phillies":"PHI",
+  "pittsburgh pirates":"PIT","san diego padres":"SD","san francisco giants":"SF",
+  "seattle mariners":"SEA","st. louis cardinals":"STL","tampa bay rays":"TB",
+  "texas rangers":"TEX","toronto blue jays":"TOR","washington nationals":"WSH",
+  "diamondbacks":"ARI","braves":"ATL","orioles":"BAL","red sox":"BOS",
+  "white sox":"CWS","cubs":"CHC","reds":"CIN","guardians":"CLE",
+  "rockies":"COL","tigers":"DET","astros":"HOU","royals":"KC",
+  "angels":"LAA","dodgers":"LAD","marlins":"MIA","brewers":"MIL",
+  "twins":"MIN","mets":"NYM","yankees":"NYY","athletics":"OAK",
+  "phillies":"PHI","pirates":"PIT","padres":"SD","giants":"SF",
+  "mariners":"SEA","cardinals":"STL","rays":"TB","rangers":"TEX",
+  "blue jays":"TOR","nationals":"WSH",
+};
+
+function todayHonolulu() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+}
+function tomorrowHonolulu() {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  return d.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+}
+
+// Store under both "A|B" and "B|A" so frontend match works regardless of home/away order
+function addBothOrders(map, abbrA, abbrB, entry) {
+  if (abbrA && abbrB) {
+    map[`${abbrA}|${abbrB}`] = entry;
+    map[`${abbrB}|${abbrA}`] = entry;
+  }
+}
+
+// ── Kalshi helpers ────────────────────────────────────────────────────────────
+// Parse "CINTB" → { away: "CIN", home: "TB" } using the known abbr set
+function splitKalshiTeams(tail) {
+  for (let i = 2; i <= tail.length - 2; i++) {
+    const away = tail.slice(0, i);
+    const home = tail.slice(i);
+    if (MLB_ABBRS.has(away) && MLB_ABBRS.has(home)) return { away, home };
+  }
+  return null;
+}
+
+async function fetchKalshi() {
+  const { data } = await axios.get(
+    "https://api.elections.kalshi.com/trade-api/v2/markets",
+    {
+      params: { series_ticker: "KXMLBGAME", status: "open", limit: 200 },
+      timeout: 12000,
+      headers: { "User-Agent": "PropScout/1.0" },
+    }
+  );
+  const markets = Array.isArray(data?.markets) ? data.markets : [];
+  const byTeamPair = {};
+
+  markets.forEach((m) => {
+    const ticker = String(m.ticker ?? "");
+    // Ticker: KXMLBGAME-26APR221310CINTB
+    const suffix = ticker.replace(/^KXMLBGAME-/i, ""); // "26APR221310CINTB"
+    if (suffix.length < 13) return;
+    const teamTail = suffix.slice(11); // chars after YYMMMDDHHMM
+    const teams = splitKalshiTeams(teamTail);
+    if (!teams) return;
+
+    // Prices: try integer cents fields first, then dollar fields
+    let yesMid = null;
+    if (m.yes_bid != null && m.yes_ask != null) {
+      yesMid = (Number(m.yes_bid) + Number(m.yes_ask)) / 2; // 0–100 cents
+    } else if (m.yes_bid_dollars != null && m.yes_ask_dollars != null) {
+      yesMid = ((Number(m.yes_bid_dollars) + Number(m.yes_ask_dollars)) / 2) * 100;
+    } else if (m.last_price != null) {
+      yesMid = Number(m.last_price); // cents
+    } else if (m.last_price_dollars != null) {
+      yesMid = Number(m.last_price_dollars) * 100;
+    }
+    if (yesMid == null || isNaN(yesMid)) return;
+
+    const awayProb = Math.round(yesMid); // "Yes" = away wins
+    const homeProb = 100 - awayProb;
+    const entry = { awayAbbr: teams.away, homeAbbr: teams.home, awayProb, homeProb, source: "kalshi" };
+    addBothOrders(byTeamPair, teams.away, teams.home, entry);
+  });
+
+  return byTeamPair;
+}
+
+// ── Polymarket helpers ────────────────────────────────────────────────────────
+function normalizeName(str) {
+  return String(str ?? "").toLowerCase().replace(/[^a-z ]/g, "").trim();
+}
+function extractAbbr(text) {
+  const n = normalizeName(text);
+  const sorted = Object.keys(NAME_TO_ABBR).sort((a, b) => b.length - a.length);
+  for (const key of sorted) {
+    if (n.includes(key)) return NAME_TO_ABBR[key];
+  }
+  return null;
+}
+function parsePolyQuestion(question) {
+  const q = normalizeName(question);
+  const beatMatch = q.match(/will (?:the )?(.+?) beat (?:the )?(.+?)(?:\?|$)/);
+  if (beatMatch) {
+    const a = extractAbbr(beatMatch[1]);
+    const b = extractAbbr(beatMatch[2]);
+    if (a && b) return { winnerAbbr: a, loserAbbr: b };
+  }
+  const toWinMatch = q.match(/^(.+?) to win(?: vs (?:the )?(.+?))?(?:\?|$)/);
+  if (toWinMatch) {
+    const a = extractAbbr(toWinMatch[1]);
+    const b = toWinMatch[2] ? extractAbbr(toWinMatch[2]) : null;
+    if (a) return { winnerAbbr: a, loserAbbr: b };
+  }
+  return null;
+}
+function parseStringifiedArray(val) {
+  if (Array.isArray(val)) return val;
+  try { return JSON.parse(val); } catch { return []; }
+}
+
+async function fetchPolymarket() {
+  const { data } = await axios.get("https://gamma-api.polymarket.com/markets", {
+    params: {
+      active: true,
+      limit: 200,
+      start_date_min: todayHonolulu(),
+      end_date_max: tomorrowHonolulu(),
+    },
+    timeout: 12000,
+    headers: { "User-Agent": "PropScout/1.0" },
+  });
+  const markets = Array.isArray(data) ? data : [];
+  const byTeamPair = {};
+
+  markets.forEach((m) => {
+    if (!m.question || m.closed) return;
+    const outcomes = parseStringifiedArray(m.outcomes);
+    const prices = parseStringifiedArray(m.outcomePrices);
+    if (outcomes.length !== 2 || prices.length !== 2) return;
+    const isYesNo = normalizeName(outcomes[0]).includes("yes") &&
+                    normalizeName(outcomes[1]).includes("no");
+    if (!isYesNo) return;
+    const parsed = parsePolyQuestion(m.question);
+    if (!parsed?.winnerAbbr) return;
+    const winnerProb = Math.round(parseFloat(prices[0]) * 100);
+    if (isNaN(winnerProb)) return;
+    const entry = {
+      winnerAbbr: parsed.winnerAbbr,
+      loserAbbr: parsed.loserAbbr,
+      winnerProb,
+      loserProb: 100 - winnerProb,
+      source: "polymarket",
+    };
+    addBothOrders(byTeamPair, parsed.winnerAbbr, parsed.loserAbbr);
+    // Manually add both orderings since addBothOrders needs the entry too
+    if (parsed.winnerAbbr && parsed.loserAbbr) {
+      byTeamPair[`${parsed.winnerAbbr}|${parsed.loserAbbr}`] = entry;
+      byTeamPair[`${parsed.loserAbbr}|${parsed.winnerAbbr}`] = entry;
+    }
+  });
+
+  return byTeamPair;
+}
+
+// ── Route ─────────────────────────────────────────────────────────────────────
+router.get("/mlb-game-odds", async (_req, res) => {
+  const cacheKey = `predmkt:mlb:${todayHonolulu()}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return res.json(cached);
+
+  const [kalshiResult, polyResult] = await Promise.allSettled([
+    fetchKalshi(),
+    fetchPolymarket(),
+  ]);
+
+  const result = {
+    date: todayHonolulu(),
+    kalshi: kalshiResult.status === "fulfilled" ? kalshiResult.value : {},
+    polymarket: polyResult.status === "fulfilled" ? polyResult.value : {},
+    fetchedAt: new Date().toISOString(),
+  };
+
+  cache.set(cacheKey, result, CACHE_TTL);
+  return res.json(result);
+});
+
+module.exports = router;
+```
+
+**Fix the `addBothOrders` call in `fetchPolymarket`:** The helper is defined but called incorrectly above — remove the `addBothOrders(byTeamPair, ...)` call in `fetchPolymarket` since the explicit assignment two lines below does it correctly. The final `fetchPolymarket` body should only use:
+```js
+byTeamPair[`${parsed.winnerAbbr}|${parsed.loserAbbr}`] = entry;
+byTeamPair[`${parsed.loserAbbr}|${parsed.winnerAbbr}`] = entry;
+```
+
+**Mount in `backend/server.js`:**
+```js
+app.use("/api/prediction-markets", require("./routes/predictionMarkets"));
+```
+
+---
+
+### Frontend — `prop-scout-v7.jsx`
+
+**1. Add state:**
+```js
+const [livePredMarkets, setLivePredMarkets] = useState(null);
+// shape: { date, kalshi: { "CIN|TB": { awayProb, homeProb } }, polymarket: { "NYY|BOS": { winnerAbbr, winnerProb, loserProb } } }
+```
+
+**2. Add fetch effect** (lazy, fires when Intel tab opens, same pattern as `liveTrends`):
+```js
+useEffect(() => {
+  if (view !== "game" || tab !== "intel" || livePredMarkets !== null) return;
+  apiFetch("/api/prediction-markets/mlb-game-odds")
+    .then((data) => setLivePredMarkets(data ?? null))
+    .catch(() => {});
+}, [view, tab, livePredMarkets]);
+```
+
+**3. Add KALSHI + POLY rows** — inside the multi-book odds table block (around line 8940), after `{bookEntries.map(([label, b]) => ...)}` closes, add:
+
+```jsx
+{/* ── Prediction market rows: KALSHI then POLY ── */}
+{(() => {
+  if (!livePredMarkets) return null;
+  const awayAbbr = game.away?.abbr;
+  const homeAbbr = game.home?.abbr;
+  const fwdKey = `${awayAbbr}|${homeAbbr}`;
+  const revKey = `${homeAbbr}|${awayAbbr}`;
+
+  // ── KALSHI row ──
+  const kd = livePredMarkets.kalshi?.[fwdKey] ?? livePredMarkets.kalshi?.[revKey];
+  const kalshiRow = kd ? (() => {
+    // kd.awayAbbr is always the Kalshi "away" (from ticker); map to our away/home
+    const ourAwayIsKalshiAway = kd.awayAbbr === awayAbbr;
+    const awayProb = ourAwayIsKalshiAway ? kd.awayProb : kd.homeProb;
+    const homeProb = ourAwayIsKalshiAway ? kd.homeProb : kd.awayProb;
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "36px repeat(7, 1fr)", gap: 2, marginBottom: 3, background: "rgba(52,211,153,0.06)", border: "1px solid rgba(52,211,153,0.18)", borderRadius: 6, padding: "5px 4px", alignItems: "center" }}>
+        <div style={{ fontSize: 8, fontWeight: 800, color: "#34d399", textAlign: "center", fontFamily: "monospace" }}>KSHI</div>
+        <div style={{ fontSize: 10, fontWeight: 700, color: awayProb > homeProb ? "#34d399" : "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>{awayProb}%</div>
+        <div style={{ fontSize: 10, fontWeight: 700, color: homeProb > awayProb ? "#34d399" : "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>{homeProb}%</div>
+        {["—","—","—","—","—"].map((d, i) => <div key={i} style={{ fontSize: 9, color: "#4b5563", textAlign: "center", fontFamily: "monospace" }}>{d}</div>)}
+      </div>
+    );
+  })() : null;
+
+  // ── POLY row ──
+  const pd = livePredMarkets.polymarket?.[fwdKey] ?? livePredMarkets.polymarket?.[revKey];
+  const polyRow = pd ? (() => {
+    const awayIsWinner = pd.winnerAbbr === awayAbbr;
+    const awayProb = awayIsWinner ? pd.winnerProb : pd.loserProb;
+    const homeProb = awayIsWinner ? pd.loserProb : pd.winnerProb;
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "36px repeat(7, 1fr)", gap: 2, marginBottom: 3, background: "rgba(167,139,250,0.06)", border: "1px solid rgba(167,139,250,0.18)", borderRadius: 6, padding: "5px 4px", alignItems: "center" }}>
+        <div style={{ fontSize: 8, fontWeight: 800, color: "#a78bfa", textAlign: "center", fontFamily: "monospace" }}>POLY</div>
+        <div style={{ fontSize: 10, fontWeight: 700, color: awayProb > homeProb ? "#a78bfa" : "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>{awayProb}%</div>
+        <div style={{ fontSize: 10, fontWeight: 700, color: homeProb > awayProb ? "#a78bfa" : "#9ca3af", textAlign: "center", fontFamily: "monospace" }}>{homeProb}%</div>
+        {["—","—","—","—","—"].map((d, i) => <div key={i} style={{ fontSize: 9, color: "#4b5563", textAlign: "center", fontFamily: "monospace" }}>{d}</div>)}
+      </div>
+    );
+  })() : null;
+
+  if (!kalshiRow && !polyRow) return null;
+  return <>{kalshiRow}{polyRow}</>;
+})()}
+```
+
+**Row styling:** KALSHI uses green (`#34d399`) — matching the Lab/calibration color since Kalshi is a regulated exchange. POLY uses purple (`#a78bfa`) — matching the Models tab. Both show only win % in the first two ML columns; total/spread cells show `—`.
+
+---
+
+**Do NOT:**
+- Require any API key or env var — both APIs are public
+- Fail the entire request if one source errors — `Promise.allSettled` ensures one failure doesn't block the other
+- Show either row when no matching market is found for that game
+- Change the column header row — the existing `awayML` / `homeML` headers read well for % values too
+
+**Verification:**
+Run `node --check backend/routes/predictionMarkets.js`. Test `GET /api/prediction-markets/mlb-game-odds` and confirm response shape: `{ date, kalshi: { "CIN|TB": { awayProb: 47, homeProb: 53, ... } }, polymarket: { ... } }`. In the Intel tab, KSHI row (green) appears above POLY row (purple), both showing win percentages, both silently absent when no market match found.
+
+---
+
+### CODEX TASK 80 — Board Score Adjustment for Scratched Batters
+
+**Status:** Ready (depends on Task 76 being live, which it is)
+**LOE:** Small — extend existing Board scoring + card display
+**Type:** Frontend only
+
+**Problem:** When a confirmed batter is scratched (Task 76), the Lineup tab shows the alert and Props tab reduces confidence — but the Board (HR tab, Hits tab) still ranks that batter normally. A scratched #3 hitter sitting atop the HR board is misleading.
+
+**Implementation — `prop-scout-v7.jsx`:**
+
+1. **Pass scratches into `computeBatterBoard`** — add `liveLineups` to the function signature (it already receives it for the confirmed/roster gate). Inside the `batters.forEach`, check if the batter's name or ID appears in `liveLineups[game.gamePk]?.scratches?.[side]`. If scratched, either:
+   - Skip entirely (`continue`) — cleanest UX, scratched players just disappear from rankings
+   - Or keep but apply a large score penalty (e.g. `-50`) and tag `c.scratched = true` — allows showing a badge
+
+   **Recommended: skip entirely.** The board is a "bet on these players today" list. A scratched player shouldn't appear at all.
+
+2. **Card display** — if keeping with penalty approach instead: show a red `SCRATCHED` chip on the card (same style as the existing scratch badge in Props tab), and drop the card to the bottom of its tier.
+
+3. **Scratch name matching** — reuse `normalizeScratchName` (already defined at module level after Task 76). Compare against `liveLineups[game.gamePk]?.scratches?.[side]?.map(s => normalizeScratchName(s.name))`.
+
+**Function signature change:**
+```js
+// Before
+const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
+// No change needed — liveLineups is already the second argument
+```
+The scratches data is already on the `liveLineups` objects from Task 76's backend change. No new fetch needed.
+
+---
+
+*Updated 2026-05-05 — Session 72 complete · Tasks 73/75/76 approved · Task 74 partial · Tasks 77–80 queued*
+
+---
+
+## ✅ Session 73 — CW: Review Codex Tasks 78 + 80 (Task 79 skipped by user)
+
+### Task 78 — UmpScorecards Weekly Refresh ✅ Approved
+
+`refreshUmpireDataJob.js` is solid. `flattenRows` handles multiple possible API response shapes defensively. `mapRow` uses broad field aliasing (`kRate ?? k_rate ?? strikeoutRate`) and falls back to `existingByName` for any missing field — partial fetch never corrupts good data. `deriveRating` and `deriveTendency` match spec thresholds exactly (≥22% pitcher, ≤17% hitter). Cron wired at Monday 3 AM Honolulu, admin endpoint follows existing `x-admin-secret` pattern. All `node --check` passes.
+
+### Task 79 — Prediction Market Odds Row ⏭ Skipped by user (re-specced in Session 74 to use Polymarket direct API)
+
+### Task 80 — Board Scratch Adjustment ✅ Approved
+
+Lines 2141–2147 in `computeBatterBoard` build `scratchedIds` (by player ID) and `scratchedNames` (normalized name) from `lu.scratches[side]`, then skip any matching batter before scoring. Dual-check (ID + name) is the correct defensive approach. Scratched players simply don't appear in Board rankings — cleanest UX. All `node --check` passes.
+
+### What's next for Codex
+
+Remaining queue in order:
+- **Task 74** (continued) — Complete the Algorithmic / Projection / AI label audit across all tabs
+- **Task 77** — Private Predictive Models tab (F5 ML first market, gated to scout user)
+
+---
+
+## ✅ Session 74 — CW: Task 74 Final Approval + Task 77 Spec Written
+
+### Task 74 — TierBadge Label Audit ✅ Approved
+
+Three exact gaps were identified and fixed:
+- **Gap 1** (~line 6990): Scout individual pick cards — `<TierBadge tier="ai" />` added
+- **Gap 2** (~line 7223): HR Scout individual pick cards — `<TierBadge tier="projection" />` added
+- **Gap 3** (~line 5424): HR Scout board card `proj:` label — changed to `<TierBadge tier="projection" /><span>Est. {p.projectedValue}</span>`
+
+All three confirmed present, no scoring logic or backend changes.
+
+### Task 77 — Private Predictive Models Tab 📝 Spec Written
+
+Full spec now in the CODEX TASKS section above. Key design decisions:
+
+**Architecture:** Reuses existing Lab state variables (`labData`, `labFgData`, `labKData`, `labTotalsData`) — no new backend routes, no new fetch functions. The four Lab `useEffect` fetch guards are updated to also fire when `view === "models"`.
+
+**New state:** `modelsSubTab` (mirrors `labSubTab` — same four keys: `"f5ml"`, `"fullgame"`, `"kprop"`, `"totals"`).
+
+**Tab button:** `📊 Models`, purple accent (`#a78bfa`), placed after `🔬 Lab` in the nav row, gated to `isScoutUser`.
+
+**Cards display:** Clean layout showing — game header (away @ home + time), pitcher matchup, model lean + win probability %, top 3 factors derived from `model.features`, `EDGE` badge when `model.hasEdge === true`, `DATA GAP` badge when `dataWarning === true`, `PREDICTIVE` tier badge. No calibration recording, no pick logging.
+
+**Lab tab untouched** except the four `useEffect` guard conditions — calibration recording continues to fire only from Lab context.
+
+### What's next for Codex
+
+- **Task 77** — Private Predictive Models tab (spec is ready, full JSX in the CODEX TASKS section)
+- **Task 79** — Polymarket + Kalshi Prediction Market Odds Rows (re-specced in Session 74)
+- **Task 81** — DB-first migration: lab calibration (see CODEX TASKS section)
+- **Task 82** — DB-first migration: picks + auth (see CODEX TASKS section)
+
+*Updated 2026-05-06 — Session 74 complete · Tasks 74/77/79 approved · Tasks 81/82 specced*
+
+---
+
+## ✅ Session 75 — CW: Task 79 Approved + DB Migration Brainstorm
+
+### Task 79 — Kalshi + Polymarket Prediction Market Rows ✅ Approved
+
+`predictionMarkets.js` is clean. `splitKalshiTeams` greedy split is correct — tries every 2–4 char boundary until both parts hit `MLB_ABBRS`. Price fallback chain handles all four Kalshi field variants. Polymarket `parseStringifiedArray` correctly handles both pre-parsed arrays and stringified JSON. `Promise.allSettled` means one source failure never blocks the other. Both rows placed correctly inside the `odds.live && odds.books` branch. KSHI/POLY flip logic correctly maps winner/loser to our game's away/home orientation. `node --check` passes.
+
+### DB Migration Decision
+
+Confirmed: `DATABASE_URL` is set in Railway prod, `db.js` logs "PostgreSQL connected" on boot. Existing snapshot tables (slate, odds, bullpen, etc.) are already live in Postgres.
+
+**Remaining JSON files to migrate:**
+- `data/picks.json` — user prop log (race condition risk, limits multi-user, blocks CLV tracking)
+- `data/users.json` — login accounts + bcrypt hashes (passwords in flat file)
+- `data/lab-outcomes.json` — model calibration records (grows unbounded, hard to query)
+- `data/umpires.json` — weekly-refreshed static lookup — **staying as JSON**
+- `data/notes.json` — empty — **no action**
+
+**Approach:** DB-first with JSON fallback. When `DATABASE_URL` is set, use Postgres. When not set (local dev without DB), fall back to existing JSON file logic. No existing picks data to migrate — start fresh. Users DO need to be seeded into the DB so existing logins keep working.
+
+**Two tasks:**
+- **Task 81** — Migration SQL + `labCalibration.js` swap (lowest stakes, isolated test of DB-first pattern)
+- **Task 82** — `picks.js` + `gradePicksJob.js` + `auth.js` swaps + user seed script (higher stakes, touches auth and core picks flow)
+
+---
+
+### CODEX TASK 81 — DB-First Migration: Lab Calibration
+
+**Status:** Ready
+**LOE:** Small — new SQL migration + one service file swap
+**Type:** Backend only
+**Deploy order:** Run `node backend/scripts/migrate.js` in Railway after merging to apply new tables
+
+**Goal:** Add the three new DB tables (`users`, `picks`, `lab_outcomes`) via a new migration file, then swap `labCalibration.js` to write to `lab_outcomes` when Postgres is available, falling back to the JSON file when it's not.
+
+---
+
+**Step 1 — Create `backend/migrations/002_picks_users_lab.sql`**
+
+```sql
+-- Users table (mirrors users.json structure)
+CREATE TABLE IF NOT EXISTS users (
+  id            TEXT         PRIMARY KEY,
+  username      TEXT         NOT NULL UNIQUE,
+  password_hash TEXT         NOT NULL,
+  preferences   JSONB        NOT NULL DEFAULT '{}',
+  created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(LOWER(username));
+
+-- Picks table (fresh start — no migration of existing picks.json)
+CREATE TABLE IF NOT EXISTS picks (
+  id          TEXT         PRIMARY KEY,
+  user_id     TEXT         NOT NULL,
+  game_pk     TEXT,
+  result      TEXT,
+  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  data        JSONB        NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_picks_user_id ON picks(user_id);
+CREATE INDEX IF NOT EXISTS idx_picks_result  ON picks(result);
+CREATE INDEX IF NOT EXISTS idx_picks_game_pk ON picks(game_pk);
+
+-- Lab calibration records
+CREATE TABLE IF NOT EXISTS lab_outcomes (
+  id           TEXT         PRIMARY KEY,
+  game_pk      INTEGER,
+  date         TEXT,
+  model        TEXT,
+  lean_side    TEXT,
+  lean_prob    NUMERIC,
+  lean_edge    NUMERIC,
+  has_edge     BOOLEAN,
+  subject_key  TEXT,
+  book_line    NUMERIC,
+  book_total   NUMERIC,
+  result       TEXT,
+  resolved_at  TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_lab_model ON lab_outcomes(model);
+CREATE INDEX IF NOT EXISTS idx_lab_date  ON lab_outcomes(date);
+```
+
+---
+
+**Step 2 — Update `backend/scripts/migrate.js`**
+
+The current script only runs `001_init.sql`. Update it to run both files in order:
+
+```js
+const fs = require("fs");
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "../.env") });
+require("dotenv").config({ path: path.join(__dirname, "../../.env") });
+const { query, isConnected } = require("../services/db");
+
+async function migrate() {
+  if (!isConnected()) {
+    console.error("DATABASE_URL not set — cannot run migrations");
+    process.exit(1);
+  }
+  const migrationsDir = path.join(__dirname, "../migrations");
+  const files = ["001_init.sql", "002_picks_users_lab.sql"];
+  for (const file of files) {
+    const sql = fs.readFileSync(path.join(migrationsDir, file), "utf8");
+    await query(sql);
+    console.log(`  ✓ Applied ${file}`);
+  }
+  console.log("✅ All migrations applied");
+  process.exit(0);
+}
+
+migrate().catch((err) => {
+  console.error("Migration failed:", err.message);
+  process.exit(1);
+});
+```
+
+---
+
+**Step 3 — Rewrite `backend/services/labCalibration.js`**
+
+Replace the entire file with the DB-first version below. The public API (`readLog`, `appendEntry`, `resolveEntry`, `writeLog`) is preserved exactly — callers in `modelF5.js` don't change at all.
+
+```js
+const fs = require("fs/promises");
+const path = require("path");
+const { query, isConnected } = require("./db");
+
+const DATA_DIR = path.join(__dirname, "..", "data");
+const LOG_PATH = path.join(DATA_DIR, "lab-outcomes.json");
+
+// ── JSON fallback helpers (unchanged from original) ───────────────────────────
+async function ensureDataDir() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+}
+
+async function readLogJson() {
+  try {
+    const raw = await fs.readFile(LOG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    if (err.code === "ENOENT") return [];
+    console.warn(`labCalibration read failed: ${err.message}`);
+    return [];
+  }
+}
+
+async function writeLogJson(entries) {
+  await ensureDataDir();
+  const tmpPath = `${LOG_PATH}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(entries, null, 2));
+  await fs.rename(tmpPath, LOG_PATH);
+}
+
+// ── DB helpers ────────────────────────────────────────────────────────────────
+function rowToEntry(row) {
+  return {
+    id:          row.id,
+    gamePk:      row.game_pk,
+    date:        row.date,
+    model:       row.model,
+    leanSide:    row.lean_side,
+    leanProb:    row.lean_prob != null ? Number(row.lean_prob) : null,
+    leanEdge:    row.lean_edge != null ? Number(row.lean_edge) : null,
+    hasEdge:     row.has_edge,
+    subjectKey:  row.subject_key,
+    bookLine:    row.book_line != null ? Number(row.book_line) : null,
+    bookTotal:   row.book_total != null ? Number(row.book_total) : null,
+    result:      row.result,
+    resolvedAt:  row.resolved_at,
+  };
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+async function readLog() {
+  if (isConnected()) {
+    const r = await query(
+      "SELECT * FROM lab_outcomes ORDER BY created_at ASC"
+    );
+    return (r?.rows ?? []).map(rowToEntry);
+  }
+  return readLogJson();
+}
+
+async function appendEntry(entry) {
+  if (isConnected()) {
+    await query(
+      `INSERT INTO lab_outcomes
+         (id, game_pk, date, model, lean_side, lean_prob, lean_edge,
+          has_edge, subject_key, book_line, book_total, result, resolved_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        entry.id,
+        entry.gamePk ?? null,
+        entry.date ?? null,
+        entry.model ?? null,
+        entry.leanSide ?? null,
+        entry.leanProb ?? null,
+        entry.leanEdge ?? null,
+        entry.hasEdge ?? false,
+        entry.subjectKey ?? null,
+        entry.bookLine ?? null,
+        entry.bookTotal ?? null,
+        entry.result ?? null,
+        entry.resolvedAt ?? null,
+      ]
+    );
+    return true;
+  }
+  // JSON fallback
+  const entries = await readLogJson();
+  if (entries.some(e => e.id === entry.id)) return false;
+  entries.push(entry);
+  await writeLogJson(entries);
+  return true;
+}
+
+async function resolveEntry(id, result) {
+  if (isConnected()) {
+    await query(
+      `UPDATE lab_outcomes SET result = $1, resolved_at = NOW() WHERE id = $2`,
+      [result, id]
+    );
+    return true;
+  }
+  // JSON fallback
+  const entries = await readLogJson();
+  const idx = entries.findIndex(e => e.id === id);
+  if (idx === -1) return false;
+  entries[idx] = { ...entries[idx], result, resolvedAt: new Date().toISOString() };
+  await writeLogJson(entries);
+  return true;
+}
+
+// writeLog: used internally — keep for compatibility but prefer targeted updates
+async function writeLog(entries) {
+  if (isConnected()) {
+    // In DB mode, writeLog is a no-op — use appendEntry/resolveEntry instead
+    return;
+  }
+  await writeLogJson(entries);
+}
+
+module.exports = { readLog, writeLog, appendEntry, resolveEntry, LOG_PATH };
+```
+
+---
+
+**Do NOT:**
+- Change any files in `backend/routes/` or `backend/jobs/` in this task
+- Change `modelF5.js` — it calls `labCalibration.js` functions which have the same signatures
+- Remove the JSON fallback — local dev without `DATABASE_URL` must still work
+
+**Verification:**
+1. `node --check backend/services/labCalibration.js` — must pass
+2. `node --check backend/scripts/migrate.js` — must pass
+3. `node --check backend/migrations/002_picks_users_lab.sql` is not a JS file — skip. Verify SQL syntax by reading it.
+4. Confirm `appendEntry`, `resolveEntry`, `readLog`, `writeLog`, `LOG_PATH` are all still exported
+
+---
+
+### CODEX TASK 82 — DB-First Migration: Picks + Auth
+
+**Status:** Ready (do Task 81 first and confirm it deploys cleanly)
+**LOE:** Medium — three file swaps + one seed script
+**Type:** Backend only
+
+**Goal:** Swap `picks.js`, `gradePicksJob.js`, and `auth.js` to DB-first with JSON fallback. Create a one-time `seed-users-db.js` script that populates the `users` table from `users.json` so existing logins keep working.
+
+**Important context:**
+- `users.json` has `id` as `"user1"`, `"user2"` etc. — keep these exact string IDs in the DB so existing JWTs (which encode `userId`) remain valid
+- `users.json` has `passwordHash` field — the DB column is `password_hash` (snake_case)
+- `users.json` has optional `preferences` object — maps to `preferences JSONB`
+- No existing picks to migrate — `picks` table starts empty, users pick up fresh
+- `picks.json` stores picks with `userId` as a string matching the user `id` field
+
+---
+
+**Step 1 — Create `backend/scripts/seed-users-db.js`**
+
+This script reads `users.json` and inserts each user into the `users` table. Run once in Railway after Task 81 migrations are applied.
+
+```js
+const path = require("path");
+const fs = require("fs");
+require("dotenv").config({ path: path.join(__dirname, "../.env") });
+require("dotenv").config({ path: path.join(__dirname, "../../.env") });
+const { query, isConnected } = require("../services/db");
+
+async function seedUsers() {
+  if (!isConnected()) {
+    console.error("DATABASE_URL not set");
+    process.exit(1);
+  }
+
+  const usersFile = path.join(__dirname, "../data/users.json");
+  const users = JSON.parse(fs.readFileSync(usersFile, "utf8"));
+
+  for (const u of users) {
+    await query(
+      `INSERT INTO users (id, username, password_hash, preferences)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE
+         SET username = EXCLUDED.username,
+             password_hash = EXCLUDED.password_hash,
+             preferences = EXCLUDED.preferences`,
+      [
+        u.id,
+        u.username,
+        u.passwordHash,
+        JSON.stringify(u.preferences ?? {}),
+      ]
+    );
+    console.log(`  ✓ Seeded user: ${u.username}`);
+  }
+
+  console.log("✅ User seed complete");
+  process.exit(0);
+}
+
+seedUsers().catch((err) => {
+  console.error("Seed failed:", err.message);
+  process.exit(1);
+});
+```
+
+---
+
+**Step 2 — Rewrite `backend/routes/picks.js`**
+
+Replace the entire file. The HTTP API surface is identical — same routes, same response shapes — callers (frontend) don't change.
+
+```js
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const requireAuth = require("../middleware/auth");
+const { query, isConnected } = require("../services/db");
+
+const router = express.Router();
+router.use(requireAuth);
+
+const DATA_DIR = path.join(__dirname, "..", "data");
+const PICKS_FILE = path.join(DATA_DIR, "picks.json");
+
+// ── JSON fallback helpers ─────────────────────────────────────────────────────
+function ensureStore() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(PICKS_FILE))
+    fs.writeFileSync(PICKS_FILE, JSON.stringify({ picks: [] }, null, 2));
+}
+function readStore() {
+  ensureStore();
+  try {
+    const raw = fs.readFileSync(PICKS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.picks) ? parsed : { picks: [] };
+  } catch { return { picks: [] }; }
+}
+function writeStore(store) {
+  ensureStore();
+  fs.writeFileSync(PICKS_FILE, JSON.stringify(store, null, 2));
+}
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+router.get("/", async (req, res) => {
+  if (isConnected()) {
+    const r = await query(
+      "SELECT data FROM picks WHERE user_id = $1 ORDER BY created_at DESC",
+      [req.userId]
+    );
+    return res.json({ picks: (r?.rows ?? []).map(row => row.data) });
+  }
+  const store = readStore();
+  return res.json({ picks: store.picks.filter(p => p.userId === req.userId) });
+});
+
+router.post("/", async (req, res) => {
+  const entry = { ...(req.body ?? {}), userId: req.userId };
+  if (!entry.id) return res.status(400).json({ error: "id required" });
+
+  if (isConnected()) {
+    const existing = await query("SELECT data FROM picks WHERE id = $1", [entry.id]);
+    if (existing?.rows?.length) {
+      const row = existing.rows[0].data;
+      if (row.userId !== req.userId) return res.status(403).json({ error: "Forbidden" });
+      return res.json(row);
+    }
+    await query(
+      `INSERT INTO picks (id, user_id, game_pk, result, data)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [entry.id, req.userId, entry.gamePk ?? null, entry.result ?? null, JSON.stringify(entry)]
+    );
+    return res.status(201).json(entry);
+  }
+
+  // JSON fallback
+  const store = readStore();
+  const existing = store.picks.find(p => p.id === entry.id);
+  if (existing) {
+    if (existing.userId !== req.userId) return res.status(403).json({ error: "Forbidden" });
+    return res.json(existing);
+  }
+  store.picks.push(entry);
+  writeStore(store);
+  return res.status(201).json(entry);
+});
+
+router.patch("/:id", async (req, res) => {
+  const result = req.body?.result ?? null;
+
+  if (isConnected()) {
+    const existing = await query("SELECT data FROM picks WHERE id = $1", [req.params.id]);
+    if (!existing?.rows?.length) return res.status(404).json({ error: "Pick not found" });
+    const row = existing.rows[0].data;
+    if (row.userId !== req.userId) return res.status(403).json({ error: "Forbidden" });
+    const updated = { ...row, result };
+    await query(
+      "UPDATE picks SET result = $1, data = $2 WHERE id = $3",
+      [result, JSON.stringify(updated), req.params.id]
+    );
+    return res.json(updated);
+  }
+
+  // JSON fallback
+  const store = readStore();
+  const index = store.picks.findIndex(p => p.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: "Pick not found" });
+  if (store.picks[index].userId !== req.userId) return res.status(403).json({ error: "Forbidden" });
+  store.picks[index] = { ...store.picks[index], result };
+  writeStore(store);
+  return res.json(store.picks[index]);
+});
+
+router.delete("/:id", async (req, res) => {
+  if (isConnected()) {
+    const existing = await query("SELECT data FROM picks WHERE id = $1", [req.params.id]);
+    if (!existing?.rows?.length) return res.status(404).json({ error: "Pick not found" });
+    if (existing.rows[0].data.userId !== req.userId) return res.status(403).json({ error: "Forbidden" });
+    await query("DELETE FROM picks WHERE id = $1", [req.params.id]);
+    return res.json({ ok: true });
+  }
+
+  // JSON fallback
+  const store = readStore();
+  const index = store.picks.findIndex(p => p.id === req.params.id);
+  if (index === -1) return res.status(404).json({ error: "Pick not found" });
+  if (store.picks[index].userId !== req.userId) return res.status(403).json({ error: "Forbidden" });
+  store.picks.splice(index, 1);
+  writeStore(store);
+  return res.json({ ok: true });
+});
+
+module.exports = router;
+```
+
+---
+
+**Step 3 — Rewrite `backend/jobs/gradePicksJob.js`**
+
+Only the `readPicks` and `writePicks` helpers change. The `computeGrade` and `fetchBoxForGrading` functions are large and correct — **do not touch them**. Only replace the top section (imports + `readPicks` + `writePicks`) and the `gradePendingPicks` function body. Keep `computeGrade` and `fetchBoxForGrading` exactly as-is.
+
+```js
+// Replace ONLY the top of the file (imports + readPicks + writePicks)
+// and the gradePendingPicks function. Do NOT touch computeGrade or fetchBoxForGrading.
+
+const fs = require("fs");
+const path = require("path");
+const axios = require("axios");
+const { query, isConnected } = require("../services/db");
+
+const PICKS_FILE = path.join(__dirname, "..", "data", "picks.json");
+const MLB_BASE = "https://statsapi.mlb.com/api/v1";
+
+function readPicksJson() {
+  try {
+    const raw = fs.readFileSync(PICKS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.picks) ? parsed.picks : [];
+  } catch { return []; }
+}
+
+function writePicksJson(picks) {
+  const current = (() => {
+    try { return JSON.parse(fs.readFileSync(PICKS_FILE, "utf8")); }
+    catch { return { picks: [] }; }
+  })();
+  fs.writeFileSync(PICKS_FILE, JSON.stringify({ ...current, picks }, null, 2));
+}
+
+// ... (keep parseIpToOuts, normalizeName, computeGrade, fetchBoxForGrading EXACTLY AS-IS) ...
+
+async function gradePendingPicks() {
+  let picks;
+  let useDb = isConnected();
+
+  if (useDb) {
+    const r = await query("SELECT id, game_pk, data FROM picks WHERE result IS NULL");
+    picks = (r?.rows ?? []).map(row => ({ ...row.data, id: row.id, gamePk: row.game_pk }));
+  } else {
+    picks = readPicksJson();
+  }
+
+  const pending = picks.filter(p => p.result === null || p.result === undefined);
+  if (!pending.length) {
+    console.log("  · Grade job: no pending picks");
+    return { graded: 0, total: 0 };
+  }
+
+  const byGame = {};
+  pending.forEach(p => {
+    const key = String(p.gamePk);
+    if (!byGame[key]) byGame[key] = [];
+    byGame[key].push(p);
+  });
+
+  let gradedCount = 0;
+  const updates = {};
+
+  await Promise.all(
+    Object.entries(byGame).map(async ([gamePkStr, gamePicks]) => {
+      const box = await fetchBoxForGrading(gamePkStr);
+      if (!box) return;
+      gamePicks.forEach(pick => {
+        const grade = computeGrade(pick, box);
+        if (grade !== null) { updates[pick.id] = grade; gradedCount++; }
+      });
+    })
+  );
+
+  if (gradedCount > 0) {
+    if (useDb) {
+      await Promise.all(
+        Object.entries(updates).map(([id, result]) =>
+          query(
+            "UPDATE picks SET result = $1, data = data || $2 WHERE id = $3",
+            [result, JSON.stringify({ result }), id]
+          )
+        )
+      );
+    } else {
+      const updated = picks.map(p => updates[p.id] !== undefined ? { ...p, result: updates[p.id] } : p);
+      writePicksJson(updated);
+    }
+    console.log(`  ✓ Grade job: settled ${gradedCount} pick(s)`);
+  }
+
+  return { graded: gradedCount, total: pending.length };
+}
+
+module.exports = { gradePendingPicks };
+```
+
+---
+
+**Step 4 — Rewrite `backend/routes/auth.js`**
+
+Same approach — identical HTTP API, DB-first with JSON fallback. The `VALID_BOOKS` validation and JWT signing logic are unchanged.
+
+```js
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const requireAuth = require("../middleware/auth");
+const { query, isConnected } = require("../services/db");
+
+const router = express.Router();
+
+const DATA_DIR = path.join(__dirname, "..", "data");
+const USERS_FILE = path.join(DATA_DIR, "users.json");
+const VALID_BOOKS = ["DK", "FD", "CZR", "MGM", "BOV"];
+
+// ── JSON fallback helpers ─────────────────────────────────────────────────────
+function ensureStore() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, JSON.stringify([], null, 2));
+}
+function readUsers() {
+  ensureStore();
+  try {
+    const raw = fs.readFileSync(USERS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+function writeUsers(users) {
+  ensureStore();
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+// ── DB helpers ────────────────────────────────────────────────────────────────
+function rowToUser(row) {
+  return {
+    id: row.id,
+    username: row.username,
+    passwordHash: row.password_hash,
+    preferences: row.preferences ?? {},
+  };
+}
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+router.post("/login", async (req, res) => {
+  const username = String(req.body?.username ?? "").trim();
+  const password = String(req.body?.password ?? "");
+
+  let user;
+  if (isConnected()) {
+    const r = await query(
+      "SELECT * FROM users WHERE LOWER(username) = LOWER($1)",
+      [username]
+    );
+    user = r?.rows?.length ? rowToUser(r.rows[0]) : null;
+  } else {
+    const users = readUsers();
+    user = users.find(u => String(u.username ?? "").toLowerCase() === username.toLowerCase()) ?? null;
+  }
+
+  if (!user || !user.passwordHash || !process.env.JWT_SECRET) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+  const ok = await bcrypt.compare(password, user.passwordHash);
+  if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+
+  const token = jwt.sign(
+    { userId: user.id, username: user.username },
+    process.env.JWT_SECRET,
+    { expiresIn: "30d" }
+  );
+  return res.json({ token, userId: user.id, username: user.username });
+});
+
+router.get("/me", requireAuth, (req, res) => {
+  return res.json({ userId: req.userId, username: req.username });
+});
+
+router.get("/preferences", requireAuth, async (req, res) => {
+  if (isConnected()) {
+    const r = await query("SELECT preferences FROM users WHERE id = $1", [req.userId]);
+    if (!r?.rows?.length) return res.status(404).json({ error: "User not found" });
+    return res.json({ preferences: r.rows[0].preferences ?? {} });
+  }
+  const users = readUsers();
+  const user = users.find(u => u.id === req.userId);
+  if (!user) return res.status(404).json({ error: "User not found" });
+  return res.json({ preferences: user.preferences ?? {} });
+});
+
+router.put("/preferences", requireAuth, async (req, res) => {
+  const { preferredBook } = req.body ?? {};
+  if (preferredBook !== null && preferredBook !== undefined && !VALID_BOOKS.includes(preferredBook)) {
+    return res.status(400).json({ error: `preferredBook must be one of: ${VALID_BOOKS.join(", ")} or null` });
+  }
+
+  if (isConnected()) {
+    const r = await query("SELECT preferences FROM users WHERE id = $1", [req.userId]);
+    if (!r?.rows?.length) return res.status(404).json({ error: "User not found" });
+    const current = r.rows[0].preferences ?? {};
+    const updated = { ...current, ...(preferredBook !== undefined ? { preferredBook: preferredBook ?? null } : {}) };
+    await query("UPDATE users SET preferences = $1 WHERE id = $2", [JSON.stringify(updated), req.userId]);
+    return res.json({ preferences: updated });
+  }
+
+  // JSON fallback
+  const users = readUsers();
+  const idx = users.findIndex(u => u.id === req.userId);
+  if (idx === -1) return res.status(404).json({ error: "User not found" });
+  users[idx].preferences = { ...(users[idx].preferences ?? {}), ...(preferredBook !== undefined ? { preferredBook: preferredBook ?? null } : {}) };
+  writeUsers(users);
+  return res.json({ preferences: users[idx].preferences });
+});
+
+module.exports = router;
+```
+
+---
+
+**Do NOT:**
+- Change `middleware/auth.js` — JWT verification is unchanged
+- Change any frontend files
+- Remove the JSON fallback from any file
+- Touch `computeGrade` or `fetchBoxForGrading` in `gradePicksJob.js`
+
+**Deploy order after merging:**
+1. `node backend/scripts/migrate.js` — applies `002_picks_users_lab.sql`
+2. `node backend/scripts/seed-users-db.js` — populates users table from `users.json`
+3. Restart the Railway service — picks and auth now use Postgres
+
+**Verification:**
+1. `node --check` on all four new/modified files
+2. Confirm `seed-users-db.js` logs each username without error
+3. Test login with an existing account — JWT should return as before
+4. Add a pick, reload the app — pick should persist (coming from DB now)
+5. Check Railway logs for any `query` errors on startup

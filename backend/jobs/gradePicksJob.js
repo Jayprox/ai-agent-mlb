@@ -1,11 +1,12 @@
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
+const { query, isConnected } = require("../services/db");
 
 const PICKS_FILE = path.join(__dirname, "..", "data", "picks.json");
 const MLB_BASE = "https://statsapi.mlb.com/api/v1";
 
-function readPicks() {
+function readPicksJson() {
   try {
     const raw = fs.readFileSync(PICKS_FILE, "utf8");
     const parsed = JSON.parse(raw);
@@ -13,7 +14,7 @@ function readPicks() {
   } catch (_) { return []; }
 }
 
-function writePicks(picks) {
+function writePicksJson(picks) {
   const current = (() => {
     try { return JSON.parse(fs.readFileSync(PICKS_FILE, "utf8")); } catch (_) { return { picks: [] }; }
   })();
@@ -229,7 +230,19 @@ async function fetchBoxForGrading(gamePk) {
 }
 
 async function gradePendingPicks() {
-  const picks = readPicks();
+  let picks = [];
+
+  if (isConnected()) {
+    const result = await query("SELECT id, game_pk, data FROM picks WHERE result IS NULL");
+    picks = (result?.rows ?? []).map((row) => ({
+      ...(row.data ?? {}),
+      id: row.id,
+      gamePk: row.game_pk,
+    }));
+  } else {
+    picks = readPicksJson();
+  }
+
   const pending = picks.filter((p) => p.result === null || p.result === undefined);
   if (!pending.length) {
     console.log("  · Grade job: no pending picks");
@@ -258,8 +271,19 @@ async function gradePendingPicks() {
   );
 
   if (gradedCount > 0) {
-    const updated = picks.map((p) => (updates[p.id] !== undefined ? { ...p, result: updates[p.id] } : p));
-    writePicks(updated);
+    if (isConnected()) {
+      await Promise.all(
+        Object.entries(updates).map(([id, result]) =>
+          query(
+            "UPDATE picks SET result = $1, data = data || $2::jsonb WHERE id = $3",
+            [result, JSON.stringify({ result }), id]
+          )
+        )
+      );
+    } else {
+      const updated = picks.map((p) => (updates[p.id] !== undefined ? { ...p, result: updates[p.id] } : p));
+      writePicksJson(updated);
+    }
     console.log(`  ✓ Grade job: settled ${gradedCount} pick(s)`);
   }
 

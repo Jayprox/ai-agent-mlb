@@ -5,6 +5,7 @@ const cache   = require("../services/cache");
 const { fetchBatterPowerProfile } = require("./batterPower");
 const { fetchBatterRecentForm } = require("./batterGamelog");
 const SEASON = new Date().getFullYear();
+const CONFIRMED_CACHE_KEY = (gamePk) => `lineups:last-confirmed:${gamePk}`;
 
 // Transform a team's boxscore data into a batting-order array.
 // Returns [] if the lineup hasn't been posted yet.
@@ -38,6 +39,18 @@ const transformRoster = (rosterData) => {
     }));
 };
 
+const diffScratches = (previous = [], current = []) => {
+  const currentIds = new Set((current ?? []).map(p => String(p.id)));
+  return (previous ?? [])
+    .filter(p => p?.id != null && !currentIds.has(String(p.id)))
+    .map(p => ({
+      id: p.id,
+      name: p.name,
+      pos: p.pos ?? p.primaryPos ?? null,
+      order: p.order ?? null,
+    }));
+};
+
 // ── GET /api/lineups/:gamePk ─────────────────────────────────
 // Returns confirmed batting orders for both teams.
 // `confirmed: false` means the lineup hasn't been posted yet — frontend
@@ -60,12 +73,21 @@ router.get("/:gamePk", async (req, res) => {
     const awayLineup = transformTeam(data.teams.away);
     const homeLineup = transformTeam(data.teams.home);
     const confirmed  = awayLineup.length > 0 && homeLineup.length > 0;
+    const previousConfirmed = cache.get(CONFIRMED_CACHE_KEY(gamePk));
+    let scratches = { away: [], home: [] };
     let awayRoster = [];
     let homeRoster = [];
 
     // Enrich batters with power profiles when lineups are confirmed.
     // Fetch in parallel, max 3 at a time to avoid Savant throttling.
     if (confirmed) {
+      if (previousConfirmed?.away?.length || previousConfirmed?.home?.length) {
+        scratches = {
+          away: diffScratches(previousConfirmed.away, awayLineup),
+          home: diffScratches(previousConfirmed.home, homeLineup),
+        };
+      }
+
       const allBatters = [...awayLineup, ...homeLineup];
       const chunkSize = 3;
 
@@ -82,6 +104,8 @@ router.get("/:gamePk", async (req, res) => {
           b.recentForm = forms[idx] ?? null;
         });
       }
+
+      cache.set(CONFIRMED_CACHE_KEY(gamePk), { away: awayLineup, home: homeLineup }, 12 * 60 * 60 * 1000);
     } else if (awayTeamId && homeTeamId) {
       try {
         const [awayRosterRes, homeRosterRes] = await Promise.all([
@@ -103,6 +127,7 @@ router.get("/:gamePk", async (req, res) => {
       gamePk: parseInt(gamePk),
       confirmed,
       source: confirmed ? "lineup" : "roster",
+      scratches,
       away: confirmed ? awayLineup : awayRoster,
       home: confirmed ? homeLineup : homeRoster,
     };

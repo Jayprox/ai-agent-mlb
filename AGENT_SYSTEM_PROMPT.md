@@ -12863,3 +12863,545 @@ app.get("/api/admin/jobs/resolve-lab-calibration", requireAdminAuth, async (_req
 - kprop entries with `bookLine` and `pitcherLastName` resolve correctly
 - totals entries with `bookTotal` resolve correctly
 - Admin endpoint returns `{ ok: true, resolved: N, skipped: N }`
+
+## HANDOFF NOTE — 2026-05-05 — CODEX TASK 73 COMPLETED (Fix Board Card Start Time)
+
+Frontend-only fix in `prop-scout-v7.jsx`.
+
+### Problem
+
+Board card renders had already been updated to append local start time from `c.gameTime`, but the active slate objects built from schedule snapshots were not carrying the raw `gameTime` field forward. As a result, board cards had no usable source value for the start-time render.
+
+### Fix
+
+- Added `gameTime: sg.gameTime ?? null` to `buildLiveGame(...)`
+- Propagated `gameTime` into all `computeGameBoard(...)` candidate objects:
+  - `nrfi`
+  - `total`
+  - `spread`
+  - `ml`
+  - `f5ml`
+  - `f5spread`
+
+This keeps board card time rendering aligned with the raw snapshot field coming from schedule data while preserving the already-formatted `time` display used elsewhere in the app.
+
+### Scope
+
+- frontend only
+- no backend changes
+- no scoring / ranking changes
+
+### Verification
+
+- `npm run build` ✅
+
+## HANDOFF NOTE — 2026-05-05 — CODEX TASK 79 COMPLETED (Prediction Market Odds Rows: Kalshi + Polymarket)
+
+Implemented the combined Kalshi + Polymarket version of Task 79.
+
+### Backend
+
+Added new route:
+
+- `backend/routes/predictionMarkets.js`
+
+Mounted in:
+
+- `backend/server.js` → `app.use("/api/prediction-markets", require("./routes/predictionMarkets"));`
+
+Route:
+
+- `GET /api/prediction-markets/mlb-game-odds`
+
+Behavior:
+
+- fetches Kalshi and Polymarket in parallel via `Promise.allSettled`
+- if one source fails, the other still returns
+- server-cached for 15 minutes
+- returns:
+  - `{ date, kalshi, polymarket, fetchedAt }`
+
+Kalshi handling:
+
+- uses public Kalshi markets endpoint
+- no API key required
+- parses MLB game tickers directly:
+  - `KXMLBGAME-26APR221310CINTB` → `CIN @ TB`
+- no NLP required for Kalshi matching
+- stores results keyed by team pair in both orderings
+
+Polymarket handling:
+
+- uses public Polymarket Gamma API (`/markets`)
+- no API key required
+- parses:
+  - `question`
+  - stringified `outcomes`
+  - stringified `outcomePrices`
+- extracts MLB team abbreviations from the question text
+- stores results keyed by team pair in both orderings
+
+### Frontend
+
+Updated `prop-scout-v7.jsx`:
+
+- added `livePredMarkets` state
+- added a lazy Intel-tab fetch:
+  - `GET /api/prediction-markets/mlb-game-odds`
+- added two prediction-market rows to the multi-book odds table:
+  - green `KSHI`
+  - purple `POLY`
+
+Display behavior:
+
+- rows only appear when a matching market exists for that source
+- away/home ML columns show win probabilities as `%`
+- total / O odds / U odds / RL columns show `—`
+- `KSHI` uses green styling to match the app’s reliable/calibrated surfaces
+- `POLY` uses purple styling to match the app’s experimental/crowd surfaces
+
+### Scope
+
+- full-stack
+- no auth required
+- no env var required
+- no per-game endpoint added
+- silent/no-row behavior when no matching market exists
+
+### Verification
+
+- `node --check backend/routes/predictionMarkets.js` ✅
+- `node --check backend/server.js` ✅
+- `npm run build` ✅
+
+## HANDOFF NOTE — 2026-05-06 — CODEX TASK 81 COMPLETED (DB-First Migration: Lab Calibration)
+
+Implemented Task 81 exactly per spec and did not touch any Task 82 files.
+
+### Added
+
+- `backend/migrations/002_picks_users_lab.sql`
+
+This migration includes all three `CREATE TABLE IF NOT EXISTS` statements and the required indexes for:
+
+- `users`
+- `picks`
+- `lab_outcomes`
+
+### Updated
+
+- `backend/scripts/migrate.js`
+
+The migration runner now applies both SQL files in order:
+
+- `001_init.sql`
+- `002_picks_users_lab.sql`
+
+and logs:
+
+- `✓ Applied <filename>`
+
+for each file, followed by:
+
+- `✅ All migrations applied`
+
+### Rewritten
+
+- `backend/services/labCalibration.js`
+
+This is now DB-first with JSON fallback while preserving the exact public API:
+
+- `readLog`
+- `appendEntry`
+- `resolveEntry`
+- `writeLog`
+- `LOG_PATH`
+
+Key details preserved from spec:
+
+- DB mode uses `lab_outcomes`
+- JSON fallback remains intact for local/no-DB usage
+- `rowToEntry` maps snake_case DB columns to the existing camelCase entry shape
+- `writeLog` is a no-op in DB mode and still writes JSON in fallback mode
+
+### Explicitly not touched
+
+- no frontend files
+- no `picks.js`
+- no `auth.js`
+- no `gradePicksJob.js`
+- no route/job files
+
+### Verification
+
+- `node --check backend/scripts/migrate.js` ✅
+- `node --check backend/services/labCalibration.js` ✅
+- verified `backend/migrations/002_picks_users_lab.sql` exists and contains all three tables ✅
+
+## HANDOFF NOTE — 2026-05-05 — CODEX TASK 74 COMPLETED (Clarify Algorithmic vs Projection vs AI Labels)
+
+Frontend-only label consistency pass in `prop-scout-v7.jsx`.
+
+### Goal
+
+Finish the remaining vocabulary cleanup so app surfaces consistently use the 3-tier labeling system:
+
+- `ALGORITHMIC`
+- `PROJECTION`
+- `AI-ASSISTED`
+
+### Completed cleanup
+
+- Replaced the old plain `AI` badge in the `AI Trends` block with the standard `TierBadge tier="ai"` so it now reads `AI-ASSISTED` with the shared tooltip/explanation.
+- Renamed the Model Picks market-validation label from `Model Projection` to `Projection Mismatch` to better align with the projection terminology and avoid implying a different label class.
+- Added `TierBadge tier="ai"` to individual Scout pick cards so the picks themselves now match the Scout section/header labeling.
+- Added `TierBadge tier="projection"` to individual HR Scout pick cards so the cards themselves match the header’s projection framing.
+- Updated Model Picks projected-value display from bare `proj:` text to a projection-labeled `Est.` treatment with `TierBadge tier="projection"` for better visual distinction from live stats.
+
+### Scope
+
+- frontend only
+- no backend changes
+- no scoring, ranking, or prompt changes
+- terminology / badge consistency only
+
+### Verification
+
+- `npm run build` ✅
+
+## HANDOFF NOTE — 2026-05-05 — CODEX TASK 75 COMPLETED (Hybrid AI Summary Text for Board / Model Cards)
+
+Added a hybrid summary-text layer for Board and Model card surfaces.
+
+### Backend
+
+- New route: `backend/routes/cardSummary.js`
+- Mounted in `backend/server.js` at:
+  - `POST /api/card-summary`
+- Route accepts compact card payloads:
+  - `id`
+  - `market`
+  - `lean`
+  - top positive factor strings
+  - optional caution string
+- Uses cached one-line rewrites with:
+  - primary model: `claude-haiku-4-5-20251001`
+  - fallback model: `gpt-4o-mini` if Anthropic is not configured
+- If no AI key is available or the rewrite fails, the route falls back to a deterministic local sentence instead of erroring
+- Cache TTL: 6 hours
+
+### Frontend
+
+Updated `prop-scout-v7.jsx`:
+
+- Added shared `aiCardSummaries` state + in-flight guard
+- Added payload builders for:
+  - Board cards (`buildBoardSummaryRequest(...)`)
+  - Model cards (`buildModelSummaryRequest(...)`)
+- Added lazy fetch effects:
+  - Board view fetches summaries only for the visible active board market
+  - Model view fetches summaries only for visible Model Picks
+- Added rendered one-line summary text to:
+  - Model Picks cards
+  - Board pitcher cards (`K`, `Outs`)
+  - Board batter cards (`HR`, `Hits`)
+  - Board game cards (`NRFI`, `Totals`, `Run Line`, `Moneyline`, `F5 ML`, `F5 RL`)
+- Updated the Board `Why?` modal footer to use the same hybrid summary sentence instead of the older generic fallback logic
+
+### Implementation notes
+
+- Scoring, rankings, confidence, and factor math remain fully deterministic
+- AI only rewrites the card’s own factor payload into a short human-readable sentence
+- Negative / caution factor extraction is still deterministic before the rewrite step
+- Frontend retains deterministic fallback text if the summary route is unavailable
+
+### Scope
+
+- backend + frontend
+- no ranking or grading logic changes
+- no Lab / Scout / Advisor / Chat summary changes in this task
+
+### Verification
+
+- `node --check backend/routes/cardSummary.js` ✅
+- `node --check backend/server.js` ✅
+- `npm run build` ✅
+
+## HANDOFF NOTE — 2026-05-05 — Backlog Added: Revisit Hybrid Card Summary Quality
+
+User wants to revisit the new hybrid summary-text layer after more live usage.
+
+### Follow-up areas to explore
+
+- tune tone/length of the 1-line Board / Model summaries
+- improve caution selection so the sentence chooses the most meaningful caveat
+- decide whether some markets should stay deterministic while others use AI rewrite
+- evaluate whether the summary should sometimes prefer 1 strong factor + 1 caution instead of 2 positives
+- consider extending the summary layer later to Scout / Advisor / Chat surfaces only if it stays grounded
+
+### Current state
+
+- Task 75 is implemented and working
+- summaries are cached and have deterministic fallback behavior
+- no follow-up changes started yet
+
+## HANDOFF NOTE — 2026-05-05 — CODEX TASK 76 COMPLETED (Injury Flags + Lineup Scratch Alerts)
+
+Added scratch-detection and affected-prop warning flow across lineup + props surfaces.
+
+### Backend
+
+Updated `backend/routes/lineups.js`:
+
+- keeps a lightweight cached copy of the last confirmed lineup per game:
+  - `lineups:last-confirmed:${gamePk}`
+- when a newly fetched confirmed lineup differs from the previous confirmed lineup:
+  - computes removed batters as `scratches`
+- response now includes:
+  - `scratches: { away: [], home: [] }`
+
+Scratch payload entries include:
+- `id`
+- `name`
+- `pos`
+- `order`
+
+If there is no previous confirmed lineup, scratches remain empty as expected.
+
+### Frontend
+
+Updated `prop-scout-v7.jsx`:
+
+- Lineup tab:
+  - shows a red `Scratch Alert` banner when the selected side has removed players from the previous confirmed lineup
+  - renders per-player `SCRATCHED` chips inside that alert block
+- Props tab:
+  - builds a scratch-name set from `liveLineups[gamePk].scratches`
+  - marks matching sportsbook player rows with a `SCRATCHED` badge
+  - reduces the displayed split-confidence signal for scratched rows
+  - adds an inline warning that the prop may no longer be actionable
+
+### Scope
+
+- full-stack
+- no Board scoring changes
+- no Model Picks scoring changes
+- no K / Outs algorithm changes
+- confidence reduction is currently limited to directly affected sportsbook player-prop rows
+
+### Verification
+
+- `node --check backend/routes/lineups.js` ✅
+- `npm run build` ✅
+
+## HANDOFF NOTE — 2026-05-05 — CODEX TASK 78 + TASK 80 COMPLETED
+
+Only Tasks **78** and **80** were implemented in this pass.
+**Task 79 was intentionally not touched.**
+
+### Task 78 — UmpScorecards Weekly Refresh
+
+Added a new backend job:
+
+- `backend/jobs/refreshUmpireDataJob.js`
+
+What it does:
+
+- fetches season umpire aggregates from the UmpScorecards API
+- updates `backend/data/umpires.json`
+- preserves the existing top-level file structure:
+  - `source`
+  - `scrapedAt`
+  - `season`
+  - `seasonType`
+  - `count`
+  - `umpiresByName`
+- preserves downstream compatibility by continuing to write per-umpire objects keyed by full name inside `umpiresByName`
+- carries forward existing values when the upstream payload omits a field, so consumers using:
+  - `overallAccuracy`
+  - `accuracyAboveExpected`
+  - `consistency`
+  - `averageAbsoluteFavor`
+  - `weightedScore`
+  - plus the older `kRate` / `bbRate` / `tendency` / `rating`
+  do not break
+
+Scheduler:
+
+- added Monday 3 AM Honolulu cron in `backend/jobs/scheduler.js`
+  - `0 3 * * 1`
+
+Admin trigger:
+
+- added `GET /api/admin/jobs/refresh-umpire-data` in `backend/server.js`
+- same `x-admin-secret` protection as the other admin endpoints
+
+### Task 80 — Board Scratch Adjustment
+
+Updated `computeBatterBoard(...)` in `prop-scout-v7.jsx`:
+
+- reads `liveLineups[game.gamePk].scratches[side]`
+- builds scratch ID + normalized-name sets
+- skips scratched batters entirely from:
+  - `Board → HR`
+  - `Board → Hits`
+
+This is the recommended clean UX:
+
+- scratched batters disappear from rankings instead of being shown with reduced confidence
+
+### Scope
+
+- Task 78: backend only
+- Task 80: frontend only
+- Task 79 not started
+
+### Verification
+
+- `node --check backend/jobs/refreshUmpireDataJob.js` ✅
+- `node --check backend/jobs/scheduler.js` ✅
+- `node --check backend/server.js` ✅
+- `npm run build` ✅
+
+## HANDOFF NOTE — 2026-05-05 — CODEX TASK 77 COMPLETED (Private Predictive Models Tab)
+
+Added a new private read-only `📊 Models` top-level tab in `prop-scout-v7.jsx` for `isScoutUser` only.
+
+### What it is
+
+- a cleaner user-facing predictive surface built from the existing Lab model data
+- fully separate from the public `🎯 Model` picks view
+- explicitly labeled:
+  - `PREDICTIVE`
+  - `EXPERIMENTAL`
+- private / non-public-facing
+
+### Implementation details
+
+- Added new state:
+  - `modelsSubTab`
+- Added new nav button:
+  - `📊 Models`
+  - purple accent
+  - placed after `🔬 Lab`
+  - gated on `isScoutUser`
+- Reused existing Lab data sources only:
+  - `labData`
+  - `labFgData`
+  - `labKData`
+  - `labTotalsData`
+- Reused existing Lab fetchers only:
+  - `fetchLabData`
+  - `fetchLabFgData`
+  - `fetchLabKData`
+  - `fetchLabTotalsData`
+
+### Fetch behavior
+
+Updated the four existing Lab fetch `useEffect` guards so they also fire when:
+
+- `view === "models"`
+
+using the active `modelsSubTab`, while leaving Lab calibration/recording logic unchanged.
+
+### Models tab contents
+
+Sub-tabs:
+
+- `F5 ML`
+- `Full-Game ML`
+- `K Prop`
+- `Totals`
+
+Cards show:
+
+- matchup (`away @ home`)
+- local game time
+- pitcher matchup
+- model lean + probability
+- top factors / supporting signals
+- `EDGE` badge when applicable
+- `DATA GAP` badge when upstream data is partial
+- `TierBadge tier="predictive"`
+
+### Constraints preserved
+
+- no new backend routes
+- no calibration recording from Models
+- no track-record UI in Models
+- no `Add to Picks` / logging buttons in Models
+- Lab tab remains the calibration/debugging surface
+
+### Verification
+
+- `npm run build` ✅
+
+## HANDOFF NOTE — 2026-05-06 — CODEX TASK 82 COMPLETED (DB-First Migration: Picks + Auth)
+
+Implemented Task 82 exactly per spec in backend only. No frontend files, `middleware/auth.js`, or `backend/services/labCalibration.js` were touched.
+
+### Files changed
+
+- `backend/scripts/seed-users-db.js`
+- `backend/routes/picks.js`
+- `backend/jobs/gradePicksJob.js`
+- `backend/routes/auth.js`
+
+### What was built
+
+#### `backend/scripts/seed-users-db.js`
+
+- Reads `backend/data/users.json`
+- Upserts into the `users` table with:
+  - `ON CONFLICT (id) DO UPDATE`
+  - updates `username`
+  - updates `password_hash`
+  - updates `preferences`
+- Preserves string IDs like `user1`–`user10` exactly for JWT compatibility
+
+#### `backend/routes/picks.js`
+
+- Rewritten to be DB-first with JSON fallback
+- All routes still require `requireAuth`
+- DB mode:
+  - `GET /` reads from `picks.data`
+  - `POST /` inserts the full pick object into `data` JSONB
+  - `PATCH /:id` updates `result` and the stored JSON payload
+  - `DELETE /:id` removes the row after ownership check
+- JSON fallback behavior preserved from the previous file-based implementation
+
+#### `backend/jobs/gradePicksJob.js`
+
+- Rewritten to read pending picks from DB first:
+  - `SELECT id, game_pk, data FROM picks WHERE result IS NULL`
+- Writes settled grades back via:
+  - `UPDATE picks SET result = $1, data = data || $2 WHERE id = $3`
+- JSON fallback preserved
+- `computeGrade` and `fetchBoxForGrading` were kept intact per spec
+- Export remains:
+  - `module.exports = { gradePendingPicks }`
+
+#### `backend/routes/auth.js`
+
+- Rewritten to be DB-first with JSON fallback
+- Login now uses:
+  - `SELECT * FROM users WHERE LOWER(username) = LOWER($1)`
+- Added DB row mapping helper:
+  - `rowToUser`
+- `/preferences` now reads/writes the `preferences` JSONB column in DB mode
+- JSON fallback preserved from the prior file-based implementation
+
+### Verification
+
+- `node --check backend/scripts/seed-users-db.js` ✅
+- `node --check backend/routes/picks.js` ✅
+- `node --check backend/jobs/gradePicksJob.js` ✅
+- `node --check backend/routes/auth.js` ✅
+
+### Additional confirmation
+
+- `backend/scripts/seed-users-db.js` exists ✅
+- `gradePicksJob.js` still contains:
+  - `computeGrade(...)` ✅
+  - `fetchBoxForGrading(...)` ✅
+  - `module.exports = { gradePendingPicks }` ✅

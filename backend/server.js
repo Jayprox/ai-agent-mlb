@@ -40,7 +40,10 @@ app.use("/api/linescore", require("./routes/linescore")); // MLB Stats: live sco
 app.use("/api/boxscore",    require("./routes/boxscore"));    // MLB Stats: full game boxscore for live + final games
 app.use("/api/stat-splits", require("./routes/statSplits")); // MLB Stats: home/away + vs L/R + day/night splits
 app.use("/api/trends",   require("./routes/trends"));    // Anthropic: AI-generated bettor trend summary per game
+app.use("/api/card-summary", require("./routes/cardSummary")); // Hybrid AI one-line rewrites for Board / Model cards
 app.use("/api/odds",         require("./routes/odds"));         // Odds API: h2h + totals + spreads for all MLB games (shared 20-min cache)
+app.use("/api/polymarket",   require("./routes/polymarket"));   // Public Polymarket Gamma API: MLB win probabilities
+app.use("/api/prediction-markets", require("./routes/predictionMarkets"));
 app.use("/api/props",        require("./routes/props"));        // Anthropic: AI-generated prop recommendations per game
 app.use("/api/player-props", require("./routes/playerProps")); // Odds API: sportsbook player prop lines per game (shared 10-min cache)
 app.use("/api/team-stats", require("./routes/teamStats"));
@@ -119,6 +122,18 @@ app.get("/api/admin/jobs/resolve-lab-calibration", async (req, res) => {
     return res.json({ ok: true, ...result });
   } catch (err) {
     return res.status(500).json({ error: "resolve-lab-calibration failed", detail: err.message });
+  }
+});
+
+app.get("/api/admin/jobs/refresh-umpire-data", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    const result = await require("./jobs/refreshUmpireDataJob").refreshUmpireData();
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ error: "refresh-umpire-data failed", detail: err.message });
   }
 });
 

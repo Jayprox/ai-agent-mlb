@@ -6,6 +6,7 @@ const {
 } = require("./snapshotJobs");
 const { gradePendingPicks } = require("./gradePicksJob");
 const { resolveLabCalibration } = require("./resolveLabCalibrationJob");
+const { refreshUmpireData } = require("./refreshUmpireDataJob");
 const { warmCache } = require("./warmCache");
 const { regenerateDailyCard } = require("../routes/dailyCard");
 
@@ -116,6 +117,9 @@ function startScheduler() {
 
   // Resolve Lab calibration entries nightly at 4:30 AM Honolulu
   cron.schedule("30 4 * * *", () => resolveLabCalibration(), { timezone: "Pacific/Honolulu" });
+
+  // Refresh UmpScorecards season aggregates every Monday at 3 AM Honolulu
+  cron.schedule("0 3 * * 1", () => refreshUmpireData(), { timezone: "Pacific/Honolulu" });
 
   // Pre-warm in-memory cache every 2 hours from 9 AM – 11 PM ET
   // Keeps data hot so the first user to open each game hits cache, not cold fetches
