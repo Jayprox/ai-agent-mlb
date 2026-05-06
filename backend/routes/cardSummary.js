@@ -61,8 +61,12 @@ async function generateWithAnthropic(cards) {
     temperature: 0.2,
     system:
       "You rewrite structured MLB betting card factors into one factual sentence per card. " +
-      "Use only the supplied information. Do not invent stats, teams, or cautions. " +
-      "Keep each sentence between 8 and 16 words when possible. No hype, no emojis, no bullet points. " +
+      "Use only the supplied information. Do not invent stats, teams, or players. " +
+      "When a matchup object is provided, incorporate one specific H2H angle: " +
+      "the batter's split vs pitcher handedness (batterVsHand.avg or ops), or the batter's " +
+      "average vs the pitcher's primary pitch type (batterVsPitches). " +
+      "Example: 'Piñango bats .378 vs LHP and Rodriguez leans heavily on the slider.' " +
+      "Keep each sentence between 10 and 20 words. No hype, no emojis, no bullet points. " +
       "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}",
     messages: [
       {
@@ -74,6 +78,7 @@ async function generateWithAnthropic(cards) {
             lean: card.lean,
             positives: card.positives ?? [],
             caution: card.caution ?? null,
+            matchup: card.matchup ?? null,
           })),
         }),
       },
@@ -95,8 +100,12 @@ async function generateWithOpenAI(cards) {
         role: "system",
         content:
           "You rewrite structured MLB betting card factors into one factual sentence per card. " +
-          "Use only the supplied information. Do not invent stats, teams, or cautions. " +
-          "Keep each sentence between 8 and 16 words when possible. No hype. " +
+          "Use only the supplied information. Do not invent stats, teams, or players. " +
+          "When a matchup object is provided, incorporate one specific H2H angle: " +
+          "the batter's split vs pitcher handedness (batterVsHand.avg or ops), or the batter's " +
+          "average vs the pitcher's primary pitch type (batterVsPitches). " +
+          "Example: 'Piñango bats .378 vs LHP and Rodriguez leans heavily on the slider.' " +
+          "Keep each sentence between 10 and 20 words. No hype, no emojis, no bullet points. " +
           "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}",
       },
       {
@@ -108,6 +117,7 @@ async function generateWithOpenAI(cards) {
             lean: card.lean,
             positives: card.positives ?? [],
             caution: card.caution ?? null,
+            matchup: card.matchup ?? null,
           })),
         }),
       },
@@ -138,6 +148,7 @@ router.post("/", async (req, res) => {
       lean: card.lean ?? "",
       positives: Array.isArray(card.positives) ? card.positives.slice(0, 3) : [],
       caution: card.caution ?? null,
+      matchup: card.matchup ?? null,
     };
     const hash = crypto.createHash("md5").update(JSON.stringify(payload)).digest("hex");
     const cacheKey = `card-summary:${hash}`;

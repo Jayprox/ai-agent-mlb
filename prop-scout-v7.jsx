@@ -523,6 +523,7 @@ const buildBoardSummaryRequest = (c, type) => {
     lean: c?.leanAbbr ?? c?.lean ?? "",
     positives,
     caution,
+    matchup: c?.matchup ?? null,
   };
 };
 
@@ -1711,7 +1712,7 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
     const sgGameLabel = `${sg.away?.abbr ?? "?"} @ ${sg.home?.abbr ?? "?"}`;
     const sgLu        = liveLineups[sg.gamePk];
     const sgConfirmed  = sgLu?.confirmed ?? false;
-    const sgHasLineup  = sgConfirmed;
+    const sgHasLineup  = sgConfirmed || sgLu?.source === "roster";
     const sgWx         = liveWeather[sg.gamePk];
     const sgPf        = PARK_FACTORS[sg.home?.abbr] ?? NEUTRAL_PARK;
 
@@ -2123,7 +2124,7 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
   const candidates = [];
   (liveSlate ?? []).forEach(game => {
     const lu = liveLineups[game.gamePk];
-    if (!lu?.confirmed) return; // skip games without confirmed lineup
+    if (!lu?.confirmed && lu?.source !== "roster") return;
     const pf = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
     const wx = liveWeather[game.gamePk];
     const wxFav = !!(wx?.hrFavorable);
@@ -2168,6 +2169,7 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
           hand:         b.hand,
           order:        b.order,
           team:         side === "away" ? (game.away?.abbr ?? "?") : (game.home?.abbr ?? "?"),
+          lineupState:  lu.confirmed ? "confirmed" : "roster",
           gamePk:       game.gamePk,
           gameLabel:    `${game.away?.abbr ?? "?"} @ ${game.home?.abbr ?? "?"}`,
           gameTime:     game.gameTime ?? null,
@@ -2183,6 +2185,35 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
           ops:          hlog?.ops ?? "—",
           hitRate:      hlog?.hitRate ?? [],
           propLine,
+          matchup: {
+            batterHand: b.hand ?? null,
+            pitcherHand,
+            batterVsHand: (() => {
+              const split = pitcherHand === "L" ? sd?.vsL : sd?.vsR;
+              if (!split) return null;
+              return { avg: split.avg ?? null, ops: split.ops ?? null };
+            })(),
+            pitcherTopPitches: (facingPitcher?.arsenal ?? [])
+              .filter(a => a.usage != null)
+              .sort((a, b_) => (b_.usage ?? 0) - (a.usage ?? 0))
+              .slice(0, 2)
+              .map(a => ({ abbr: a.abbr, name: a.name ?? a.abbr, usage: a.usage })),
+            batterVsPitches: (() => {
+              const vp = b.vsPitches;
+              if (!vp) return null;
+              const top2Abbrs = (facingPitcher?.arsenal ?? [])
+                .filter(a => a.usage != null)
+                .sort((a, b_) => (b_.usage ?? 0) - (a.usage ?? 0))
+                .slice(0, 2)
+                .map(a => a.abbr);
+              const result = {};
+              top2Abbrs.forEach(abbr => {
+                const entry = vp[abbr];
+                if (entry != null) result[abbr] = typeof entry === "string" ? entry : (entry.avg ?? null);
+              });
+              return Object.keys(result).length ? result : null;
+            })(),
+          },
         });
       });
     });
@@ -4157,27 +4188,31 @@ export default function App() {
     liveSlate.forEach(g => {
       const status = g.status ?? "";
       const isLive  = status === "In Progress" || status === "Warmup";
-      const isFinal = status === "Final" || status === "Game Over";
+      const ls = liveScores[g.gamePk];
+      const linescoreFinished = ls && ls.inning === null && ((ls.awayScore ?? 0) > 0 || (ls.homeScore ?? 0) > 0);
+      const isFinal = status === "Final" || status === "Game Over" || linescoreFinished;
       if (!isLive && !isFinal) return;
       if (isFinal && boardBoxFetched.current.has(g.gamePk)) return; // don't re-fetch finals
       apiFetch(`/api/boxscore/${g.gamePk}`)
         .then(box => {
           if (!box?.batting) return;
-          boardBoxFetched.current.add(g.gamePk);
+          setLiveBoxscores(prev => ({ ...prev, [g.gamePk]: box }));
+          if (box?.isFinal) boardBoxFetched.current.add(g.gamePk);
+          const resultLive = !box?.isFinal && isLive;
           const results = {};
           ["away", "home"].forEach(side => {
             (box.batting?.[side] ?? []).forEach(b => {
-              if (b?.id) results[b.id] = { h: b.h ?? 0, hr: b.hr ?? 0, ab: b.ab ?? 0, live: isLive };
+              if (b?.id) results[b.id] = { h: b.h ?? 0, hr: b.hr ?? 0, ab: b.ab ?? 0, live: resultLive };
             });
             (box.pitching?.[side] ?? []).forEach(p => {
-              if (p?.id) results[p.id] = { ...(results[p.id] ?? {}), k: p.k ?? 0, outs: parseIpToOuts(p.ip), ip: p.ip ?? "0.0", live: isLive };
+              if (p?.id) results[p.id] = { ...(results[p.id] ?? {}), k: p.k ?? 0, outs: parseIpToOuts(p.ip), ip: p.ip ?? "0.0", live: resultLive };
             });
           });
           setLiveBoardResults(prev => ({ ...prev, ...results }));
         })
         .catch(() => {});
     });
-  }, [view, liveSlate]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, liveSlate, liveScores]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch lineups, umpire, + pitcher stats when a live game card opens
   useEffect(() => {
@@ -4674,7 +4709,7 @@ export default function App() {
     pending.forEach(req => aiSummaryInFlight.current.add(req.id));
     try {
       const data = await apiMutate("/api/card-summary", "POST", {
-        cards: pending.map(({ id, market, lean, positives, caution }) => ({ id, market, lean, positives, caution })),
+        cards: pending.map(({ id, market, lean, positives, caution, matchup }) => ({ id, market, lean, positives, caution, matchup: matchup ?? null })),
       });
       setAiCardSummaries(prev => ({
         ...prev,
@@ -8212,7 +8247,7 @@ export default function App() {
                 ? `${game.away.abbr} Lineup vs ${facingPitcher.name}`
                 : `${game.home.abbr} Lineup vs ${facingPitcher.name}`);
             const lineupConfirmed = liveLineups[gamePkKey]?.confirmed === true;
-            const displayLineup = lineupConfirmed ? lineup : [];
+            const displayLineup = (lineupConfirmed || isRosterFallback) ? lineup : [];
 
             return (<>
               {/* Toggle */}
@@ -8221,6 +8256,7 @@ export default function App() {
                   <button key={side} onClick={() => { setLineupSide(side); setExpandedBatter(null); }} style={{ flex: 1, background: lineupSide === side ? "#22c55e" : "#161827", border: `1px solid ${lineupSide === side ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: "7px", fontSize: 11, color: lineupSide === side ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
                     {side === "away" ? `${game.away.abbr} Batting` : `${game.home.abbr} Batting`}
                     {lineupConfirmed && <span style={{ marginLeft: 5, fontSize: 8, fontWeight: 700, color: lineupSide === side ? "#000" : "#22c55e", background: lineupSide === side ? "rgba(0,0,0,0.2)" : "rgba(34,197,94,0.15)", borderRadius: 3, padding: "1px 4px", verticalAlign: "middle" }}>LIVE</span>}
+                    {!lineupConfirmed && isRosterFallback && <span style={{ marginLeft: 5, fontSize: 8, fontWeight: 700, color: lineupSide === side ? "#000" : "#6b7280", background: lineupSide === side ? "rgba(0,0,0,0.2)" : "rgba(107,114,128,0.15)", borderRadius: 3, padding: "1px 4px", verticalAlign: "middle" }}>ROSTER</span>}
                   </button>
                 ))}
               </div>
@@ -8228,28 +8264,35 @@ export default function App() {
               <SLabel>{label}</SLabel>
 
               {/* Lineup vulnerability summary */}
-              <Card style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Lineup Vulnerability vs {facingPitcher.name}</div>
-                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                  {facingPitcher.arsenal.map(a => {
-                    const weakCount = displayLineup.filter(b => {
-                      const avg = b.vsPitches?.[a.abbr];
-                      return avg && parseFloat(avg) < 0.22;
-                    }).length;
-                    const strongCount = displayLineup.filter(b => {
-                      const avg = b.vsPitches?.[a.abbr];
-                      return avg && parseFloat(avg) >= 0.28;
-                    }).length;
-                    const color = weakCount >= 5 ? "#22c55e" : strongCount >= 5 ? "#ef4444" : "#f59e0b";
-                    return (
-                      <div key={a.abbr} style={{ background: `${color}18`, border: `1px solid ${color}44`, borderRadius: 6, padding: "4px 8px", textAlign: "center", minWidth: 44 }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: a.color }}>{a.abbr}</div>
-                        <div style={{ fontSize: 9, color, marginTop: 1 }}>{weakCount >= 5 ? `${weakCount} weak` : strongCount >= 5 ? `${strongCount} handle` : "mixed"}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </Card>
+              {lineupConfirmed ? (
+                <Card style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Lineup Vulnerability vs {facingPitcher.name}</div>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {facingPitcher.arsenal.map(a => {
+                      const weakCount = displayLineup.filter(b => {
+                        const avg = b.vsPitches?.[a.abbr];
+                        return avg && parseFloat(avg) < 0.22;
+                      }).length;
+                      const strongCount = displayLineup.filter(b => {
+                        const avg = b.vsPitches?.[a.abbr];
+                        return avg && parseFloat(avg) >= 0.28;
+                      }).length;
+                      const color = weakCount >= 5 ? "#22c55e" : strongCount >= 5 ? "#ef4444" : "#f59e0b";
+                      return (
+                        <div key={a.abbr} style={{ background: `${color}18`, border: `1px solid ${color}44`, borderRadius: 6, padding: "4px 8px", textAlign: "center", minWidth: 44 }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: a.color }}>{a.abbr}</div>
+                          <div style={{ fontSize: 9, color, marginTop: 1 }}>{weakCount >= 5 ? `${weakCount} weak` : strongCount >= 5 ? `${strongCount} handle` : "mixed"}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              ) : isRosterFallback ? (
+                <Card style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 10, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Lineup Vulnerability vs {facingPitcher.name}</div>
+                  <div style={{ fontSize: 10, color: "#4b5563", fontStyle: "italic" }}>Available once lineup is confirmed · Batting order TBD</div>
+                </Card>
+              ) : null}
 
               {/* Batter rows */}
               <Card style={{ padding: "8px" }}>
@@ -10925,8 +10968,7 @@ export default function App() {
                           const confirmedCount = Object.values(liveLineups).filter(lu => lu?.confirmed).length;
                           const totalGames = (activeSlate ?? []).length;
                           if (totalGames === 0) return "Loading today's slate…";
-                          if (confirmedCount === 0) return "Waiting for confirmed lineups — check back closer to first pitch";
-                          return `${confirmedCount} lineup${confirmedCount > 1 ? "s" : ""} confirmed — loading player stats…`;
+                          return !activeSlate?.length ? "Loading today's slate…" : "Loading player stats — check back shortly";
                         })()}
                   </div>
                 </Card>
@@ -11122,7 +11164,7 @@ export default function App() {
                         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                           <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
                           <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
-                          <span style={{ fontSize: 9, color: "#6b7280" }}>#{c.order}</span>
+                          {c.order != null && <span style={{ fontSize: 9, color: "#6b7280" }}>#{c.order}</span>}
                           {boardGameStatus === "LIVE" && (
                             <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
                               <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
@@ -11132,6 +11174,16 @@ export default function App() {
                           {boardGameStatus === "FINAL" && (
                             <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "1px 6px" }}>
                               <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
+                            </div>
+                          )}
+                          {boardGameStatus !== "LIVE" && boardGameStatus !== "FINAL" && c.lineupState === "confirmed" && (
+                            <div style={{ background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 5, padding: "1px 6px" }}>
+                              <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", fontFamily: "monospace", letterSpacing: "0.05em" }}>✓ CONFIRMED</span>
+                            </div>
+                          )}
+                          {boardGameStatus !== "LIVE" && boardGameStatus !== "FINAL" && c.lineupState === "roster" && (
+                            <div style={{ background: "rgba(107,114,128,0.08)", border: "1px solid rgba(107,114,128,0.2)", borderRadius: 5, padding: "1px 6px" }}>
+                              <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>LINEUP TBD</span>
                             </div>
                           )}
                           {/* Today's result badge */}
