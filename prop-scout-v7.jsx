@@ -3815,6 +3815,14 @@ export default function App() {
     setTimeout(() => setIsRefreshing(false), 2000);
   };
 
+  const getBoardGameStatus = (gamePk) => {
+    const game = (activeSlate ?? []).find(g => (g.gamePk ?? g.id) === gamePk);
+    const status = game?.status ?? "";
+    if (status === "In Progress" || status === "Warmup") return "LIVE";
+    if (status === "Final" || status === "Game Over") return "FINAL";
+    return null;
+  };
+
   const handleLogout = () => {
     localStorage.removeItem("propscout_token");
     _authToken = null;
@@ -10293,14 +10301,6 @@ export default function App() {
 
           const scoreColor = (s) =>
             s >= 70 ? "#22c55e" : s >= 55 ? "#f59e0b" : s >= 40 ? "#ef4444" : "#6b7280";
-
-          const getBoardGameStatus = (gamePk) => {
-            const game = (activeSlate ?? []).find(g => (g.gamePk ?? g.id) === gamePk);
-            const status = game?.status ?? "";
-            if (status === "In Progress" || status === "Warmup") return "LIVE";
-            if (status === "Final" || status === "Game Over") return "FINAL";
-            return null;
-          };
 
           const boardOutcome = (type, item) => {
             const id = item.id;
