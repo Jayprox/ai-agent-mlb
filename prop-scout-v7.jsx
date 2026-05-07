@@ -3886,7 +3886,11 @@ export default function App() {
       liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
       liveLineups, liveWeather, liveHittingLog, liveStatSplits
     );
-    if (!payload.length) { setAiBoardLoading(false); return; }
+    if (!payload.length) {
+      setAiBoardData([]);
+      setAiBoardLoading(false);
+      return;
+    }
     const postPayload = payload.map(({ _candidate, ...rest }) => rest);
     apiMutate("/api/ai-board/score", "POST", { candidates: postPayload })
       .then((data) => {
@@ -11175,6 +11179,12 @@ export default function App() {
 
               {!aiBoardLoading && !aiBoardData && !liveSlate?.length && (
                 <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>No slate available.</div>
+              )}
+
+              {!aiBoardLoading && aiBoardData === null && liveSlate?.length > 0 && (
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
+                  Preparing AI Board candidates…
+                </div>
               )}
 
               {!aiBoardLoading && aiBoardData?.length > 0 && (
