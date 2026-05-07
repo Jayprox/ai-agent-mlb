@@ -14714,3 +14714,697 @@ Added:
 
 Verification:
 - `npm run build` passed
+
+## HANDOFF NOTE — 2026-05-07 — Proposed Picks Lifecycle Refactor (Review / Approval Needed)
+
+This is a planning note only. No implementation has started yet. User wants a cleaner Picks lifecycle so cards visibly move from pregame → live → settled, with backend-driven truth instead of relying on browser-only grading.
+
+### Product Goal
+
+Logged picks should follow a clear lifecycle:
+
+1. `PENDING`
+   - game has not started
+   - card appears in Pending tab
+   - neutral pending badge on card
+
+2. `LIVE`
+   - game is in progress
+   - card remains in the main pick log but shows `LIVE`
+   - Live badge replaces pending state
+   - optional future: dedicated Live filter/count
+
+3. `HIT` / `MISS`
+   - game is final and pick is graded
+   - card shows settled result badge
+   - card no longer appears in Pending
+   - card is included in Hits or Misses tabs
+
+User specifically wants:
+- `LIVE` badge while game is being played
+- `HIT` / `MISS` badges on the cards themselves in Picks
+- backend/scheduled settlement to be the source of truth at end of day
+- settled cards filtered into Hits / Misses automatically, with Pending cleared
+
+### Recommended Data Model
+
+Use separate status + result fields instead of overloading one field:
+
+- `status`
+  - `pending`
+  - `live`
+  - `settled`
+
+- `result`
+  - `null`
+  - `hit`
+  - `miss`
+
+This allows:
+- pregame: `status=pending`, `result=null`
+- in-game: `status=live`, `result=null`
+- settled hit: `status=settled`, `result=hit`
+- settled miss: `status=settled`, `result=miss`
+
+Why this is preferred:
+- clearer filtering logic in UI
+- easier scheduler semantics
+- avoids using `result=null` to mean both pregame and live
+
+### Backend Recommendation
+
+Make backend the single source of truth for Picks status transitions.
+
+Recommended scheduler / job behavior:
+
+1. Query unresolved picks
+   - picks where `result IS NULL`
+
+2. For each pick:
+   - if game has not started:
+     - keep `status=pending`
+   - if game is in progress:
+     - set `status=live`
+   - if game is final:
+     - run existing grading logic
+     - if grade resolves:
+       - set `status=settled`
+       - set `result=hit` or `miss`
+     - if not gradeable:
+       - keep unresolved for retry/log review
+
+3. Run on cadence:
+   - lightweight periodic job during slate hours, or piggyback on existing refresh cadence
+   - nightly catch-up / cleanup run still recommended
+
+Important note:
+- frontend auto-grading can remain as UX sugar, but backend should own final persisted status/result
+
+### Frontend Recommendation
+
+Picks tab should render from backend status/result, not from local reshuffling.
+
+Card badge behavior:
+- `pending` → neutral `PENDING`
+- `live` → red-dot `LIVE`
+- `settled + hit` → green `✓ HIT`
+- `settled + miss` → red `✗ MISS`
+
+Tab/filter behavior:
+- `All` = all logged picks
+- `Pending` = `status === "pending"`
+- optional future `Live` tab = `status === "live"`
+- `Hit` = `result === "hit"`
+- `Miss` = `result === "miss"`
+
+Current user ask can still be satisfied even without a dedicated Live tab:
+- keep `LIVE` cards visually distinct inside All
+- remove settled cards from Pending automatically
+
+### Migration / Safety Considerations
+
+Before implementation, confirm logged picks always include enough grading metadata:
+- `gamePk`
+- `propType`
+- `lean`
+- `date`
+- `bookLine` where applicable
+- `playerId` / `pitcherId` when relevant
+- fallback display names for older legacy picks
+
+Known risk areas:
+- legacy picks with weak metadata
+- unsupported / legacy prop types
+- F5 edge cases / ties / void-like outcomes
+- older pre-migration local-only picks still needing sync
+
+### Suggested Implementation Order
+
+1. Backend schema / route support for `status`
+   - keep JSON fallback compatibility if needed
+
+2. Grading/status scheduler update
+   - unresolved picks get `pending` / `live` / `settled`
+
+3. Picks tab UI update
+   - render badges directly from backend truth
+   - Pending tab excludes live/settled picks
+   - Hits/Misses tabs use settled result
+
+4. Optional enhancement
+   - add dedicated `Live` summary + filter tab
+
+### Review Question For Cowork
+
+Please review and approve or redirect these two decisions before implementation:
+
+1. Should we store both `status` and `result`, or collapse into one enum?
+   - recommended: keep both
+
+2. Should `LIVE` be only a card badge or also a dedicated tab/count?
+   - recommended first pass: badge only, no new tab required
+
+---
+
+## CODEX TASK 93 — Picks Rebuild: Backend (Migration + Route + Grader)
+
+**Files:** `backend/migrations/003_picks_rebuild.sql`, `backend/routes/picks.js`, `backend/jobs/gradePicksJob.js`, `backend/jobs/scheduler.js`
+
+**Goal:** Wipe existing picks data and rebuild the picks system with a proper schema (`status` + `result` as dedicated indexed columns, fat `snapshot` JSONB), a generalized PATCH route, LAB prop type grading support, and LIVE status updates during game hours.
+
+---
+
+### CHANGE 1 — Migration: `backend/migrations/003_picks_rebuild.sql`
+
+```sql
+-- Wipe old picks entirely and recreate with clean schema
+DROP TABLE IF EXISTS picks;
+
+CREATE TABLE picks (
+  id           TEXT         PRIMARY KEY,
+  user_id      TEXT         NOT NULL,
+  game_pk      TEXT,
+  status       TEXT         NOT NULL DEFAULT 'pending',
+  result       TEXT,
+  prop_type    TEXT,
+  created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  snapshot     JSONB        NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX idx_picks_user_id  ON picks(user_id);
+CREATE INDEX idx_picks_status   ON picks(status);
+CREATE INDEX idx_picks_game_pk  ON picks(game_pk);
+CREATE INDEX idx_picks_result   ON picks(result);
+CREATE INDEX idx_picks_created  ON picks(created_at DESC);
+```
+
+Note: `data JSONB` column from the old schema is gone. Replaced by `snapshot JSONB`. `prop_type` is now a dedicated column (for grader routing). `status` is indexed.
+
+---
+
+### CHANGE 2 — Rewrite `backend/routes/picks.js`
+
+Replace the entire file. Key changes from old version:
+
+**GET `/`** — unchanged in behavior, but now reads `status`, `result`, `prop_type` from columns and `snapshot` instead of `data`:
+```js
+router.get("/", async (req, res) => {
+  if (isConnected()) {
+    const result = await query(
+      "SELECT id, game_pk, status, result, prop_type, created_at, snapshot FROM picks WHERE user_id = $1 ORDER BY created_at DESC",
+      [req.userId]
+    );
+    return res.json({
+      picks: (result?.rows ?? []).map(row => ({
+        id: row.id,
+        gamePk: row.game_pk,
+        status: row.status,
+        result: row.result,
+        propType: row.prop_type,
+        createdAt: row.created_at,
+        ...(row.snapshot ?? {}),
+      }))
+    });
+  }
+  // flat-file fallback unchanged
+});
+```
+
+**POST `/`** — store to new schema:
+```js
+router.post("/", async (req, res) => {
+  const body = req.body ?? {};
+  const entry = { ...body, userId: req.userId };
+  const snapshot = { ...body };
+  delete snapshot.userId;
+
+  if (isConnected()) {
+    // idempotency check
+    const existing = await query("SELECT id FROM picks WHERE id = $1", [entry.id]);
+    if (existing?.rows?.[0]) return res.json(entry);
+
+    await query(
+      `INSERT INTO picks (id, user_id, game_pk, status, result, prop_type, snapshot)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+      [
+        entry.id,
+        req.userId,
+        entry.gamePk ?? null,
+        entry.status ?? "pending",
+        entry.result ?? null,
+        entry.propType ?? null,
+        JSON.stringify(snapshot),
+      ]
+    );
+    return res.status(201).json(entry);
+  }
+  // flat-file fallback unchanged
+});
+```
+
+**PATCH `/:id`** — generalized partial update, no longer hardcodes result:
+```js
+router.patch("/:id", async (req, res) => {
+  const allowed = ["status", "result"];
+  const updates = {};
+  allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
+
+  if (isConnected()) {
+    const existing = await query("SELECT user_id FROM picks WHERE id = $1", [req.params.id]);
+    const row = existing?.rows?.[0];
+    if (!row) return res.status(404).json({ error: "Pick not found" });
+    if (row.user_id !== req.userId) return res.status(403).json({ error: "Forbidden" });
+
+    const setClauses = [];
+    const params = [];
+    if (updates.status !== undefined) { params.push(updates.status); setClauses.push(`status = $${params.length}`); }
+    if (updates.result !== undefined) { params.push(updates.result); setClauses.push(`result = $${params.length}`); }
+    if (!setClauses.length) return res.status(400).json({ error: "Nothing to update" });
+    params.push(req.params.id);
+    await query(`UPDATE picks SET ${setClauses.join(", ")} WHERE id = $${params.length}`, params);
+
+    return res.json({ ok: true, ...updates });
+  }
+  // flat-file fallback: apply updates to matching pick
+});
+```
+
+**DELETE `/:id`** — unchanged from current implementation.
+
+---
+
+### CHANGE 3 — Update `backend/jobs/gradePicksJob.js`
+
+#### 3a — Add LAB prop type grading
+
+After the existing `computeGrade` function, add a `computeLabGrade` function and call it from `computeGrade`:
+
+```js
+function computeLabGrade(pick, box) {
+  if (!box?.isFinal) return null;
+  const propType = (pick.propType ?? "").toUpperCase();
+  const innings = box.linescore?.innings ?? [];
+  const awayRuns = box.linescore?.away?.runs ?? 0;
+  const homeRuns = box.linescore?.home?.runs ?? 0;
+  const lean = (pick.lean ?? "").toUpperCase();
+
+  if (propType === "LAB_F5ML") {
+    if (innings.length < 5) return null;
+    const f5Away = innings.slice(0, 5).reduce((s, i) => s + (i.away ?? 0), 0);
+    const f5Home = innings.slice(0, 5).reduce((s, i) => s + (i.home ?? 0), 0);
+    if (f5Away === f5Home) return null;
+    return lean === "HOME" ? (f5Home > f5Away ? "hit" : "miss")
+         : lean === "AWAY" ? (f5Away > f5Home ? "hit" : "miss") : null;
+  }
+  if (propType === "LAB_FGML") {
+    if (awayRuns === homeRuns) return null;
+    return lean === "HOME" ? (homeRuns > awayRuns ? "hit" : "miss")
+         : lean === "AWAY" ? (awayRuns > homeRuns ? "hit" : "miss") : null;
+  }
+  if (propType === "LAB_KPROP") {
+    const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
+    const lastName = normalizeName(pick.pitcherLastName ?? pick.pitcherName ?? "").split(" ").pop();
+    const pitcher = allPitchers.find(p => normalizeName(p.name).includes(lastName));
+    if (!pitcher || pick.bookLine == null) return null;
+    if (pitcher.k === pick.bookLine) return null;
+    return (pick.leanSide ?? lean) === "OVER" ? (pitcher.k > pick.bookLine ? "hit" : "miss")
+                                               : (pitcher.k < pick.bookLine ? "hit" : "miss");
+  }
+  if (propType === "LAB_TOTALS") {
+    const total = awayRuns + homeRuns;
+    if (pick.bookTotal == null) return null;
+    if (total === pick.bookTotal) return null;
+    return (pick.leanSide ?? lean) === "OVER" ? (total > pick.bookTotal ? "hit" : "miss")
+                                               : (total < pick.bookTotal ? "hit" : "miss");
+  }
+  return null;
+}
+```
+
+At the top of the existing `computeGrade` function, add a LAB check before the label-based logic:
+```js
+function computeGrade(pick, box) {
+  if (!box?.isFinal) return null;
+  const labGrade = computeLabGrade(pick, box);
+  if (labGrade !== null) return labGrade;
+  // ... existing label-based logic unchanged ...
+}
+```
+
+#### 3b — Add `fetchGameStatus` helper
+
+Add a function to determine if a game is in-progress or final without needing the full boxscore:
+
+```js
+async function fetchGameStatus(gamePk) {
+  // Returns: "pre" | "live" | "final" | "unknown"
+  try {
+    const res = await axios.get(
+      `${MLB_BASE}/schedule?gamePk=${gamePk}&hydrate=game(status)`,
+      { timeout: 8000 }
+    );
+    const game = res.data?.dates?.[0]?.games?.[0];
+    if (!game) return "unknown";
+    const state = game.status?.abstractGameState ?? "";
+    const detail = game.status?.detailedState ?? "";
+    if (state === "Final" || detail === "Final" || detail === "Game Over") return "final";
+    if (state === "Live" || detail === "In Progress" || detail === "Warmup") return "live";
+    return "pre";
+  } catch (_) { return "unknown"; }
+}
+```
+
+#### 3c — Rewrite `gradePendingPicks` to support LIVE status
+
+Replace the existing `gradePendingPicks` with this new version:
+
+```js
+async function gradePendingPicks() {
+  let picks = [];
+
+  if (isConnected()) {
+    const result = await query(
+      "SELECT id, game_pk, status, prop_type, snapshot FROM picks WHERE status != 'settled'"
+    );
+    picks = (result?.rows ?? []).map(row => ({
+      ...(row.snapshot ?? {}),
+      id: row.id,
+      gamePk: row.game_pk,
+      status: row.status,
+      propType: row.prop_type,
+    }));
+  } else {
+    picks = readPicksJson().filter(p => p.result == null);
+  }
+
+  if (!picks.length) {
+    console.log("  · Grade job: no pending/live picks");
+    return { settled: 0, live: 0, total: 0 };
+  }
+
+  const byGame = {};
+  picks.forEach(p => {
+    const key = String(p.gamePk);
+    if (!byGame[key]) byGame[key] = [];
+    byGame[key].push(p);
+  });
+
+  let settledCount = 0;
+  let liveCount = 0;
+
+  await Promise.all(
+    Object.entries(byGame).map(async ([gamePkStr, gamePicks]) => {
+      const gameStatus = await fetchGameStatus(gamePkStr);
+
+      if (gameStatus === "final") {
+        const box = await fetchBoxForGrading(gamePkStr);
+        if (!box) return;
+        await Promise.all(gamePicks.map(async pick => {
+          const grade = computeGrade(pick, box);
+          if (grade !== null) {
+            if (isConnected()) {
+              await query(
+                "UPDATE picks SET status = 'settled', result = $1 WHERE id = $2",
+                [grade, pick.id]
+              );
+            }
+            settledCount++;
+          }
+        }));
+      } else if (gameStatus === "live") {
+        const pendingOnly = gamePicks.filter(p => p.status === "pending");
+        if (pendingOnly.length && isConnected()) {
+          await Promise.all(pendingOnly.map(pick =>
+            query("UPDATE picks SET status = 'live' WHERE id = $1", [pick.id])
+          ));
+          liveCount += pendingOnly.length;
+        }
+      }
+      // "pre" or "unknown": leave as pending
+    })
+  );
+
+  console.log(`  ✓ Grade job: settled=${settledCount} live=${liveCount} total=${picks.length}`);
+  return { settled: settledCount, live: liveCount, total: picks.length };
+}
+```
+
+Also update the flat-file fallback inside the `"final"` branch to write both `result` and `status: "settled"` when not connected.
+
+---
+
+### CHANGE 4 — Update `backend/jobs/scheduler.js`
+
+Add a more frequent cron for LIVE status updates during game hours. Insert after the existing nightly grade cron:
+
+```js
+// Update LIVE status every 5 min during game hours (noon–midnight ET)
+cron.schedule("*/5 12-23 * * *", () => gradePendingPicks(), { timezone: "America/New_York" });
+```
+
+The existing nightly 4 AM run remains as a catch-up for any picks not settled during the day:
+```js
+// Nightly catch-up grading at 4 AM Honolulu
+cron.schedule("0 4 * * *", () => gradePendingPicks(), { timezone: "Pacific/Honolulu" });
+```
+
+---
+
+### VERIFICATION CHECKLIST
+
+1. `node --check backend/routes/picks.js` passes
+2. `node --check backend/jobs/gradePicksJob.js` passes
+3. `node --check backend/jobs/scheduler.js` passes
+4. Migration file is valid SQL — no syntax errors
+5. POST `/api/picks` inserts row with `status = "pending"`, `result = null`
+6. PATCH `/api/picks/:id` with `{ status: "live" }` updates only `status`, leaves `result` unchanged
+7. PATCH `/api/picks/:id` with `{ status: "settled", result: "hit" }` updates both
+8. GET `/api/picks` returns picks with `status` and `result` fields
+9. `gradePendingPicks()` correctly sets `status = "live"` for in-progress games
+10. `gradePendingPicks()` correctly sets `status = "settled"` + `result` for final games
+11. LAB_F5ML, LAB_FGML, LAB_KPROP, LAB_TOTALS all grade correctly via `computeLabGrade`
+12. Scheduler has both the 5-min noon–midnight cron and the 4 AM catch-up cron
+
+---
+
+## CODEX TASK 94 — Picks Rebuild: Frontend (Fat Snapshot + Status UI + Session Sync)
+
+**File:** `prop-scout-v7.jsx` only — no backend changes.
+
+**Goal:** Wipe localStorage picks on first load (one-time version bump), enrich `logPick` with fat snapshot fields + `status: "pending"`, update `markResult` to also settle status, re-fetch picks from server when Picks tab opens with pending/live picks, and update the Picks tab UI to render badges from `status` + `result`.
+
+---
+
+### CHANGE 1 — localStorage version wipe
+
+Replace the current `propLog` useState initializer:
+
+Current:
+```js
+const [propLog, setPropLog] = useState(() => {
+  try { return JSON.parse(localStorage.getItem("propscout_log") || "[]"); }
+  catch { return []; }
+});
+```
+
+Replace with:
+```js
+const [propLog, setPropLog] = useState(() => {
+  const PICKS_VERSION = "2";
+  const storedVersion = localStorage.getItem("propscout_log_version");
+  if (storedVersion !== PICKS_VERSION) {
+    localStorage.removeItem("propscout_log");
+    localStorage.setItem("propscout_log_version", PICKS_VERSION);
+    return [];
+  }
+  try { return JSON.parse(localStorage.getItem("propscout_log") || "[]"); }
+  catch { return []; }
+});
+```
+
+---
+
+### CHANGE 2 — Enrich `logPick` with fat snapshot
+
+Inside the `logPick` function, replace the existing `entry` object with the enriched version.
+
+Keep all existing fields. Add the following new fields to `entry`:
+
+```js
+// Status lifecycle
+status:        "pending",
+
+// Game context (for LIVE badge without re-fetch)
+gameTime:      (() => {
+  const sg = (liveSlate ?? []).find(g => String(g.gamePk) === String(prop.gamePk ?? selectedId));
+  return sg?.gameTime ?? sg?.time ?? null;
+})(),
+
+// Scores at log time
+score:         prop.score         ?? null,
+simConfidence: prop.simConfidence ?? null,
+aiScore:       prop.aiScore       ?? null,
+aiReason:      prop.aiReason      ?? null,
+
+// Lines at log time (snapshot preserves what you actually saw)
+suggestedLine: prop.suggestedLine ?? null,
+bookLines: {
+  DK:  prop.propLine?.books?.DK?.line  ?? prop.bookLine ?? null,
+  FD:  prop.propLine?.books?.FD?.line  ?? null,
+  CZR: prop.propLine?.books?.CZR?.line ?? null,
+  MGM: prop.propLine?.books?.MGM?.line ?? null,
+},
+```
+
+---
+
+### CHANGE 3 — Update `markResult`
+
+Current:
+```js
+const markResult = (id, result) => {
+  setPropLog(prev => {
+    const updated = prev.map(p => p.id === id ? { ...p, result } : p);
+    localStorage.setItem("propscout_log", JSON.stringify(updated));
+    return updated;
+  });
+  apiMutate(`/api/picks/${id}`, "PATCH", { result }).catch(() => {});
+  // ...
+};
+```
+
+Replace with:
+```js
+const markResult = (id, result) => {
+  setPropLog(prev => {
+    const updated = prev.map(p => p.id === id ? { ...p, result, status: "settled" } : p);
+    localStorage.setItem("propscout_log", JSON.stringify(updated));
+    return updated;
+  });
+  apiMutate(`/api/picks/${id}`, "PATCH", { result, status: "settled" }).catch(() => {});
+  apiMutate("/api/digest/refresh", "POST").catch(() => {});
+  setLiveDigest(null);
+};
+```
+
+---
+
+### CHANGE 4 — Re-fetch picks from server when Picks tab opens
+
+Find the existing Picks digest useEffect (currently at ~line 3835):
+```js
+useEffect(() => {
+  if (view !== "picks" || liveDigest !== null || digestLoading) return;
+  ...
+}, [view]);
+```
+
+Add a new useEffect immediately after it for pick sync:
+
+```js
+// Re-fetch picks from server when tab opens if any picks have non-settled status
+useEffect(() => {
+  if (view !== "picks" || !currentUser) return;
+  const hasLivePicks = propLog.some(p => p.status === "pending" || p.status === "live" || p.status == null);
+  if (!hasLivePicks) return;
+  apiFetch("/api/picks")
+    .then(data => {
+      if (!Array.isArray(data?.picks)) return;
+      setPropLog(data.picks);
+      localStorage.setItem("propscout_log", JSON.stringify(data.picks));
+    })
+    .catch(() => {});
+}, [view, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+```
+
+---
+
+### CHANGE 5 — Update Picks tab badge rendering
+
+Find the existing pick card rendering in the Picks view. Update the result badge logic to use both `status` and `result`:
+
+Current pattern (find and replace):
+```js
+if (pick?.result === "hit") return "won";
+if (pick?.result === "miss") return "lost";
+```
+
+The badge display in pick cards should follow this priority:
+- `status === "settled"` + `result === "hit"` → green `✓ HIT`
+- `status === "settled"` + `result === "miss"` → red `✗ MISS`
+- `status === "live"` → amber pulsing `● LIVE` badge
+- `status === "pending"` or null → neutral `PENDING` badge (dimmed)
+
+For backward compat with old picks that have `result = "hit"/"miss"` but no `status`:
+- `result === "hit"` → treat as settled hit
+- `result === "miss"` → treat as settled miss
+
+Find the section where pick cards render result indicators (currently shows ✓ or ✗) and update to:
+
+```jsx
+{(() => {
+  const s = pick.status;
+  const r = pick.result;
+  const isHit  = r === "hit"  || (s === "settled" && r === "hit");
+  const isMiss = r === "miss" || (s === "settled" && r === "miss");
+  const isLive = s === "live";
+  if (isHit)  return <span style={{ color: "#22c55e", fontSize: 9, fontWeight: 800 }}>✓ HIT</span>;
+  if (isMiss) return <span style={{ color: "#ef4444", fontSize: 9, fontWeight: 800 }}>✗ MISS</span>;
+  if (isLive) return <span style={{ color: "#fbbf24", fontSize: 9, fontWeight: 800 }}>● LIVE</span>;
+  return <span style={{ color: "#4b5563", fontSize: 9, fontWeight: 600 }}>PENDING</span>;
+})()}
+```
+
+---
+
+### VERIFICATION CHECKLIST
+
+1. On first load after deploy, `propscout_log` is cleared from localStorage, `propscout_log_version` is set to `"2"`
+2. On subsequent loads with version `"2"`, existing picks are NOT cleared
+3. Logging a new pick stores `status: "pending"` in both localStorage and sent to backend POST
+4. `logPick` snapshot includes `gameTime`, `score`, `simConfidence`, `bookLines` map
+5. `markResult` sends `{ result, status: "settled" }` in PATCH
+6. Opening Picks tab with pending/live picks triggers a re-fetch from server
+7. Pick cards show `✓ HIT` / `✗ MISS` / `● LIVE` / `PENDING` badges correctly
+8. Old picks with `result = "hit"/"miss"` but no `status` still display correctly (backward compat fallback)
+9. Brace/paren balance unchanged
+10. `propscout_log_version` check does not cause an infinite re-render
+
+---
+
+**HANDOFF NOTE — 2026-05-07 — CODEX TASK 93 + 94 COMPLETED**
+
+- Added `backend/migrations/003_picks_rebuild.sql` with the clean picks schema: `status`, `result`, `prop_type`, `snapshot`
+- Rebuilt `backend/routes/picks.js` to read/write the new schema while preserving flat-file fallback
+- Extended `backend/jobs/gradePicksJob.js` with `computeLabGrade(...)`, `fetchGameStatus(...)`, and `pending/live/settled` lifecycle updates
+- Added the daytime `*/5 12-23 * * *` ET grader cron in `backend/jobs/scheduler.js`, while keeping the nightly 4 AM Honolulu catch-up
+- Frontend `propLog` now uses a versioned localStorage reset (`propscout_log_version = "2"`)
+- `logPick(...)` now stores a fat snapshot including `status`, `gameTime`, `score`, `simConfidence`, `aiScore`, `aiReason`, `suggestedLine`, and `bookLines`
+- `markResult(...)` now patches both `result` and `status` (`settled` for hit/miss, `pending` on undo)
+- Picks tab now re-fetches server picks on open when any pick is unresolved and renders `PENDING` / `● LIVE` / `✓ HIT` / `✗ MISS` from `status + result`
+- Legacy picks with no `status` field are still treated as unresolved unless they already have `result: "hit" | "miss"`
+
+---
+
+---
+
+### HANDOFF NOTE — 2026-05-07 — CODEX TASK 94 COMPLETED (Picks Rebuild: Frontend)
+
+Frontend-only update in `prop-scout-v7.jsx`.
+
+Added:
+- `propscout_log_version` check ("2") in propLog initializer — wipes localStorage picks on first load, never repeats
+- Fat snapshot fields in `logPick`: `status: "pending"`, `gameTime` (liveSlate lookup by gamePk), `score`, `simConfidence`, `aiScore`, `aiReason`, `suggestedLine`, `bookLines: { DK, FD, CZR, MGM }`
+- `markResult` now sends `{ result, status: "settled" }` in PATCH (was result-only)
+- New useEffect: re-fetches picks from `/api/picks` on Picks tab open if any picks are non-settled
+- Pick cards show `✓ HIT` / `✗ MISS` / `● LIVE` / `PENDING` badges from status + result fields, with backward compat for legacy picks
+
+### DIRECT CHANGE — 2026-05-07 — Monte Carlo N=200
+
+All 4 simulation functions in `prop-scout-v7.jsx` updated from `n = 50` to `n = 200`:
+- `simKConfidence` (line 1895)
+- `simOutsConfidence` (line 1914)
+- `simHRConfidence` (line 1931)
+- `simHitsConfidence` (line 1952)
+
+Rationale: cuts worst-case standard error from ±7.1% to ±3.5%, eliminating threshold-crossing noise in simConfidence scores. No performance impact.

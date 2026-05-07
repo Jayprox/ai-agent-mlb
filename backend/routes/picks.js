@@ -37,10 +37,20 @@ router.use(requireAuth);
 router.get("/", async (req, res) => {
   if (isConnected()) {
     const result = await query(
-      "SELECT data FROM picks WHERE user_id = $1 ORDER BY created_at DESC",
+      "SELECT id, game_pk, status, result, prop_type, created_at, snapshot FROM picks WHERE user_id = $1 ORDER BY created_at DESC",
       [req.userId]
     );
-    return res.json({ picks: (result?.rows ?? []).map((row) => row.data) });
+    return res.json({
+      picks: (result?.rows ?? []).map((row) => ({
+        id: row.id,
+        gamePk: row.game_pk,
+        status: row.status,
+        result: row.result,
+        propType: row.prop_type,
+        createdAt: row.created_at,
+        ...(row.snapshot ?? {}),
+      })),
+    });
   }
 
   const store = readStore();
@@ -48,29 +58,28 @@ router.get("/", async (req, res) => {
 });
 
 router.post("/", async (req, res) => {
-  const entry = { ...(req.body ?? {}), userId: req.userId };
+  const body = req.body ?? {};
+  const entry = { ...body, userId: req.userId };
+  const snapshot = { ...body };
+  delete snapshot.userId;
 
   if (isConnected()) {
-    const existing = await query("SELECT data FROM picks WHERE id = $1", [entry.id]);
-    if (existing?.rows?.[0]?.data) {
-      if (existing.rows[0].data.userId !== req.userId) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
-      return res.json(existing.rows[0].data);
-    }
+    const existing = await query("SELECT id FROM picks WHERE id = $1", [entry.id]);
+    if (existing?.rows?.[0]) return res.json(entry);
 
     await query(
-      `INSERT INTO picks (id, user_id, game_pk, result, data)
-       VALUES ($1, $2, $3, $4, $5::jsonb)`,
+      `INSERT INTO picks (id, user_id, game_pk, status, result, prop_type, snapshot)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
       [
         entry.id,
         req.userId,
         entry.gamePk ?? null,
+        entry.status ?? "pending",
         entry.result ?? null,
-        JSON.stringify(entry),
+        entry.propType ?? null,
+        JSON.stringify(snapshot),
       ]
     );
-
     return res.status(201).json(entry);
   }
 
@@ -90,46 +99,46 @@ router.post("/", async (req, res) => {
 });
 
 router.patch("/:id", async (req, res) => {
+  const allowed = ["status", "result"];
+  const updates = {};
+  allowed.forEach((k) => {
+    if (req.body[k] !== undefined) updates[k] = req.body[k];
+  });
+
   if (isConnected()) {
-    const existing = await query("SELECT user_id, data FROM picks WHERE id = $1", [req.params.id]);
+    const existing = await query("SELECT user_id FROM picks WHERE id = $1", [req.params.id]);
     const row = existing?.rows?.[0];
+    if (!row) return res.status(404).json({ error: "Pick not found" });
+    if (row.user_id !== req.userId) return res.status(403).json({ error: "Forbidden" });
 
-    if (!row) {
-      return res.status(404).json({ error: "Pick not found" });
+    const setClauses = [];
+    const params = [];
+    if (updates.status !== undefined) {
+      params.push(updates.status);
+      setClauses.push(`status = $${params.length}`);
     }
-    if (row.user_id !== req.userId) {
-      return res.status(403).json({ error: "Forbidden" });
+    if (updates.result !== undefined) {
+      params.push(updates.result);
+      setClauses.push(`result = $${params.length}`);
     }
+    if (!setClauses.length) return res.status(400).json({ error: "Nothing to update" });
+    params.push(req.params.id);
+    await query(`UPDATE picks SET ${setClauses.join(", ")} WHERE id = $${params.length}`, params);
 
-    const updated = {
-      ...(row.data ?? {}),
-      result: req.body?.result ?? null,
-    };
-
-    await query(
-      "UPDATE picks SET result = $1, data = $2::jsonb WHERE id = $3",
-      [updated.result, JSON.stringify(updated), req.params.id]
-    );
-
-    return res.json(updated);
+    return res.json({ ok: true, ...updates });
   }
 
   const store = readStore();
   const index = store.picks.findIndex((pick) => pick.id === req.params.id);
-
-  if (index === -1) {
-    return res.status(404).json({ error: "Pick not found" });
-  }
-  if (store.picks[index].userId !== req.userId) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
+  if (index === -1) return res.status(404).json({ error: "Pick not found" });
+  if (store.picks[index].userId !== req.userId) return res.status(403).json({ error: "Forbidden" });
 
   store.picks[index] = {
     ...store.picks[index],
-    result: req.body?.result ?? null,
+    ...updates,
   };
   writeStore(store);
-  return res.json(store.picks[index]);
+  return res.json({ ok: true, ...updates });
 });
 
 router.delete("/:id", async (req, res) => {

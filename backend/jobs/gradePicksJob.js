@@ -31,9 +31,10 @@ function normalizeName(s) {
   return String(s ?? "").toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// Ported from prop-scout-v7.jsx computeGrade — keep in sync
 function computeGrade(pick, box) {
   if (!box?.isFinal) return null;
+  const labGrade = computeLabGrade(pick, box);
+  if (labGrade !== null) return labGrade;
   const label = (pick.label ?? "").toUpperCase();
   const lean = (pick.lean ?? "").toUpperCase();
   const innings = box.linescore?.innings ?? [];
@@ -182,6 +183,46 @@ function computeGrade(pick, box) {
   return null;
 }
 
+function computeLabGrade(pick, box) {
+  if (!box?.isFinal) return null;
+  const propType = (pick.propType ?? "").toUpperCase();
+  const innings = box.linescore?.innings ?? [];
+  const awayRuns = box.linescore?.away?.runs ?? 0;
+  const homeRuns = box.linescore?.home?.runs ?? 0;
+  const lean = (pick.lean ?? "").toUpperCase();
+
+  if (propType === "LAB_F5ML") {
+    if (innings.length < 5) return null;
+    const f5Away = innings.slice(0, 5).reduce((s, i) => s + (i.away ?? 0), 0);
+    const f5Home = innings.slice(0, 5).reduce((s, i) => s + (i.home ?? 0), 0);
+    if (f5Away === f5Home) return null;
+    return lean === "HOME" ? (f5Home > f5Away ? "hit" : "miss")
+      : lean === "AWAY" ? (f5Away > f5Home ? "hit" : "miss") : null;
+  }
+  if (propType === "LAB_FGML") {
+    if (awayRuns === homeRuns) return null;
+    return lean === "HOME" ? (homeRuns > awayRuns ? "hit" : "miss")
+      : lean === "AWAY" ? (awayRuns > homeRuns ? "hit" : "miss") : null;
+  }
+  if (propType === "LAB_KPROP") {
+    const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
+    const lastName = normalizeName(pick.pitcherLastName ?? pick.pitcherName ?? "").split(" ").pop();
+    const pitcher = allPitchers.find((p) => normalizeName(p.name).includes(lastName));
+    if (!pitcher || pick.bookLine == null) return null;
+    if (pitcher.k === pick.bookLine) return null;
+    return (pick.leanSide ?? lean) === "OVER" ? (pitcher.k > pick.bookLine ? "hit" : "miss")
+      : (pick.leanSide ?? lean) === "UNDER" ? (pitcher.k < pick.bookLine ? "hit" : "miss") : null;
+  }
+  if (propType === "LAB_TOTALS") {
+    const total = awayRuns + homeRuns;
+    if (pick.bookTotal == null) return null;
+    if (total === pick.bookTotal) return null;
+    return (pick.leanSide ?? lean) === "OVER" ? (total > pick.bookTotal ? "hit" : "miss")
+      : (pick.leanSide ?? lean) === "UNDER" ? (total < pick.bookTotal ? "hit" : "miss") : null;
+  }
+  return null;
+}
+
 async function fetchBoxForGrading(gamePk) {
   try {
     const [bsRes, lsRes] = await Promise.all([
@@ -229,65 +270,115 @@ async function fetchBoxForGrading(gamePk) {
   } catch (_) { return null; }
 }
 
+async function fetchGameStatus(gamePk) {
+  try {
+    const res = await axios.get(
+      `${MLB_BASE}/schedule?gamePk=${gamePk}&hydrate=game(status)`,
+      { timeout: 8000 }
+    );
+    const game = res.data?.dates?.[0]?.games?.[0];
+    if (!game) return "unknown";
+    const state = game.status?.abstractGameState ?? "";
+    const detail = game.status?.detailedState ?? "";
+    if (state === "Final" || detail === "Final" || detail === "Game Over") return "final";
+    if (state === "Live" || detail === "In Progress" || detail === "Warmup") return "live";
+    return "pre";
+  } catch (_) {
+    return "unknown";
+  }
+}
+
 async function gradePendingPicks() {
   let picks = [];
 
   if (isConnected()) {
-    const result = await query("SELECT id, game_pk, data FROM picks WHERE result IS NULL");
+    const result = await query(
+      "SELECT id, game_pk, status, prop_type, snapshot FROM picks WHERE status != 'settled'"
+    );
     picks = (result?.rows ?? []).map((row) => ({
-      ...(row.data ?? {}),
+      ...(row.snapshot ?? {}),
       id: row.id,
       gamePk: row.game_pk,
+      status: row.status,
+      propType: row.prop_type,
     }));
   } else {
-    picks = readPicksJson();
+    picks = readPicksJson().filter((p) => {
+      if (p.result === "hit" || p.result === "miss") return false;
+      return (p.status ?? "pending") !== "settled";
+    });
   }
 
-  const pending = picks.filter((p) => p.result === null || p.result === undefined);
-  if (!pending.length) {
-    console.log("  · Grade job: no pending picks");
-    return { graded: 0, total: 0 };
+  if (!picks.length) {
+    console.log("  · Grade job: no pending/live picks");
+    return { settled: 0, live: 0, total: 0 };
   }
 
   const byGame = {};
-  pending.forEach((p) => {
+  picks.forEach((p) => {
     const key = String(p.gamePk);
     if (!byGame[key]) byGame[key] = [];
     byGame[key].push(p);
   });
 
-  let gradedCount = 0;
-  const updates = {};
+  let settledCount = 0;
+  let liveCount = 0;
+
+  const currentJson = !isConnected() ? readPicksJson() : null;
+  const jsonById = currentJson ? new Map(currentJson.map((p) => [p.id, p])) : null;
 
   await Promise.all(
     Object.entries(byGame).map(async ([gamePkStr, gamePicks]) => {
-      const box = await fetchBoxForGrading(gamePkStr);
-      if (!box) return;
-      gamePicks.forEach((pick) => {
-        const grade = computeGrade(pick, box);
-        if (grade !== null) { updates[pick.id] = grade; gradedCount++; }
-      });
+      const gameStatus = await fetchGameStatus(gamePkStr);
+
+      if (gameStatus === "final") {
+        const box = await fetchBoxForGrading(gamePkStr);
+        if (!box) return;
+        await Promise.all(gamePicks.map(async (pick) => {
+          const grade = computeGrade(pick, box);
+          if (grade === null) return;
+          if (isConnected()) {
+            await query(
+              "UPDATE picks SET status = 'settled', result = $1 WHERE id = $2",
+              [grade, pick.id]
+            );
+          } else if (jsonById?.has(pick.id)) {
+            jsonById.set(pick.id, { ...jsonById.get(pick.id), result: grade, status: "settled" });
+          }
+          settledCount++;
+        }));
+        return;
+      }
+
+      if (gameStatus === "live") {
+        const pendingOnly = gamePicks.filter((p) => (p.status ?? "pending") === "pending");
+        if (!pendingOnly.length) return;
+        if (isConnected()) {
+          await Promise.all(
+            pendingOnly.map((pick) =>
+              query("UPDATE picks SET status = 'live' WHERE id = $1", [pick.id])
+            )
+          );
+        } else {
+          pendingOnly.forEach((pick) => {
+            if (jsonById?.has(pick.id)) {
+              jsonById.set(pick.id, { ...jsonById.get(pick.id), status: "live" });
+            }
+          });
+        }
+        liveCount += pendingOnly.length;
+      }
+      // "pre" or "unknown": leave as pending
     })
   );
 
-  if (gradedCount > 0) {
-    if (isConnected()) {
-      await Promise.all(
-        Object.entries(updates).map(([id, result]) =>
-          query(
-            "UPDATE picks SET result = $1, data = data || $2::jsonb WHERE id = $3",
-            [result, JSON.stringify({ result }), id]
-          )
-        )
-      );
-    } else {
-      const updated = picks.map((p) => (updates[p.id] !== undefined ? { ...p, result: updates[p.id] } : p));
-      writePicksJson(updated);
-    }
-    console.log(`  ✓ Grade job: settled ${gradedCount} pick(s)`);
+  if (jsonById) {
+    const updated = currentJson.map((p) => jsonById.get(p.id) ?? p);
+    writePicksJson(updated);
   }
 
-  return { graded: gradedCount, total: pending.length };
+  console.log(`  ✓ Grade job: settled=${settledCount} live=${liveCount} total=${picks.length}`);
+  return { settled: settledCount, live: liveCount, total: picks.length };
 }
 
 module.exports = { gradePendingPicks };

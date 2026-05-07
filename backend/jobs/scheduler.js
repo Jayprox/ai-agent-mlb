@@ -115,6 +115,9 @@ function startScheduler() {
   // Grade pending picks nightly at 4 AM Honolulu (after all west coast games finish)
   cron.schedule("0 4 * * *", () => gradePendingPicks(), { timezone: "Pacific/Honolulu" });
 
+  // Update LIVE status every 5 min during game hours (noon–midnight ET)
+  cron.schedule("*/5 12-23 * * *", () => gradePendingPicks(), { timezone: "America/New_York" });
+
   // Resolve Lab calibration entries nightly at 4:30 AM Honolulu
   cron.schedule("30 4 * * *", () => resolveLabCalibration(), { timezone: "Pacific/Honolulu" });
 

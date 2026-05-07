@@ -1892,7 +1892,7 @@ function sampleNormal(mean, std) {
 }
 
 // Returns % of N sims where pitcher Ks > line (OVER). Returns null if insufficient data.
-function simKConfidence(candidate, line, n = 50) {
+function simKConfidence(candidate, line, n = 500) {
   if (line == null) return null;
   const mean = parseFloat(candidate.avgK3) || null;
   const k9 = parseFloat(candidate.k9) || 0;
@@ -1911,7 +1911,7 @@ function simKConfidence(candidate, line, n = 50) {
 }
 
 // Returns % of N sims where pitcher outs recorded > line.
-function simOutsConfidence(candidate, line, n = 50) {
+function simOutsConfidence(candidate, line, n = 500) {
   if (line == null) return null;
   const avgIPStr = candidate.avgIP;
   if (!avgIPStr || avgIPStr === "—") return null;
@@ -1928,7 +1928,7 @@ function simOutsConfidence(candidate, line, n = 50) {
 }
 
 // Returns % of N sims where batter hits ≥1 HR.
-function simHRConfidence(candidate, line, n = 50) {
+function simHRConfidence(candidate, line, n = 500) {
   if (line == null) return null;
   const hr = parseInt(candidate.hr) || 0;
   const slg = parseFloat(candidate.slg) || 0;
@@ -1949,7 +1949,7 @@ function simHRConfidence(candidate, line, n = 50) {
 }
 
 // Returns % of N sims where batter gets ≥ line hits.
-function simHitsConfidence(candidate, line, n = 50) {
+function simHitsConfidence(candidate, line, n = 500) {
   if (line == null) return null;
   const avg = parseFloat(candidate.avg) || 0;
   if (avg === 0) return null;
@@ -3407,8 +3407,18 @@ export default function App() {
   const [showLabTrackRecord, setShowLabTrackRecord] = useState(true);
   // Prop result tracker — persisted to localStorage
   const [propLog, setPropLog] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("propscout_log") || "[]"); }
-    catch { return []; }
+    try {
+      const PICKS_VERSION = "2";
+      const storedVersion = localStorage.getItem("propscout_log_version");
+      if (storedVersion !== PICKS_VERSION) {
+        localStorage.removeItem("propscout_log");
+        localStorage.setItem("propscout_log_version", PICKS_VERSION);
+        return [];
+      }
+      return JSON.parse(localStorage.getItem("propscout_log") || "[]");
+    } catch {
+      return [];
+    }
   });
   const [syncStatus, setSyncStatus] = useState(null); // null | "syncing" | "done" | "error"
   const [syncMessage, setSyncMessage] = useState("");
@@ -3841,6 +3851,11 @@ export default function App() {
   };
 
   const toggleMarket = (mKey) => setCollapsedMarkets(prev => ({ ...prev, [mKey]: !prev[mKey] }));
+  const getPickStatus = (pick) => {
+    if (pick?.result === "hit" || pick?.result === "miss") return "settled";
+    return pick?.status ?? "pending";
+  };
+  const isPickUnsettled = (pick) => getPickStatus(pick) !== "settled";
 
   // Fetch 7-day digest when Picks view opens (lazy — only if not already loaded)
   useEffect(() => {
@@ -3851,6 +3866,19 @@ export default function App() {
       .catch(() => {})
       .finally(() => setDigestLoading(false));
   }, [view]);
+
+  useEffect(() => {
+    if (view !== "picks" || !currentUser) return;
+    if (!propLog.some(isPickUnsettled)) return;
+    apiFetch("/api/picks")
+      .then((data) => {
+        const picks = data?.picks ?? [];
+        setPropLog(picks);
+        localStorage.setItem("propscout_log", JSON.stringify(picks));
+        setPicksServerReachable(true);
+      })
+      .catch(() => setPicksServerReachable(false));
+  }, [view, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if ((view !== "lab" && view !== "models") || (view === "lab" ? labSubTab : modelsSubTab) !== "f5ml" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
@@ -4252,7 +4280,7 @@ export default function App() {
       if (gradedGames.current.has(gamePk)) return;
 
       // eslint-disable-next-line eqeqeq — gamePk may be string (localStorage) or number
-      const pendingPicks = propLog.filter(p => p.gamePk == gamePk && p.result === null);
+      const pendingPicks = propLog.filter(p => p.gamePk == gamePk && isPickUnsettled(p));
       if (!pendingPicks.length) return;
 
       const box = liveBoxscores[gamePk];
@@ -4292,7 +4320,7 @@ export default function App() {
     const todayGamePks = new Set((liveSlate ?? []).map(g => String(g.gamePk)));
 
     const historicalPending = propLog.filter(p =>
-      p.result === null &&
+      isPickUnsettled(p) &&
       p.gamePk != null &&
       !todayGamePks.has(String(p.gamePk))
     );
@@ -5064,6 +5092,22 @@ export default function App() {
       playerName:  isBatterProp ? (prop.playerName ?? prop.fullName ?? prop.name ?? activeBatter?.name ?? null) : null,
       leanSide:    prop.leanSide ?? null,
       bookLine:    prop.bookLine ?? null,
+      status:      "pending",
+      gameTime:    (() => {
+        const sg = (liveSlate ?? []).find(g => String(g.gamePk) === String(prop.gamePk ?? selectedId));
+        return sg?.gameTime ?? sg?.time ?? null;
+      })(),
+      score:         prop.score         ?? null,
+      simConfidence: prop.simConfidence ?? null,
+      aiScore:       prop.aiScore       ?? null,
+      aiReason:      prop.aiReason      ?? null,
+      suggestedLine: prop.suggestedLine ?? null,
+      bookLines: {
+        DK:  prop.propLine?.books?.DK?.line  ?? prop.bookLine ?? null,
+        FD:  prop.propLine?.books?.FD?.line  ?? null,
+        CZR: prop.propLine?.books?.CZR?.line ?? null,
+        MGM: prop.propLine?.books?.MGM?.line ?? null,
+      },
       result:      null,
     };
     setPropLog(prev => {
@@ -5318,12 +5362,13 @@ export default function App() {
   };
 
   const markResult = (id, result) => {
+    const nextStatus = result == null ? "pending" : "settled";
     setPropLog(prev => {
-      const updated = prev.map(p => p.id === id ? { ...p, result } : p);
+      const updated = prev.map(p => p.id === id ? { ...p, result, status: nextStatus } : p);
       localStorage.setItem("propscout_log", JSON.stringify(updated));
       return updated;
     });
-    apiMutate(`/api/picks/${id}`, "PATCH", { result }).catch(() => {});
+    apiMutate(`/api/picks/${id}`, "PATCH", { result, status: nextStatus }).catch(() => {});
     // Invalidate digest — result change affects 7-day stats
     apiMutate("/api/digest/refresh", "POST").catch(() => {});
     setLiveDigest(null);
@@ -9621,15 +9666,37 @@ export default function App() {
             PICKS VIEW
         ════════════════════════════════════ */}
         {view === "picks" && (() => {
+          const renderPickStatusBadge = (pick) => {
+            const status = getPickStatus(pick);
+            if (pick.result === "hit") {
+              return (
+                <span style={{ fontSize: 9, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>✓ HIT</span>
+              );
+            }
+            if (pick.result === "miss") {
+              return (
+                <span style={{ fontSize: 9, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>✗ MISS</span>
+              );
+            }
+            if (status === "live") {
+              return (
+                <span style={{ fontSize: 9, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>● LIVE</span>
+              );
+            }
+            return (
+              <span style={{ fontSize: 9, fontWeight: 800, color: "#fbbf24", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>PENDING</span>
+            );
+          };
+
           const hits    = propLog.filter(p => p.result === "hit").length;
           const misses  = propLog.filter(p => p.result === "miss").length;
-          const pending = propLog.filter(p => p.result === null).length;
+          const pending = propLog.filter(isPickUnsettled).length;
           const graded  = hits + misses;
           const pct     = graded > 0 ? Math.round((hits / graded) * 100) : null;
 
           const filtered = propLog.filter(p =>
             picksFilter === "all"     ? true :
-            picksFilter === "pending" ? p.result === null :
+            picksFilter === "pending" ? isPickUnsettled(p) :
             picksFilter === "hit"     ? p.result === "hit" :
             picksFilter === "miss"    ? p.result === "miss" : true
           );
@@ -10198,15 +10265,7 @@ export default function App() {
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                        {p.result === "hit" && (
-                          <span style={{ fontSize: 9, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>✓ HIT</span>
-                        )}
-                        {p.result === "miss" && (
-                          <span style={{ fontSize: 9, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>✗ MISS</span>
-                        )}
-                        {p.result === null && (
-                          <span style={{ fontSize: 9, fontWeight: 800, color: "#fbbf24", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>Pending</span>
-                        )}
+                        {renderPickStatusBadge(p)}
                       </div>
                     </div>
                   </Card>
@@ -10254,15 +10313,14 @@ export default function App() {
                   </div>
                   <div style={{ fontSize: 10, color: "#6b7280", flexShrink: 0 }}>{p.confidence}%</div>
                 </div>
-                {p.result ? (
+                {getPickStatus(p) === "settled" && p.result ? (
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: p.result === "hit" ? "#22c55e" : "#ef4444", background: p.result === "hit" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)", border: `1px solid ${p.result === "hit" ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`, borderRadius: 6, padding: "3px 10px" }}>
-                      {p.result === "hit" ? "✓ HIT" : "✗ MISS"}
-                    </div>
+                    {renderPickStatusBadge(p)}
                     <button onClick={() => markResult(p.id, null)} style={{ fontSize: 9, color: "#4b5563", background: "none", border: "none", cursor: "pointer" }}>undo</button>
                   </div>
                 ) : (
-                  <div style={{ display: "flex", gap: 6 }}>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    {renderPickStatusBadge(p)}
                     <button onClick={() => markResult(p.id, "hit")}
                       style={{ flex: 1, background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.25)", borderRadius: 6, padding: "6px", fontSize: 10, color: "#22c55e", fontFamily: "monospace", fontWeight: 700, cursor: "pointer" }}>
                       ✓ HIT

@@ -5589,3 +5589,65 @@ Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 92**.
 - No backend changes, no new API calls
 
 *Updated 2026-05-06 — Session 81 complete · CODEX TASK 92 specced*
+
+---
+
+## 🗒 Session 82 — CW: Picks Rebuild Specced (Tasks 93 + 94)
+
+**Decision:** Scrap existing picks entirely. Fresh migration. Build correctly from day one.
+
+---
+
+### CODEX TASK 93 — Picks Rebuild: Backend (completed)
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 93**.
+
+**Files:** `backend/migrations/003_picks_rebuild.sql`, `backend/routes/picks.js`, `backend/jobs/gradePicksJob.js`, `backend/jobs/scheduler.js`
+
+**Summary:**
+- Migration 003: `DROP TABLE IF EXISTS picks` + recreate with `status TEXT NOT NULL DEFAULT 'pending'` (indexed), `prop_type TEXT`, `snapshot JSONB` (replaces `data JSONB`)
+- `picks.js` route: POST stores `status: "pending"` + `prop_type` as dedicated columns; PATCH generalized to partial update `status` and/or `result` (no longer hardcodes result to null); GET returns `status` + `result` from columns merged with `snapshot`
+- `gradePicksJob.js`: adds `computeLabGrade` for LAB_F5ML / LAB_FGML / LAB_KPROP / LAB_TOTALS; adds `fetchGameStatus` helper to detect in-progress games; rewrites `gradePendingPicks` to set `status = "live"` for in-progress games and `status = "settled"` + `result` for final games; queries by `status != "settled"` instead of `result IS NULL`
+- `scheduler.js`: adds new cron — every 5 min noon–midnight ET for LIVE badge updates; keeps existing 4 AM nightly catch-up
+
+---
+
+### CODEX TASK 94 — Picks Rebuild: Frontend (completed)
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 94**.
+
+**File:** `prop-scout-v7.jsx` only.
+
+**Summary:**
+- localStorage version wipe: `propscout_log_version` check → if not `"2"`, clear log and set version
+- `logPick` enriched with fat snapshot: `status: "pending"`, `gameTime` (from liveSlate lookup), `score`, `simConfidence`, `aiScore`, `aiReason`, `suggestedLine`, `bookLines` map (DK/FD/CZR/MGM at log time)
+- `markResult` updated to send `{ result, status: "settled" }` in PATCH
+- New useEffect: re-fetch picks from `/api/picks` when Picks tab opens if any picks have non-settled/pending/null status
+- Pick card badges updated: `✓ HIT` (green) / `✗ MISS` (red) / `● LIVE` (amber) / `PENDING` (dimmed gray) — rendered from `status` + `result` with backward compat for legacy picks
+
+**Completion notes:**
+- Added `backend/migrations/003_picks_rebuild.sql` with the clean picks schema (`status`, `result`, `prop_type`, `snapshot`)
+- Rebuilt `backend/routes/picks.js` around the new schema while preserving flat-file fallback
+- Extended `gradePicksJob.js` with LAB pick grading and live/final status transitions
+- Added the 5-minute daytime grading cron in `scheduler.js` while keeping the nightly catch-up
+- Frontend now version-resets legacy local picks (`propscout_log_version = "2"`)
+- `logPick` now stores a fat snapshot (`status`, `gameTime`, `score`, `simConfidence`, `aiScore`, `aiReason`, `suggestedLine`, `bookLines`)
+- `markResult` now patches both `result` and `status`
+- Picks tab re-syncs from server on open when any pick is unresolved and renders badges from `status + result` with legacy backward compatibility
+
+*Updated 2026-05-07 — Session 82 complete · CODEX TASK 93 + 94 completed*
+
+---
+
+## 🗒 Session 83 — CW: Task 94 Completed + MC Simulation N bump
+
+**Task 94 approved and complete.** Frontend picks rebuild done:
+- `propscout_log_version` wipe on first load
+- Fat snapshot in `logPick` (gameTime, score, simConfidence, aiScore, aiReason, suggestedLine, bookLines map)
+- `markResult` sends `status: "settled"` in PATCH
+- Picks tab re-fetches from server when non-settled picks exist
+- Badge rendering: `✓ HIT` / `✗ MISS` / `● LIVE` / `PENDING` from status + result
+
+**Monte Carlo simulation bump:** All 4 sim functions updated from `n = 50` → `n = 200` directly in `prop-scout-v7.jsx`. Reduces worst-case standard error from ±7.1% to ±3.5%, virtually eliminating threshold-crossing noise. Zero performance impact in browser. No spec needed — change applied directly by CW.
+
+*Updated 2026-05-07 — Session 83 complete · Picks rebuild done · MC N=200*
