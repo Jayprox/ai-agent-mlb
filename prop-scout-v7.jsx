@@ -1885,6 +1885,91 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
 }
 
 // ─── HR / Hit board scoring ───────────────────────────────────────────────────
+function sampleNormal(mean, std) {
+  const u1 = Math.random() || 1e-10;
+  const u2 = Math.random() || 1e-10;
+  return mean + std * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+// Returns % of N sims where pitcher Ks > line (OVER). Returns null if insufficient data.
+function simKConfidence(candidate, line, n = 50) {
+  if (line == null) return null;
+  const mean = parseFloat(candidate.avgK3) || null;
+  const k9 = parseFloat(candidate.k9) || 0;
+  if (!mean && k9 === 0) return null;
+  const mu = mean ?? (k9 * 5.5 / 9);
+  const std = 1.8;
+  const parkAdj = ((candidate.parkFactor ?? 1.0) - 1.0) * 1.5;
+  const umpAdj = candidate.umpireRating === "pitcher" ? 0.5 : candidate.umpireRating === "batter" ? -0.5 : 0;
+  const adjMu = mu + parkAdj + umpAdj;
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const result = Math.max(0, sampleNormal(adjMu, std));
+    if (result > line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+
+// Returns % of N sims where pitcher outs recorded > line.
+function simOutsConfidence(candidate, line, n = 50) {
+  if (line == null) return null;
+  const avgIPStr = candidate.avgIP;
+  if (!avgIPStr || avgIPStr === "—") return null;
+  const [whole, frac = "0"] = String(avgIPStr).split(".");
+  const avgIPNum = parseInt(whole) + parseInt(frac) / 3;
+  const meanOuts = avgIPNum * 3;
+  const std = 2.8;
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const result = Math.max(0, sampleNormal(meanOuts, std));
+    if (result > line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+
+// Returns % of N sims where batter hits ≥1 HR.
+function simHRConfidence(candidate, line, n = 50) {
+  if (line == null) return null;
+  const hr = parseInt(candidate.hr) || 0;
+  const slg = parseFloat(candidate.slg) || 0;
+  if (hr === 0 && slg < 0.35) return null;
+  const basePHR = hr > 0 ? Math.min(0.25, hr / 162) : Math.max(0.04, (slg - 0.35) * 0.12);
+  const parkMult = candidate.parkFactor ?? 1.0;
+  const windBonus = candidate.windFav ? 1.12 : 1.0;
+  const vsHandSLG = candidate.matchup?.batterVsHand?.slg != null
+    ? parseFloat(candidate.matchup.batterVsHand.slg)
+    : slg;
+  const platoonMult = slg > 0 ? (vsHandSLG / slg) : 1.0;
+  const pHR = Math.min(0.35, basePHR * parkMult * windBonus * platoonMult);
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    if (Math.random() < pHR) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+
+// Returns % of N sims where batter gets ≥ line hits.
+function simHitsConfidence(candidate, line, n = 50) {
+  if (line == null) return null;
+  const avg = parseFloat(candidate.avg) || 0;
+  if (avg === 0) return null;
+  const vsHandAVG = candidate.matchup?.batterVsHand?.avg != null
+    ? parseFloat(candidate.matchup.batterVsHand.avg)
+    : avg;
+  const parkMult = candidate.parkFactor ?? 1.0;
+  const adjAvg = Math.min(0.450, vsHandAVG * parkMult);
+  const pa = candidate.order != null && candidate.order <= 3 ? 4 : candidate.order >= 8 ? 3 : 4;
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    let gameHits = 0;
+    for (let j = 0; j < pa; j++) {
+      if (Math.random() < adjAvg) gameHits++;
+    }
+    if (gameHits >= line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+
 // hrBoardScore: 0–95 composite. Primary = SLG/HR pace. Secondary = park, wind, order, platoon.
 const hrBoardScore = (hlog, order, pitcherHand, pf, wxFav, sd) => {
   if (!hlog) return null;
@@ -2104,6 +2189,7 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
         gameLabel:    `${game.away?.abbr ?? "?"} @ ${game.home?.abbr ?? "?"}`,
         gameTime:     game.gameTime ?? null,
         facingTeam:   facingTeam ?? "?",
+        parkFactor:   pf.k,
         score,
         era:          merged.era   ?? "—",
         k9:           merged.kPer9 ?? merged.k9 ?? "—",
@@ -2114,6 +2200,15 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
         umpireRating: umpire?.rating ?? null,
         propLine,
         suggestedLine,
+        simConfidence: (() => {
+          const line = propLine?.books?.DK?.line
+            ?? propLine?.books?.FD?.line
+            ?? propLine?.books?.CZR?.line
+            ?? suggestedLine;
+          return type === "k"
+            ? simKConfidence({ avgK3, k9: merged.kPer9 ?? merged.k9 ?? 0, parkFactor: pf.k, umpireRating: umpire?.rating ?? null }, line)
+            : simOutsConfidence({ avgIP: gamelog?.avgIP ?? "—" }, line);
+        })(),
         signals,
       });
     });
@@ -2187,6 +2282,15 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
           ops:          hlog?.ops ?? "—",
           hitRate:      hlog?.hitRate ?? [],
           propLine,
+          simConfidence: (() => {
+            const line = propLine?.books?.DK?.line
+              ?? propLine?.books?.FD?.line
+              ?? propLine?.books?.CZR?.line
+              ?? (type === "hr" ? 0.5 : 1.5);
+            return type === "hr"
+              ? simHRConfidence({ hr: hlog?.hr ?? 0, slg: hlog?.slg ?? "0", parkFactor: pf.hr, windFav: wxFav, matchup: { batterVsHand: sd ? (pitcherHand === "L" ? sd.vsL : sd.vsR) : null }, order: b.order }, line)
+              : simHitsConfidence({ avg: hlog?.avg ?? "0", parkFactor: pf.hit, matchup: { batterVsHand: sd ? (pitcherHand === "L" ? sd.vsL : sd.vsR) : null }, order: b.order }, line);
+          })(),
           matchup: {
             batterHand: b.hand ?? null,
             pitcherHand,
@@ -2223,6 +2327,48 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
 
   return candidates.sort((a, b) => b.score - a.score).slice(0, 20);
 };
+
+// Builds the candidate list for the AI Board POST payload.
+// Takes top 8 per market to keep the Haiku call compact.
+function buildAiBoardPayload(liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, liveLineups, liveWeather, liveHittingLog, liveStatSplits) {
+  const kCandidates = computePitcherBoard("k", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats).slice(0, 8);
+  const outsCandidates = computePitcherBoard("outs", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats).slice(0, 8);
+  const hrCandidates = computeBatterBoard("hr", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits).slice(0, 8);
+  const hitsCandidates = computeBatterBoard("hits", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits).slice(0, 8);
+
+  const mapCandidate = (c, market) => {
+    const bookLine = c.propLine?.books?.DK?.line ?? c.propLine?.books?.FD?.line ?? c.propLine?.books?.CZR?.line ?? c.suggestedLine ?? null;
+    let stats = {};
+    if (market === "k") {
+      stats = { k9: c.k9, avgK3: c.avgK3, era: c.era, whip: c.whip, umpireRating: c.umpireRating };
+    } else if (market === "outs") {
+      stats = { avgIP: c.avgIP, whip: c.whip, era: c.era };
+    } else if (market === "hr") {
+      stats = { slg: c.slg, hr: c.hr, ops: c.ops, parkFactor: c.parkFactor, windFav: c.windFav, order: c.order, platoonSLG: c.matchup?.batterVsHand?.slg ?? null };
+    } else {
+      stats = { avg: c.avg, ops: c.ops, parkFactor: c.parkFactor, order: c.order, l5: c.hitRate?.slice(0, 5).filter(Boolean).length ?? null, platoonAVG: c.matchup?.batterVsHand?.avg ?? null };
+    }
+    return {
+      id: `${market}:${c.id}:${c.gamePk}`,
+      market,
+      playerName: c.name,
+      team: c.team,
+      gameLabel: c.gameLabel,
+      score: c.score,
+      simConfidence: c.simConfidence,
+      bookLine,
+      stats,
+      _candidate: c,
+    };
+  };
+
+  return [
+    ...kCandidates.map((c) => mapCandidate(c, "k")),
+    ...outsCandidates.map((c) => mapCandidate(c, "outs")),
+    ...hrCandidates.map((c) => mapCandidate(c, "hr")),
+    ...hitsCandidates.map((c) => mapCandidate(c, "hits")),
+  ];
+}
 
 // ── mlToImplied: American odds string → implied probability ───────────────────
 const mlToImplied = (ml) => {
@@ -3189,6 +3335,10 @@ function batterMatchupScoreForPitcher(batter, matchupPitcher, batterSplits) {
   );
 }
 
+function fallbackAiScore(c) {
+  return Math.round((c.score ?? 50) * 0.6 + (c.simConfidence ?? 50) * 0.4);
+}
+
 // ─────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────
@@ -3234,31 +3384,11 @@ export default function App() {
   const [liveDigest, setLiveDigest] = useState(null);   // { period, total, hits, misses, pct, bestHit, worstMiss, byType }
   const [digestLoading, setDigestLoading] = useState(false);
   const [showDigest, setShowDigest] = useState(true);   // collapse/expand 7-day digest card
-  const [scoutPicks, setScoutPicks] = useState(null);
-  const [scoutEval, setScoutEval] = useState(null);
-  const [scoutLoading, setScoutLoading] = useState(false);
-  const [scoutEvalLoading, setScoutEvalLoading] = useState(false);
-  const [scoutError, setScoutError] = useState(null);
-  const [scoutExpanded, setScoutExpanded] = useState(null);
-  const [scoutEvalExpanded, setScoutEvalExpanded] = useState(null);
-  const [scoutGenerationsLeft, setScoutGenerationsLeft] = useState(3);
-  const [hrScoutPicks, setHrScoutPicks] = useState(null);       // null = not yet loaded
-  const [hrScoutLoading, setHrScoutLoading] = useState(false);
-  const [hrScoutError, setHrScoutError] = useState(null);
-  const [hrScoutGenerationsLeft, setHrScoutGenerationsLeft] = useState(3);
-  const [hrScoutExpanded, setHrScoutExpanded] = useState(null); // index of expanded card
-  const [hrScoutGeneratedAt, setHrScoutGeneratedAt] = useState(null);
   const [chatHistory, setChatHistory] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState(null);
   const [chatMessagesLeft, setChatMessagesLeft] = useState(30);
-  const [advisorPersona, setAdvisorPersona] = useState("pro");
-  const [advisorHistory, setAdvisorHistory] = useState([]);
-  const [advisorInput, setAdvisorInput] = useState("");
-  const [advisorLoading, setAdvisorLoading] = useState(false);
-  const [advisorError, setAdvisorError] = useState(null);
-  const [advisorMessagesLeft, setAdvisorMessagesLeft] = useState(20);
   const [labSubTab, setLabSubTab] = useState("f5ml");
   const [modelsSubTab, setModelsSubTab] = useState("f5ml");
   const [labData, setLabData] = useState(null);
@@ -3271,6 +3401,8 @@ export default function App() {
   const [labTotalsLoading, setLabTotalsLoading] = useState(false);
   const [labCalibration, setLabCalibration] = useState(null);
   const [labCalibrationLoading, setLabCalibrationLoading] = useState(false);
+  const [aiBoardData, setAiBoardData] = useState(null);
+  const [aiBoardLoading, setAiBoardLoading] = useState(false);
   const [showLabTrackRecord, setShowLabTrackRecord] = useState(true);
   // Prop result tracker — persisted to localStorage
   const [propLog, setPropLog] = useState(() => {
@@ -3343,7 +3475,6 @@ export default function App() {
   const [liveBoardResults, setLiveBoardResults] = useState({}); // playerId → { h, hr, ab, live }
   const boardBoxFetched = useRef(new Set());                  // gamePks already fetched for Board results
   const chatBottomRef = useRef(null);
-  const advisorBottomRef = useRef(null);
   const labCalibrationRecorded = useRef(new Set());
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState(null);
@@ -3677,6 +3808,7 @@ export default function App() {
     setLiveInjuries([]);
     setLiveBoardResults({});
     setAiCardSummaries({});
+    setAiBoardData(null);
     setLastRefreshed(new Date());
     setTimeout(() => setIsRefreshing(false), 2000);
   };
@@ -3690,10 +3822,6 @@ export default function App() {
     setPropsBookFilter("ALL");
     setPropLog([]);
     setLiveDigest(null);
-    setScoutPicks(null);
-    setScoutEval(null);
-    setScoutError(null);
-    setScoutGenerationsLeft(3);
     setChatHistory([]);
     setChatInput("");
     setChatLoading(false);
@@ -3713,44 +3841,6 @@ export default function App() {
       .catch(() => {})
       .finally(() => setDigestLoading(false));
   }, [view]);
-
-  useEffect(() => {
-    if (view !== "scout" || !currentUser || scoutPicks !== null || scoutLoading || scoutError) return;
-
-    setScoutLoading(true);
-    setScoutError(null);
-    apiFetch("/api/scout/picks")
-      .then((data) => {
-        setScoutPicks(data.picks ?? []);
-        setScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
-      })
-      .catch((err) => setScoutError(err.message))
-      .finally(() => setScoutLoading(false));
-
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
-    setScoutEvalLoading(true);
-    apiFetch(`/api/scout/evaluation/${yDate}`)
-      .then((data) => { if (data.evaluated) setScoutEval(data); })
-      .catch(() => {})
-      .finally(() => setScoutEvalLoading(false));
-  }, [view, currentUser, scoutPicks, scoutLoading]);
-
-  useEffect(() => {
-    if (view !== "hr-scout" || !currentUser || hrScoutPicks !== null || hrScoutLoading || hrScoutError) return;
-
-    setHrScoutLoading(true);
-    setHrScoutError(null);
-    apiFetch("/api/hr-scout/picks")
-      .then((data) => {
-        setHrScoutPicks(data.picks ?? []);
-        setHrScoutGeneratedAt(data.generatedAt ?? null);
-        setHrScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
-      })
-      .catch((err) => setHrScoutError(err.message ?? "Failed to load HR Scout picks"))
-      .finally(() => setHrScoutLoading(false));
-  }, [view, currentUser, hrScoutPicks, hrScoutLoading, hrScoutError]);
 
   useEffect(() => {
     if ((view !== "lab" && view !== "models") || (view === "lab" ? labSubTab : modelsSubTab) !== "f5ml" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
@@ -3776,6 +3866,45 @@ export default function App() {
     if (view !== "lab" || !currentUser || !isScoutUser || labCalibration !== null || labCalibrationLoading) return;
     fetchLabCalibration();
   }, [view, currentUser, isScoutUser, labCalibration, labCalibrationLoading]);
+
+  useEffect(() => {
+    if (view !== "ai-board" || !currentUser || !isScoutUser) return;
+    if (aiBoardData !== null || aiBoardLoading) return;
+    if (!liveSlate?.length) return;
+    setAiBoardLoading(true);
+    const payload = buildAiBoardPayload(
+      liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
+      liveLineups, liveWeather, liveHittingLog, liveStatSplits
+    );
+    if (!payload.length) { setAiBoardLoading(false); return; }
+    const postPayload = payload.map(({ _candidate, ...rest }) => rest);
+    apiMutate("/api/ai-board/score", "POST", { candidates: postPayload })
+      .then((data) => {
+        const scored = payload.map((c) => ({
+          ...c._candidate,
+          id: c.id,
+          market: c.market,
+          bookLine: c.bookLine,
+          aiScore: data?.scores?.[c.id]?.aiScore ?? fallbackAiScore(c),
+          aiReason: data?.scores?.[c.id]?.aiReason ?? null,
+        }));
+        scored.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
+        setAiBoardData(scored);
+      })
+      .catch(() => {
+        const scored = payload.map((c) => ({
+          ...c._candidate,
+          id: c.id,
+          market: c.market,
+          bookLine: c.bookLine,
+          aiScore: Math.round((c.score ?? 50) * 0.6 + (c.simConfidence ?? 50) * 0.4),
+          aiReason: null,
+        }));
+        scored.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
+        setAiBoardData(scored);
+      })
+      .finally(() => setAiBoardLoading(false));
+  }, [view, currentUser, isScoutUser, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, liveLineups, liveWeather, liveHittingLog, liveStatSplits, aiBoardData, aiBoardLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!currentUser || !isScoutUser || !labData?.games?.length || !labData?.date) return;
@@ -3965,10 +4094,6 @@ export default function App() {
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [chatHistory, chatLoading]);
-
-  useEffect(() => {
-    advisorBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [advisorHistory, advisorLoading]);
 
   // Background prefetch: home + away pitcher stats + lineups for ALL slate games
   // so the cross-slate Best Bets card and Games board can compute and update reactively.
@@ -4784,43 +4909,8 @@ export default function App() {
     "NRFI leans",
     "Any injury alerts?",
   ];
-  const ADVISOR_PRO_CHIPS = ["Give me your best plays today", "Best K props with value", "Any fade spots?", "Show me the chalk plays"];
-  const ADVISOR_LOTTO_CHIPS = ["Build me a parlay", "Best HR props today", "High-ceiling K plays", "Max upside plays"];
 
   const openGame = (id) => { setSelectedId(id); setView("game"); setTab("overview"); setLineupSide("away"); setExpandedBatter(null); setPitcherSide("home"); setArsenalSide("home"); setParlayLabels([]); setParlaySlipCopied(false); };
-
-  const handleScoutRegenerate = async () => {
-    if (scoutGenerationsLeft <= 0) return;
-    setScoutLoading(true);
-    setScoutError(null);
-    try {
-      const data = await apiMutate("/api/scout/regenerate", "POST", {});
-      setScoutPicks(data.picks ?? []);
-      setScoutExpanded(null);
-      setScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
-    } catch (err) {
-      setScoutError(err.message);
-    } finally {
-      setScoutLoading(false);
-    }
-  };
-
-  const handleHRScoutRegenerate = async () => {
-    if (hrScoutGenerationsLeft <= 0) return;
-    setHrScoutLoading(true);
-    setHrScoutError(null);
-    try {
-      const data = await apiMutate("/api/hr-scout/regenerate", "POST", {});
-      setHrScoutPicks(data.picks ?? []);
-      setHrScoutExpanded(null);
-      setHrScoutGeneratedAt(data.generatedAt ?? null);
-      setHrScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
-    } catch (err) {
-      setHrScoutError(err.message ?? "Regeneration failed");
-    } finally {
-      setHrScoutLoading(false);
-    }
-  };
 
   const handleChatSend = async (messageOverride) => {
     const message = messageOverride ?? chatInput.trim();
@@ -4854,55 +4944,6 @@ export default function App() {
       setChatLoading(false);
     }
   };
-
-  async function handleAdvisorSend(messageOverride) {
-    const message = messageOverride ?? advisorInput.trim();
-    if (!message || advisorLoading || advisorMessagesLeft <= 0) return;
-    setAdvisorInput("");
-    setAdvisorLoading(true);
-    setAdvisorError(null);
-
-    const userMsg = { role: "user", content: message };
-    const newHistory = [...advisorHistory, userMsg];
-    setAdvisorHistory(newHistory);
-
-    try {
-      const res = await fetch(`${API_BASE}/api/advisor`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-        },
-        body: JSON.stringify({
-          persona: advisorPersona,
-          messages: newHistory.map(m => ({ role: m.role, content: typeof m.content === "string" ? m.content : "[picks]" })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Advisor error");
-      if (data.messagesUsedToday != null) setAdvisorMessagesLeft(data.maxMessagesPerDay - data.messagesUsedToday);
-
-      const assistantMsg = {
-        role: "assistant",
-        type: data.type,
-        content: data.content ?? null,
-        picks: data.picks ?? null,
-        parlay: data.parlay ?? null,
-      };
-      setAdvisorHistory(prev => [...prev, assistantMsg]);
-    } catch (err) {
-      setAdvisorError(err.message);
-    } finally {
-      setAdvisorLoading(false);
-    }
-  }
-
-  function handleAdvisorPersonaSwitch(newPersona) {
-    if (newPersona === advisorPersona) return;
-    setAdvisorPersona(newPersona);
-    setAdvisorHistory([]);
-    setAdvisorError(null);
-  }
 
   async function fetchLabData(force = false) {
     if (labLoading) return;
@@ -5700,34 +5741,6 @@ export default function App() {
             </button>
             <button onClick={() => setView("model")} style={{ background: view === "model" ? "#fbbf24" : "#161827", border: `1px solid ${view === "model" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "model" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Model</button>
             {isScoutUser && (
-              <button onClick={() => setView("scout")} style={{ background: view === "scout" ? "#38bdf8" : "#161827", border: `1px solid ${view === "scout" ? "#38bdf8" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "scout" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Scout</button>
-            )}
-            {isScoutUser && (
-              <button
-                onClick={() => setView("hr-scout")}
-                style={{
-                  background: view === "hr-scout" ? "#fb923c" : "#161827",
-                  border: `1px solid ${view === "hr-scout" ? "#fb923c" : "#1f2437"}`,
-                  borderRadius: 8,
-                  padding: isNarrowPhone ? "6px 10px" : "6px 12px",
-                  fontSize: isNarrowPhone ? 9 : 10,
-                  color: view === "hr-scout" ? "#000" : "#9ca3af",
-                  fontFamily: "monospace",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                  textTransform: "uppercase",
-                }}
-              >
-                ⚾ HR Scout
-              </button>
-            )}
-            {isScoutUser && (
-              <button onClick={() => setView("advisor")}
-                style={{ background: view === "advisor" ? "#f59e0b" : "#161827", border: `1px solid ${view === "advisor" ? "#f59e0b" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "advisor" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
-                🧠 Advisor
-              </button>
-            )}
-            {isScoutUser && (
               <button onClick={() => setView("lab")}
                 style={{ background: view === "lab" ? "#34d399" : "#161827", border: `1px solid ${view === "lab" ? "#34d399" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "lab" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
                 🔬 Lab
@@ -5756,6 +5769,25 @@ export default function App() {
               <button onClick={() => setView("chat")} style={{ background: view === "chat" ? "#a78bfa" : "#161827", border: `1px solid ${view === "chat" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>💬 Chat</button>
             )}
             <button onClick={() => setView("board")} style={{ background: view === "board" ? "#fbbf24" : "#161827", border: `1px solid ${view === "board" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "board" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Board</button>
+            {isScoutUser && (
+              <button
+                onClick={() => setView("ai-board")}
+                style={{
+                  background: view === "ai-board" ? "#a78bfa" : "#161827",
+                  border: `1px solid ${view === "ai-board" ? "#a78bfa" : "#1f2437"}`,
+                  borderRadius: 8,
+                  padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+                  fontSize: isNarrowPhone ? 9 : 10,
+                  color: view === "ai-board" ? "#000" : "#9ca3af",
+                  fontFamily: "monospace",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  textTransform: "uppercase",
+                }}
+              >
+                🤖 AI Board
+              </button>
+            )}
             {/* ── Soft Refresh button ── */}
             <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
               <button
@@ -6302,163 +6334,6 @@ export default function App() {
                 disabled={chatLoading || !chatInput.trim() || chatMessagesLeft <= 0}
                 style={{ background: chatLoading || !chatInput.trim() || chatMessagesLeft <= 0 ? "#1f2437" : "#a78bfa", border: "1px solid transparent", borderRadius: 10, padding: "8px 12px", color: chatLoading || !chatInput.trim() || chatMessagesLeft <= 0 ? "#4b5563" : "#000", fontSize: 10, fontFamily: "monospace", fontWeight: 800, cursor: chatLoading || !chatInput.trim() || chatMessagesLeft <= 0 ? "default" : "pointer" }}
               >
-                Send
-              </button>
-            </div>
-          </div>
-        )}
-
-        {view === "advisor" && isScoutUser && (
-          <div style={{ height: "calc(100vh - 120px)", display: "flex", flexDirection: "column", gap: 10 }}>
-
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🧠 ADVISOR</div>
-                  <TierBadge tier="ai" />
-                </div>
-                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>Pick your persona · Ask for plays or research</div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ fontSize: 9, color: "#9ca3af", fontFamily: "monospace", background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px" }}>
-                  {advisorMessagesLeft} left today
-                </div>
-                <button onClick={() => { setAdvisorHistory([]); setAdvisorError(null); }}
-                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #1f2437", borderRadius: 8, padding: "6px 10px", fontSize: 9, color: "#9ca3af", fontFamily: "monospace", cursor: "pointer" }}>
-                  Clear
-                </button>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 6 }}>
-              {[["pro", "🎯 The Pro", "#f59e0b"], ["lotto", "🎲 The Lotto Guy", "#22c55e"]].map(([p, label, color]) => (
-                <button key={p} onClick={() => handleAdvisorPersonaSwitch(p)}
-                  style={{ flex: 1, background: advisorPersona === p ? `${color}18` : "#161827", border: `1px solid ${advisorPersona === p ? color : "#1f2437"}`, borderRadius: 10, padding: "8px 10px", fontSize: 10, color: advisorPersona === p ? color : "#6b7280", fontFamily: "monospace", fontWeight: 700, cursor: "pointer" }}>
-                  {label}
-                  {advisorPersona === p && <span style={{ fontSize: 8, marginLeft: 5, opacity: 0.7 }}>ACTIVE</span>}
-                </button>
-              ))}
-            </div>
-
-            <div style={{ fontSize: 9, color: "#6b7280", fontStyle: "italic", padding: "0 2px" }}>
-              {advisorPersona === "pro"
-                ? "Singles only · -200 to +150 odds · 3+ aligned signals required · Would rather pass than force it"
-                : "High-upside props · +200 or better · 2–4 leg parlays · Finds situations where data beats the line"}
-            </div>
-
-            {advisorHistory.length === 0 && (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {(advisorPersona === "pro" ? ADVISOR_PRO_CHIPS : ADVISOR_LOTTO_CHIPS).map(chip => (
-                  <button key={chip} onClick={() => handleAdvisorSend(chip)}
-                    disabled={advisorLoading || advisorMessagesLeft <= 0}
-                    style={{ background: advisorPersona === "pro" ? "rgba(245,158,11,0.10)" : "rgba(34,197,94,0.10)", border: `1px solid ${advisorPersona === "pro" ? "rgba(245,158,11,0.30)" : "rgba(34,197,94,0.30)"}`, borderRadius: 999, padding: "7px 10px", fontSize: 9, color: advisorPersona === "pro" ? "#fcd34d" : "#86efac", fontFamily: "monospace", fontWeight: 700, cursor: advisorLoading ? "default" : "pointer" }}>
-                    {chip}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {advisorError && (
-              <div style={{ background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.30)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
-                {advisorError}
-              </div>
-            )}
-
-            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "#101220", border: "1px solid #1f2437", borderRadius: 14, padding: "12px", display: "flex", flexDirection: "column", gap: 10 }}>
-              {advisorHistory.length === 0 ? (
-                <div style={{ margin: "auto 0", textAlign: "center", color: "#6b7280", fontSize: 11, lineHeight: 1.7 }}>
-                  {advisorPersona === "pro"
-                    ? "Ask The Pro for disciplined single-bet plays backed by data."
-                    : "Ask The Lotto Guy for high-upside props and parlay ideas."}
-                </div>
-              ) : (
-                advisorHistory.map((msg, idx) => (
-                  <div key={idx} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
-                    {msg.role === "user" ? (
-                      <div style={{ maxWidth: "85%", background: advisorPersona === "pro" ? "rgba(245,158,11,0.15)" : "rgba(34,197,94,0.15)", border: `1px solid ${advisorPersona === "pro" ? "rgba(245,158,11,0.30)" : "rgba(34,197,94,0.30)"}`, borderRadius: 12, padding: "10px 12px" }}>
-                        <div style={{ fontSize: 11, color: "#f3f4f6", lineHeight: 1.6 }}>{msg.content}</div>
-                      </div>
-                    ) : msg.type === "message" ? (
-                      <div style={{ maxWidth: "90%", background: "#171a2b", border: "1px solid #232840", borderRadius: 12, padding: "10px 12px" }}>
-                        <div style={{ fontSize: 11, color: "#f3f4f6", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{msg.content}</div>
-                      </div>
-                    ) : (
-                      <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 8 }}>
-                        {(msg.picks ?? []).map((pick, pi) => {
-                          const accentColor = advisorPersona === "pro" ? "#f59e0b" : "#22c55e";
-                          const confColor = pick.confidence === "HIGH" ? "#22c55e" : pick.confidence === "MEDIUM" ? "#f59e0b" : "#94a3b8";
-                          return (
-                            <div key={pi} style={{ background: "#161827", border: `1px solid ${accentColor}33`, borderRadius: 12, padding: "12px 14px" }}>
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-                                <div>
-                                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{pick.player}</div>
-                                  <div style={{ fontSize: 9, color: "#6b7280", marginTop: 1 }}>{pick.team} vs {pick.opponent} · {pick.marketLabel}</div>
-                                </div>
-                                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-                                  <div style={{ background: `${accentColor}22`, border: `1px solid ${accentColor}55`, borderRadius: 8, padding: "4px 10px", fontSize: 11, fontWeight: 800, color: accentColor, fontFamily: "monospace" }}>
-                                    {pick.lean} {pick.line}
-                                  </div>
-                                  <div style={{ fontSize: 10, fontWeight: 700, color: "#f9fafb", fontFamily: "monospace" }}>{pick.odds}</div>
-                                </div>
-                              </div>
-                              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 6 }}>
-                                <span style={{ background: `${confColor}18`, border: `1px solid ${confColor}44`, borderRadius: 999, padding: "2px 7px", fontSize: 8, color: confColor, fontFamily: "monospace", fontWeight: 800 }}>
-                                  {pick.confidence}
-                                </span>
-                                {(pick.signals ?? []).map((sig, si) => (
-                                  <span key={si} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 999, padding: "2px 7px", fontSize: 8, color: "#9ca3af", fontFamily: "monospace" }}>
-                                    {sig}
-                                  </span>
-                                ))}
-                              </div>
-                              <div style={{ fontSize: 10, color: "#d1d5db", lineHeight: 1.5 }}>{pick.reasoning}</div>
-                            </div>
-                          );
-                        })}
-
-                        {msg.parlay && (
-                          <div style={{ background: "rgba(34,197,94,0.06)", border: "2px solid rgba(34,197,94,0.30)", borderRadius: 12, padding: "12px 14px" }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                              <div style={{ fontSize: 11, fontWeight: 800, color: "#22c55e", fontFamily: "monospace", letterSpacing: "0.06em" }}>🎲 PARLAY CARD</div>
-                              <div style={{ background: "rgba(34,197,94,0.20)", border: "1px solid rgba(34,197,94,0.50)", borderRadius: 8, padding: "4px 10px", fontSize: 13, fontWeight: 800, color: "#22c55e", fontFamily: "monospace" }}>
-                                {msg.parlay.combinedOdds}
-                              </div>
-                            </div>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
-                              {(msg.parlay.legs ?? []).map((leg, li) => (
-                                <div key={li} style={{ fontSize: 10, color: "#86efac", fontFamily: "monospace" }}>• {leg}</div>
-                              ))}
-                            </div>
-                            <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>{msg.parlay.reasoning}</div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-              {advisorLoading && (
-                <div style={{ display: "flex", justifyContent: "flex-start" }}>
-                  <div style={{ background: "#171a2b", border: "1px solid #232840", borderRadius: 12, padding: "10px 12px", fontSize: 10, color: "#6b7280" }}>
-                    {advisorPersona === "pro" ? "Crunching the numbers…" : "Finding the angles…"}
-                  </div>
-                </div>
-              )}
-              <div ref={advisorBottomRef} />
-            </div>
-
-            <div style={{ display: "flex", gap: 8, alignItems: "center", background: "#161827", border: "1px solid #1f2437", borderRadius: 14, padding: "10px" }}>
-              <input
-                value={advisorInput}
-                onChange={e => setAdvisorInput(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAdvisorSend(); }}}
-                placeholder={advisorMessagesLeft > 0 ? `Ask ${advisorPersona === "pro" ? "The Pro" : "The Lotto Guy"}…` : "Daily limit reached"}
-                disabled={advisorLoading || advisorMessagesLeft <= 0}
-                style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#f9fafb", fontSize: 12, fontFamily: "monospace" }}
-              />
-              <button onClick={() => handleAdvisorSend()}
-                disabled={advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0}
-                style={{ background: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "#1f2437" : advisorPersona === "pro" ? "#f59e0b" : "#22c55e", border: "1px solid transparent", borderRadius: 10, padding: "8px 12px", color: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "#4b5563" : "#000", fontSize: 10, fontFamily: "monospace", fontWeight: 800, cursor: advisorLoading || !advisorInput.trim() || advisorMessagesLeft <= 0 ? "default" : "pointer" }}>
                 Send
               </button>
             </div>
@@ -7528,402 +7403,6 @@ export default function App() {
             </div>
           );
         })()}
-
-        {view === "scout" && isScoutUser && (
-          <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>🎯 THE SCOUT</div>
-                  <TierBadge tier="ai" />
-                </div>
-                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>LLM-assisted picks · Not financial advice</div>
-              </div>
-              <button
-                onClick={handleScoutRegenerate}
-                disabled={scoutLoading || scoutGenerationsLeft <= 0}
-                style={{
-                  background: scoutGenerationsLeft > 0 ? "rgba(56,189,248,0.15)" : "rgba(255,255,255,0.04)",
-                  border: `1px solid ${scoutGenerationsLeft > 0 ? "rgba(56,189,248,0.4)" : "#2d3148"}`,
-                  borderRadius: 8,
-                  padding: "6px 12px",
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: scoutGenerationsLeft > 0 ? "#7dd3fc" : "#4b5563",
-                  cursor: scoutGenerationsLeft > 0 ? "pointer" : "not-allowed",
-                  fontFamily: "monospace",
-                }}
-              >
-                {scoutLoading ? "..." : `↺ Regenerate (${scoutGenerationsLeft} left)`}
-              </button>
-            </div>
-
-            {scoutError && (
-              <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
-                {scoutError}
-              </div>
-            )}
-
-            {scoutLoading && !scoutPicks && (
-              <Card>
-                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>The Scout is reviewing today's slate...</div>
-              </Card>
-            )}
-
-            {scoutPicks && scoutPicks.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.1em" }}>
-                  TODAY'S PICKS — {scoutPicks.length} total
-                </div>
-                {scoutPicks.map((pick, idx) => {
-                  const expanded = scoutExpanded === idx;
-                  const confColor = pick.confidence === "HIGH" ? "#22c55e" : "#fbbf24";
-                  const marketColor = pick.market === "pitcher_strikeouts" ? "#818cf8" : pick.market === "pitcher_outs" ? "#38bdf8" : "#fb923c";
-                  return (
-                    <div
-                      key={`${pick.market}-${pick.player ?? pick.team}-${idx}`}
-                      onClick={() => setScoutExpanded(expanded ? null : idx)}
-                      style={{
-                        background: expanded ? "#1a1c2e" : "#161827",
-                        border: `1px solid ${expanded ? "#2d3148" : "#1f2437"}`,
-                        borderRadius: 10,
-                        padding: "12px 14px",
-                        cursor: "pointer",
-                        transition: "background 0.15s",
-                      }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
-                          <div style={{ background: `${marketColor}18`, border: `1px solid ${marketColor}40`, borderRadius: 5, padding: "2px 7px", fontSize: 9, fontWeight: 700, color: marketColor, fontFamily: "monospace" }}>
-                            {pick.marketLabel}
-                          </div>
-                          <TierBadge tier="ai" />
-                          <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>
-                            {pick.lean} {pick.line}
-                          </div>
-                          <div
-                            style={{ fontSize: 10, color: pick.gamePk ? "#7dd3fc" : "#6b7280", textDecoration: pick.gamePk ? "underline" : "none", textUnderlineOffset: 2 }}
-                            onClick={(e) => {
-                              if (!pick.gamePk) return;
-                              e.stopPropagation();
-                              openGame(pick.gamePk);
-                            }}
-                          >
-                            {pick.player ?? `${pick.team} @ ${pick.opponent}`}
-                          </div>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                          <div style={{ fontSize: 9, fontWeight: 700, color: confColor, fontFamily: "monospace" }}>{pick.confidence}</div>
-                          <div style={{ fontSize: 9, color: "#4b5563" }}>{pick.odds}</div>
-                          <div style={{ fontSize: 8, color: "#38bdf8", fontWeight: 700, fontFamily: "monospace" }}>{pick.book ?? "DK"}</div>
-                          <div style={{ fontSize: 10, color: "#4b5563" }}>{expanded ? "▲" : "▼"}</div>
-                        </div>
-                      </div>
-
-                      {expanded && (
-                        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                          <div style={{ fontSize: 10, color: "#9ca3af" }}>
-                            {pick.team} vs {pick.opponent} · {pick.gameTime}
-                          </div>
-                          <div style={{ fontSize: 11, color: "#d1d5db", lineHeight: 1.6, fontStyle: "italic", borderLeft: "2px solid #2d3148", paddingLeft: 10 }}>
-                            "{pick.reasoning}"
-                          </div>
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                            {(pick.signals ?? []).map((signal, signalIdx) => (
-                              <div key={signalIdx} style={{ background: "rgba(255,255,255,0.04)", border: "1px solid #2d3148", borderRadius: 4, padding: "2px 6px", fontSize: 9, color: "#9ca3af", fontFamily: "monospace" }}>
-                                {signal}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {scoutPicks && scoutPicks.length === 0 && (
-              <Card>
-                <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>
-                  No picks generated yet — DK lines may not be posted. Try regenerating closer to game time.
-                </div>
-              </Card>
-            )}
-
-            {(scoutEval || scoutEvalLoading) && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
-                <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.1em" }}>
-                  YESTERDAY'S REVIEW
-                </div>
-
-                {scoutEvalLoading && <div style={{ fontSize: 11, color: "#6b7280" }}>Loading review...</div>}
-
-                {scoutEval && (
-                  <>
-                    <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "12px 14px" }}>
-                      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                        {["SOUND_HIT", "LUCKY_HIT", "VARIANCE_MISS", "ADDRESSABLE_MISS"].map((cat) => {
-                          const count = (scoutEval.evaluations ?? []).filter((entry) => entry.category === cat).length;
-                          if (!count) return null;
-                          const color = cat === "SOUND_HIT" ? "#22c55e" : cat === "LUCKY_HIT" ? "#fbbf24" : cat === "VARIANCE_MISS" ? "#94a3b8" : "#ef4444";
-                          const label = cat === "SOUND_HIT" ? "✅ Sound" : cat === "LUCKY_HIT" ? "⚠ Lucky" : cat === "VARIANCE_MISS" ? "🎲 Variance" : "🔧 Fix";
-                          return (
-                            <div key={cat} style={{ background: `${color}15`, border: `1px solid ${color}40`, borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color, fontFamily: "monospace" }}>
-                              {count} {label}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6, fontStyle: "italic" }}>
-                        "{scoutEval.dayReview}"
-                      </div>
-                    </div>
-
-                    {scoutEval.improvementFlags?.length > 0 && (
-                      <div style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "10px 14px" }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: "#fca5a5", fontFamily: "monospace", marginBottom: 6 }}>🔧 IMPROVEMENTS FLAGGED</div>
-                        {scoutEval.improvementFlags.map((flag, flagIdx) => (
-                          <div key={flagIdx} style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5, marginBottom: 4 }}>· {flag}</div>
-                        ))}
-                      </div>
-                    )}
-
-                    {(scoutEval.evaluations ?? []).map((entry, idx) => {
-                      const expanded = scoutEvalExpanded === idx;
-                      const catColor = entry.category === "SOUND_HIT" ? "#22c55e" : entry.category === "LUCKY_HIT" ? "#fbbf24" : entry.category === "VARIANCE_MISS" ? "#94a3b8" : "#ef4444";
-                      return (
-                        <div
-                          key={`${entry.pickIndex}-${idx}`}
-                          onClick={() => setScoutEvalExpanded(expanded ? null : idx)}
-                          style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 8, padding: "10px 12px", cursor: "pointer" }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                            <div style={{ fontSize: 11, color: "#d1d5db" }}>Pick {entry.pickIndex + 1} · Actual: {entry.actualValue ?? "?"}</div>
-                            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                              <div style={{ fontSize: 9, fontWeight: 700, color: catColor, fontFamily: "monospace" }}>{String(entry.category ?? "").replace(/_/g, " ")}</div>
-                              <div style={{ fontSize: 10, color: "#4b5563" }}>{expanded ? "▲" : "▼"}</div>
-                            </div>
-                          </div>
-                          {expanded && (
-                            <div style={{ marginTop: 8, fontSize: 11, color: "#9ca3af", lineHeight: 1.6, fontStyle: "italic", borderLeft: "2px solid #2d3148", paddingLeft: 10 }}>
-                              "{entry.scoutReview}"
-                              {entry.improvementFlag && (
-                                <div style={{ marginTop: 6, color: "#fca5a5", fontStyle: "normal", fontSize: 10 }}>🔧 {entry.improvementFlag}</div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {view === "hr-scout" && isScoutUser && (
-          <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
-
-            {/* ── Header row ── */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: "0.05em" }}>⚾ HR SCOUT</div>
-                  <TierBadge tier="projection" />
-                </div>
-                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
-                  Projection-based HR prop research · Not financial advice
-                  {hrScoutGeneratedAt && (
-                    <span style={{ marginLeft: 8, color: "#374151" }}>
-                      · {new Date(hrScoutGeneratedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <button
-                onClick={handleHRScoutRegenerate}
-                disabled={hrScoutLoading || hrScoutGenerationsLeft <= 0}
-                style={{
-                  background: hrScoutGenerationsLeft > 0 ? "rgba(251,146,60,0.15)" : "rgba(255,255,255,0.04)",
-                  border: `1px solid ${hrScoutGenerationsLeft > 0 ? "rgba(251,146,60,0.4)" : "#2d3148"}`,
-                  borderRadius: 8,
-                  padding: "6px 12px",
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: hrScoutGenerationsLeft > 0 ? "#fdba74" : "#4b5563",
-                  cursor: hrScoutGenerationsLeft > 0 ? "pointer" : "not-allowed",
-                  fontFamily: "monospace",
-                }}
-              >
-                {hrScoutLoading ? "..." : `↺ Regenerate (${hrScoutGenerationsLeft} left)`}
-              </button>
-            </div>
-
-            {/* ── Error ── */}
-            {hrScoutError && (
-              <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, padding: "10px 12px", fontSize: 11, color: "#fca5a5" }}>
-                {hrScoutError}
-              </div>
-            )}
-
-            {/* ── Loading ── */}
-            {hrScoutLoading && !hrScoutPicks && (
-              <Card>
-                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
-                  HR Scout is analyzing today's slate...
-                </div>
-              </Card>
-            )}
-
-            {/* ── Pick cards by tier ── */}
-            {hrScoutPicks && hrScoutPicks.length > 0 && (() => {
-              const tier1 = hrScoutPicks.filter(p => p.tier === 1);
-              const tier2 = hrScoutPicks.filter(p => p.tier === 2);
-              const tier3 = hrScoutPicks.filter(p => p.tier === 3);
-
-              const tierConfig = [
-                { picks: tier1, label: "TIER 1 — STRONG PLAYS", color: "#fb923c" },
-                { picks: tier2, label: "TIER 2 — SOLID PLAYS", color: "#fbbf24" },
-                { picks: tier3, label: "TIER 3 — SPECULATIVE", color: "#9ca3af" },
-              ];
-
-              return (
-                <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                  {tierConfig.map(({ picks, label, color }) => picks.length > 0 && (
-                    <div key={label} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      <div style={{ fontSize: 9, fontWeight: 700, color, fontFamily: "monospace", letterSpacing: "0.1em" }}>
-                        {label} — {picks.length} pick{picks.length !== 1 ? "s" : ""}
-                      </div>
-                      {picks.map((pick, idx) => {
-                        const globalIdx = hrScoutPicks.indexOf(pick);
-                        const expanded = hrScoutExpanded === globalIdx;
-                        const confColor = pick.confidence === "HIGH" ? "#22c55e" : pick.confidence === "MEDIUM" ? "#fbbf24" : "#9ca3af";
-
-                        return (
-                          <div
-                            key={`hr-pick-${globalIdx}`}
-                            onClick={() => setHrScoutExpanded(expanded ? null : globalIdx)}
-                            style={{
-                              background: expanded ? "#1a1c2e" : "#161827",
-                              border: `1px solid ${expanded ? "#2d3148" : "#1f2437"}`,
-                              borderRadius: 10,
-                              padding: "12px 14px",
-                              cursor: "pointer",
-                              transition: "background 0.15s",
-                            }}
-                          >
-                            {/* ── Collapsed row ── */}
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
-                                {/* HR Score badge */}
-                                <div style={{
-                                  background: `${color}18`,
-                                  border: `1px solid ${color}40`,
-                                  borderRadius: 5,
-                                  padding: "2px 7px",
-                                  fontSize: 9,
-                                  fontWeight: 700,
-                                  color,
-                                  fontFamily: "monospace",
-                                }}>
-                                  HR {pick.hrScore ?? "–"}
-                                </div>
-                                <TierBadge tier="projection" />
-                                {/* Batter name */}
-                                <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb" }}>
-                                  {pick.batter}
-                                </div>
-                                {/* Team + pitcher context */}
-                                <div style={{ fontSize: 10, color: "#6b7280" }}>
-                                  {pick.team} vs {pick.pitcher} ({pick.pitcherTeam})
-                                </div>
-                              </div>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                                <div style={{ fontSize: 9, fontWeight: 700, color: confColor, fontFamily: "monospace" }}>
-                                  {pick.confidence}
-                                </div>
-                                <div style={{ fontSize: 10, color: "#4b5563" }}>{expanded ? "▲" : "▼"}</div>
-                              </div>
-                            </div>
-
-                            {/* ── Expanded detail ── */}
-                            {expanded && (
-                              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-                                {/* Game context */}
-                                <div style={{ fontSize: 10, color: "#9ca3af" }}>
-                                  {pick.game}
-                                </div>
-
-                                {/* Key signals chips */}
-                                {pick.keySignals?.length > 0 && (
-                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                                    {pick.keySignals.map((sig, sigIdx) => (
-                                      <div key={sigIdx} style={{
-                                        background: "rgba(251,146,60,0.08)",
-                                        border: "1px solid rgba(251,146,60,0.25)",
-                                        borderRadius: 4,
-                                        padding: "2px 7px",
-                                        fontSize: 9,
-                                        color: "#fdba74",
-                                        fontFamily: "monospace",
-                                      }}>
-                                        {sig}
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {/* AI reasoning */}
-                                {pick.reasoning && (
-                                  <div style={{
-                                    fontSize: 11,
-                                    color: "#d1d5db",
-                                    lineHeight: 1.6,
-                                    fontStyle: "italic",
-                                    borderLeft: "2px solid #2d3148",
-                                    paddingLeft: 10,
-                                  }}>
-                                    "{pick.reasoning}"
-                                  </div>
-                                )}
-
-                                {/* Caution flag */}
-                                {pick.caution && (
-                                  <div style={{
-                                    background: "rgba(251,191,36,0.08)",
-                                    border: "1px solid rgba(251,191,36,0.25)",
-                                    borderRadius: 6,
-                                    padding: "6px 10px",
-                                    fontSize: 10,
-                                    color: "#fde68a",
-                                  }}>
-                                    ⚠ {pick.caution}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ))}
-                </div>
-              );
-            })()}
-
-            {/* ── Empty state ── */}
-            {hrScoutPicks && hrScoutPicks.length === 0 && (
-              <Card>
-                <div style={{ textAlign: "center", padding: 30, color: "#6b7280", fontSize: 11 }}>
-                  No HR picks generated yet — lineups may not be posted. Try regenerating closer to game time.
-                </div>
-              </Card>
-            )}
-
-          </div>
-        )}
 
         {/* ════════════════════════════════════
             GAME VIEW
@@ -11249,6 +10728,19 @@ export default function App() {
                         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
                           <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", marginTop: 1 }}>{i + 1}</div>
                           <div style={{ fontSize: 14, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</div>
+                          {c.simConfidence != null && (
+                            <div style={{
+                              display: "flex", flexDirection: "column", alignItems: "center",
+                              background: "#141726", border: "1px solid #1f2437", borderRadius: 8,
+                              padding: "4px 7px", minWidth: 36
+                            }}>
+                              <div style={{
+                                fontSize: 12, fontWeight: 800, fontFamily: "monospace",
+                                color: c.simConfidence >= 65 ? "#34d399" : c.simConfidence >= 50 ? "#fbbf24" : "#f87171"
+                              }}>{c.simConfidence}%</div>
+                              <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>SIM</div>
+                            </div>
+                          )}
                         </div>
                         {/* Main info */}
                         <div style={{ flex: 1, minWidth: 0 }}>
@@ -11404,7 +10896,23 @@ export default function App() {
                   <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                       {/* Rank */}
-                      <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", flexShrink: 0, marginTop: 1 }}>{i + 1}</div>
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0, marginTop: 1 }}>
+                        <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280" }}>{i + 1}</div>
+                        <div style={{ fontSize: 14, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</div>
+                        {c.simConfidence != null && (
+                          <div style={{
+                            display: "flex", flexDirection: "column", alignItems: "center",
+                            background: "#141726", border: "1px solid #1f2437", borderRadius: 8,
+                            padding: "4px 7px", minWidth: 36
+                          }}>
+                            <div style={{
+                              fontSize: 12, fontWeight: 800, fontFamily: "monospace",
+                              color: c.simConfidence >= 65 ? "#34d399" : c.simConfidence >= 50 ? "#fbbf24" : "#f87171"
+                            }}>{c.simConfidence}%</div>
+                            <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>SIM</div>
+                          </div>
+                        )}
+                      </div>
 
                       {/* Main info */}
                       <div style={{ flex: 1, minWidth: 0 }}>
@@ -11532,6 +11040,103 @@ export default function App() {
                     </Card>
                   );
                 })}
+            </div>
+          );
+        })()}
+
+        {/* ════════════════════════════════════
+            AI BOARD VIEW
+        ════════════════════════════════════ */}
+        {view === "ai-board" && isScoutUser && (() => {
+          const MARKET_META = {
+            k:    { label: "K Prop",   color: "#38bdf8" },
+            outs: { label: "Outs",     color: "#a78bfa" },
+            hr:   { label: "HR",       color: "#fb923c" },
+            hits: { label: "Hits",     color: "#34d399" },
+          };
+
+          return (
+            <div style={{ padding: "12px 0" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>🤖 AI BOARD</span>
+                    <TierBadge tier="ai" />
+                  </div>
+                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>AI-scored picks across all markets · ranked by AI confidence</div>
+                </div>
+                <button
+                  onClick={() => { setAiBoardData(null); }}
+                  disabled={aiBoardLoading}
+                  style={{ background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 8, padding: "6px 10px", fontSize: 10, fontWeight: 700, color: aiBoardLoading ? "#4b5563" : "#a78bfa", cursor: aiBoardLoading ? "default" : "pointer", fontFamily: "monospace" }}
+                >
+                  ↺ Refresh
+                </button>
+              </div>
+
+              {aiBoardLoading && (
+                <div style={{ textAlign: "center", padding: 48, color: "#6b7280", fontSize: 11 }}>
+                  <div style={{ fontSize: 24, marginBottom: 8 }}>🤖</div>
+                  Running AI analysis across all markets…
+                </div>
+              )}
+
+              {!aiBoardLoading && !aiBoardData && !liveSlate?.length && (
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>No slate available.</div>
+              )}
+
+              {!aiBoardLoading && aiBoardData?.length > 0 && (
+                <div>
+                  {aiBoardData.map((c, i) => {
+                    const meta = MARKET_META[c.market] ?? { label: c.market, color: "#6b7280" };
+                    const aiColor = c.aiScore >= 75 ? "#34d399" : c.aiScore >= 55 ? "#fbbf24" : "#f87171";
+                    return (
+                      <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px" }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flexShrink: 0 }}>
+                            <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280" }}>{i + 1}</div>
+                            <div style={{ fontSize: 20, fontWeight: 900, color: aiColor, fontFamily: "monospace", lineHeight: 1 }}>{c.aiScore}</div>
+                            <div style={{ fontSize: 7, color: "#4b5563", fontFamily: "monospace" }}>AI</div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
+                              <div style={{ background: "#141726", border: "1px solid #1f2437", borderRadius: 5, padding: "2px 5px", textAlign: "center" }}>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace" }}>{c.score}</div>
+                                <div style={{ fontSize: 6, color: "#374151" }}>ALG</div>
+                              </div>
+                              {c.simConfidence != null && (
+                                <div style={{ background: "#141726", border: "1px solid #1f2437", borderRadius: 5, padding: "2px 5px", textAlign: "center" }}>
+                                  <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace" }}>{c.simConfidence}%</div>
+                                  <div style={{ fontSize: 6, color: "#374151" }}>SIM</div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
+                              <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
+                              <span style={{ fontSize: 8, fontWeight: 700, color: meta.color, background: `${meta.color}18`, border: `1px solid ${meta.color}40`, borderRadius: 4, padding: "1px 6px", fontFamily: "monospace" }}>{meta.label}</span>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
+                            </div>
+                            <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: c.aiReason ? 4 : 0 }}>{c.gameLabel}</div>
+                            {c.aiReason && (
+                              <div style={{ fontSize: 10, color: "#d1d5db", fontStyle: "italic", lineHeight: 1.4 }}>{c.aiReason}</div>
+                            )}
+                            {c.bookLine != null && (
+                              <div style={{ marginTop: 4, fontSize: 9, color: "#6b7280" }}>
+                                Line: <span style={{ color: "#9ca3af", fontFamily: "monospace" }}>{c.bookLine}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </Card>
+                    );
+                  })}
+                </div>
+              )}
+
+              {!aiBoardLoading && aiBoardData?.length === 0 && (
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>No AI Board picks available for today&apos;s slate.</div>
+              )}
             </div>
           );
         })()}

@@ -5464,3 +5464,103 @@ Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 88**.
 - One new state: `showLabSeasonOverview` (boolean, default `true`)
 
 *Updated 2026-05-06 — Session 77 complete · CODEX TASK 88 specced*
+
+---
+
+## 🗒 Session 78 — CW: AI Board Brainstorm + CODEX TASK 89 Specced
+
+**No files changed this session.** Spec written only.
+
+---
+
+### AI-Powered Board — Strategic Decision
+
+Decision: replace Scout, HR Scout, and Advisor tabs with a single **AI-Powered Board** tab.
+
+Rationale:
+- Scout / HR Scout / Advisor are three separate fetch + render pipelines doing overlapping things
+- A unified AI Board consolidates them into one ranked list across all markets
+- Adds two new quality layers: Monte Carlo simulation confidence + Haiku AI scoring
+
+**Three-phase plan:**
+- **Phase 1 (Task 89)** — Monte Carlo sim layer: adds `simConfidence` (0–100) to every board card, pure frontend math, no LLM
+- **Phase 2 (Task 90)** — AI Board tab: single Haiku call produces composite AI scores; Scout/HR Scout/Advisor removed
+- **Phase 3** — Scrapped (web search/trends)
+
+---
+
+### CODEX TASK 89 — Monte Carlo Simulation Layer (pending Codex)
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 89**.
+
+**Summary:**
+- 4 new module-level pure functions: `sampleNormal`, `simKConfidence`, `simOutsConfidence`, `simHRConfidence`, `simHitsConfidence`
+- Each runs N=50 simulations using Box-Muller normal sampling (K, Outs, Hits) or Bernoulli trials (HR)
+- `simConfidence` wired into `computePitcherBoard` and `computeBatterBoard` candidate objects
+- `parkFactor: pf.k` added to pitcher candidates (required by `simKConfidence`)
+- UI: `SIM XX%` secondary badge shown next to existing score badge on board cards
+- Board sort order unchanged (still by algorithmic `score`)
+- No backend changes, no new state, no new API calls
+
+*Updated 2026-05-06 — Session 78 complete · CODEX TASK 89 specced*
+
+---
+
+## 🗒 Session 79 — CW: Task 89 Approved + Task 90 Specced (AI Board Tab)
+
+**Task 89 approved:** Monte Carlo simulation layer confirmed clean. `simConfidence` on all board cards.
+
+---
+
+### CODEX TASK 90 — AI Board Tab (pending Codex)
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 90**.
+
+**Decision:** Existing Board tab is UNTOUCHED. New `"ai-board"` tab added alongside it.
+
+**Summary:**
+- New `backend/routes/aiBoard.js` — POST `/api/ai-board/score`, Haiku-backed with MD5 cache (4h TTL), deterministic fallback (60% algo + 40% sim blend)
+- Mount: `app.use("/api/ai-board", require("./routes/aiBoard"))` in server.js
+- Frontend: 2 new state vars (`aiBoardData`, `aiBoardLoading`), `buildAiBoardPayload` helper (top 8 per market = 32 candidates max), useEffect gated on `view === "ai-board"`, `isScoutUser`, `liveSlate?.length`
+- Tab button: `🤖 AI Board` purple (`#a78bfa`), scout users only, placed after Board button
+- Cards: AI score (large, colored by 75/55 thresholds), ALG + SIM secondary badges, market chip (K Prop/Outs/HR/Hits), AI reason sentence, book line
+- Sorted by `aiScore` descending
+- `handleSoftRefresh` resets `aiBoardData` to null
+
+**Separate backlog item (not in this task):** Remove Scout, HR Scout, Advisor tabs after AI Board ships.
+
+*Updated 2026-05-06 — Session 79 complete · CODEX TASK 90 specced*
+
+---
+
+## 🗒 Session 80 — CW: Task 90 Approved + Task 91 Specced (Remove Scout/HR Scout/Advisor)
+
+**Task 90 approved:** AI Board tab confirmed clean — `aiBoard.js`, `server.js`, `prop-scout-v7.jsx` all passed syntax checks. `npm run build` passed.
+
+---
+
+### CODEX TASK 91 — Remove Scout, HR Scout, Advisor Tabs (pending Codex)
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 91**.
+
+**File:** `prop-scout-v7.jsx` only — no backend changes needed.
+
+**Summary — 13 removals in order:**
+
+1. 20 state lines: all `scout*`, `hrScout*`, `advisor*` useState declarations (~lines 3387–3411)
+2. `advisorBottomRef` useRef (~line 3498)
+3. 4 lines from `handleLogout`: `setScoutPicks(null)`, `setScoutEval(null)`, `setScoutError(null)`, `setScoutGenerationsLeft(3)` (~lines 3846–3849)
+4. Scout fetch useEffect (~lines 3870–3891) — fetches `/api/scout/picks` and `/api/scout/evaluation/:date`
+5. HR Scout fetch useEffect (~lines 3893–3906) — fetches `/api/hr-scout/picks`
+6. Advisor scroll useEffect (~lines 4161–4163) — `advisorBottomRef.current?.scrollIntoView`
+7. `handleAdvisorSend` + `handleAdvisorPersonaSwitch` functions (~lines 5050–5097)
+8. Scout nav button (~lines 5894–5896) — `🎯 Scout`, `view === "scout"`, sky blue active color
+9. HR Scout nav button (~lines 5897–5915) — `⚾ HR Scout`, `view === "hr-scout"`, orange active color
+10. Advisor nav button (~lines 5916–5921) — `🧠 Advisor`, `view === "advisor"`, amber active color
+11. Advisor view block (~lines 6522–6677) — full chat UI between chat input and Lab view
+12. Scout view block (~lines 7743–7935) — full Scout picks + evaluation UI
+13. HR Scout view block (~lines 7937–8137) — full HR Scout picks UI, ends just before GAME VIEW comment
+
+**No backend changes** — `/api/scout`, `/api/hr-scout`, `/api/advisor` routes can be cleaned up in a separate task later.
+
+*Updated 2026-05-06 — Session 80 complete · CODEX TASK 91 specced*

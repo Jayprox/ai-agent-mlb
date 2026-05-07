@@ -13577,3 +13577,990 @@ Search for `showLabTrackRecord` — it's already declared nearby. Add the new st
 4. Track Record panel still renders all 4 model grids unchanged
 5. Calibration chart SVG renders after each model's stats grid (only if ≥3 settled entries)
 6. No console errors
+
+---
+
+## BACKLOG — AI-Powered Board (3-Phase Plan)
+
+**Vision:** Replace the Scout, HR Scout, and Advisor tabs with a single AI-Powered Board tab. Cards retain the existing algorithmic confidence score but add a Monte Carlo simulation confidence (`simConfidence`) and, in Phase 2, a Haiku-generated AI composite score. Phase 3 (web search) is explicitly out of scope.
+
+### Phase 1 — CODEX TASK 89: Monte Carlo Simulation Layer
+Add `simConfidence` (0–100) to every board card. Pure frontend math, no LLM, no API calls.
+
+### Phase 2 — CODEX TASK 90: AI Board Tab + Remove Scout/HR Scout/Advisor
+New "AI Board" tab backed by a single Haiku call that produces composite AI scores across all markets. Scout, HR Scout, and Advisor tabs removed.
+
+### Phase 3 — SCRAPPED (web search/trends)
+
+---
+
+## CODEX TASK 89 — Monte Carlo Simulation Layer (Phase 1 of AI Board)
+
+**Size:** M  
+**File:** `prop-scout-v7.jsx` only — no backend changes  
+
+---
+
+### Goal
+
+Add a `simConfidence` field (integer 0–100, representing % of simulations where the OVER/favored outcome clears the line) to every candidate returned by `computePitcherBoard` and `computeBatterBoard`. Display it on board cards alongside the existing algorithmic `score`.
+
+No existing logic is removed or replaced. `simConfidence` is purely additive.
+
+---
+
+### Simulation helpers — add these as module-level pure functions, directly above `hrBoardScore` (around line 1888)
+
+#### Box-Muller normal sample (shared utility)
+
+```js
+function sampleNormal(mean, std) {
+  const u1 = Math.random() || 1e-10;
+  const u2 = Math.random() || 1e-10;
+  return mean + std * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+```
+
+#### K prop simulation
+
+```js
+// Returns % of N sims where pitcher Ks > line (OVER). Returns null if insufficient data.
+function simKConfidence(candidate, line, n = 50) {
+  if (line == null) return null;
+  const mean = parseFloat(candidate.avgK3) || null;
+  const k9 = parseFloat(candidate.k9) || 0;
+  if (!mean && k9 === 0) return null;
+  // Estimate mean Ks: prefer avgK3, fall back to k9 * 5.5 IP / 9
+  const mu = mean ?? (k9 * 5.5 / 9);
+  // Std dev: derived from gamelog variance if available, else 1.8
+  const std = 1.8;
+  // Apply multipliers as offsets to mean
+  const parkAdj = ((candidate.parkFactor ?? 1.0) - 1.0) * 1.5; // park K factor
+  const umpAdj = candidate.umpireRating === "pitcher" ? 0.5 : candidate.umpireRating === "batter" ? -0.5 : 0;
+  const adjMu = mu + parkAdj + umpAdj;
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const result = Math.max(0, sampleNormal(adjMu, std));
+    if (result > line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+Note: `candidate.parkFactor` is not currently on pitcher candidates — you must add it. In `computePitcherBoard`, the `pf` variable is already computed as `PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK`. Add `parkFactor: pf.k` to the `candidates.push({...})` object (around line 2098).
+
+#### Outs prop simulation
+
+```js
+// Returns % of N sims where pitcher outs recorded > line.
+function simOutsConfidence(candidate, line, n = 50) {
+  if (line == null) return null;
+  const avgIPStr = candidate.avgIP;
+  if (!avgIPStr || avgIPStr === "—") return null;
+  const [whole, frac = "0"] = String(avgIPStr).split(".");
+  const avgIPNum = parseInt(whole) + parseInt(frac) / 3;
+  const meanOuts = avgIPNum * 3;
+  const std = 2.8; // ~0.93 IP typical variance
+  // Fatigue penalty: if last start was ≥85 pitches ≤4 days ago, shift mean down
+  // (candidate already has signals[] for this, but we keep sim self-contained)
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const result = Math.max(0, sampleNormal(meanOuts, std));
+    if (result > line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+#### HR simulation
+
+```js
+// Returns % of N sims where batter hits ≥1 HR.
+function simHRConfidence(candidate, line, n = 50) {
+  if (line == null) return null;
+  const hr = parseInt(candidate.hr) || 0;
+  const slg = parseFloat(candidate.slg) || 0;
+  if (hr === 0 && slg < 0.35) return null;
+  // P(HR in a game) ≈ HR pace / 162 adjusted for park, wind, platoon
+  const basePHR = hr > 0 ? Math.min(0.25, hr / 162) : Math.max(0.04, (slg - 0.35) * 0.12);
+  const parkMult = candidate.parkFactor ?? 1.0; // pf.hr already on batter candidates
+  const windBonus = candidate.windFav ? 1.12 : 1.0;
+  // Platoon: use candidate.matchup.batterVsHand.slg if available
+  const vsHandSLG = candidate.matchup?.batterVsHand?.slg != null
+    ? parseFloat(candidate.matchup.batterVsHand.slg)
+    : slg;
+  const platoonMult = slg > 0 ? (vsHandSLG / slg) : 1.0;
+  const pHR = Math.min(0.35, basePHR * parkMult * windBonus * platoonMult);
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    // Bernoulli trial for each plate appearance (~4 PAs)
+    let scored = false;
+    const pa = candidate.order != null && candidate.order <= 3 ? 4 : candidate.order >= 8 ? 3 : 4;
+    for (let j = 0; j < pa; j++) {
+      if (Math.random() < pHR / pa) { scored = true; break; }
+    }
+    if (scored && 0.5 < line ? false : scored) hits++;
+  }
+  // Simplify: single Bernoulli per sim (P(at least 1 HR in game))
+  hits = 0;
+  for (let i = 0; i < n; i++) {
+    if (Math.random() < pHR) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+#### Hits simulation
+
+```js
+// Returns % of N sims where batter gets ≥ line hits.
+function simHitsConfidence(candidate, line, n = 50) {
+  if (line == null) return null;
+  const avg = parseFloat(candidate.avg) || 0;
+  if (avg === 0) return null;
+  // Platoon-adjusted avg
+  const vsHandAVG = candidate.matchup?.batterVsHand?.avg != null
+    ? parseFloat(candidate.matchup.batterVsHand.avg)
+    : avg;
+  const parkMult = candidate.parkFactor ?? 1.0; // pf.hit on batter candidates
+  const adjAvg = Math.min(0.450, vsHandAVG * parkMult);
+  // PA per game based on batting order
+  const pa = candidate.order != null && candidate.order <= 3 ? 4 : candidate.order >= 8 ? 3 : 4;
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    let gameHits = 0;
+    for (let j = 0; j < pa; j++) {
+      if (Math.random() < adjAvg) gameHits++;
+    }
+    if (gameHits >= line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+---
+
+### Wiring into `computePitcherBoard`
+
+After the `candidates.push({...})` call (around line 2098), add `simConfidence` to the pushed object:
+
+```js
+// Inside computePitcherBoard, in the candidates.push({}) object, add:
+parkFactor: pf.k,   // needed by simKConfidence
+simConfidence: (() => {
+  const line = propLine?.books?.DK?.line
+    ?? propLine?.books?.FD?.line
+    ?? propLine?.books?.CZR?.line
+    ?? suggestedLine;
+  return type === "k"
+    ? simKConfidence({ avgK3, k9: merged.kPer9 ?? merged.k9 ?? 0, parkFactor: pf.k, umpireRating: umpire?.rating ?? null }, line)
+    : simOutsConfidence({ avgIP: gamelog?.avgIP ?? "—" }, line);
+})(),
+```
+
+Note: `avgK3` is already a local variable at this point (computed just above). Pass a lightweight object rather than the full candidate to keep the call clean.
+
+---
+
+### Wiring into `computeBatterBoard`
+
+`parkFactor` is already on batter candidates (`parkFactor: type === "hr" ? pf.hr : pf.hit`). Add `simConfidence` to the `candidates.push({...})` object:
+
+```js
+// Inside computeBatterBoard, in the candidates.push({}) object, add:
+simConfidence: (() => {
+  const line = propLine?.books?.DK?.line
+    ?? propLine?.books?.FD?.line
+    ?? propLine?.books?.CZR?.line
+    ?? (type === "hr" ? 0.5 : 1.5); // fallback lines: anytime HR = 0.5, hits = 1.5
+  return type === "hr"
+    ? simHRConfidence({ hr: hlog?.hr ?? 0, slg: hlog?.slg ?? "0", parkFactor: pf.hr, windFav: wxFav, matchup: { batterVsHand: sd ? (pitcherHand === "L" ? sd.vsL : sd.vsR) : null }, order: b.order }, line)
+    : simHitsConfidence({ avg: hlog?.avg ?? "0", parkFactor: pf.hit, matchup: { batterVsHand: sd ? (pitcherHand === "L" ? sd.vsL : sd.vsR) : null }, order: b.order }, line);
+})(),
+```
+
+---
+
+### UI — display `simConfidence` on board cards
+
+Search for where board cards render the `score` badge. There are two places: pitcher board cards (K and Outs tabs) and batter board cards (HR and Hits tabs).
+
+In each place, immediately after the existing score badge (the `score` value rendered in a colored circle/badge), add a small secondary badge:
+
+```jsx
+{c.simConfidence != null && (
+  <div style={{
+    display: "flex", flexDirection: "column", alignItems: "center",
+    background: "#141726", border: "1px solid #1f2437", borderRadius: 8,
+    padding: "4px 7px", minWidth: 36
+  }}>
+    <div style={{
+      fontSize: 12, fontWeight: 800, fontFamily: "monospace",
+      color: c.simConfidence >= 65 ? "#34d399" : c.simConfidence >= 50 ? "#fbbf24" : "#f87171"
+    }}>{c.simConfidence}%</div>
+    <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>SIM</div>
+  </div>
+)}
+```
+
+Place this badge immediately to the right of (or below) the existing score badge in the card header area.
+
+---
+
+### Do NOT
+
+- Do not change the Board's sort order — it still sorts by `score` (algorithmic). `simConfidence` is display-only in Phase 1.
+- Do not remove any existing board logic, scoring functions, or UI
+- Do not add any API calls, effects, or state variables
+- Do not modify `computeGameBoard` (Games tab) — only pitcher and batter boards
+
+---
+
+### Verification
+
+1. `node --check prop-scout-v7.jsx` passes (or equivalent babel/swc parse)
+2. `simConfidence` appears as an integer on pitcher and batter candidates
+3. Board cards show `SIM XX%` badge next to the existing score
+4. `simConfidence` is `null` when `propLine` is null and no fallback line applies (e.g., pitcher with no book line and no `suggestedLine`)
+5. No console errors
+6. Existing score ranking unchanged
+
+---
+
+### HANDOFF NOTE — 2026-05-06 — CODEX TASK 89 COMPLETED (Monte Carlo Simulation Layer)
+
+Implemented in `prop-scout-v7.jsx` only.
+
+What changed:
+- Added five new pure module-level sim helpers above the board scoring functions:
+  - `sampleNormal`
+  - `simKConfidence`
+  - `simOutsConfidence`
+  - `simHRConfidence`
+  - `simHitsConfidence`
+- `computePitcherBoard(...)` now adds:
+  - `parkFactor: pf.k`
+  - `simConfidence` for K / Outs candidates using the lightweight sim inputs from the Task 89 spec
+- `computeBatterBoard(...)` now adds:
+  - `simConfidence` for HR / Hits candidates using current batter stats, park factor, order, wind, and handedness split context
+- Board pitcher cards and batter cards now show a small `SIM XX%` badge directly under the main algorithmic score block.
+
+What did **not** change:
+- No backend changes
+- No new state or effects
+- No API calls
+- No changes to `computeGameBoard(...)`
+- No changes to board sort order — ranking remains algorithmic `score` only
+
+Verification:
+- `npm run build` passed
+- Existing Vite large-chunk warning remains unchanged / non-blocking
+
+---
+
+## CODEX TASK 90 — AI Board Tab (Phase 2 of AI Board)
+
+**Size:** L  
+**Files:**
+- `backend/routes/aiBoard.js` — new file
+- `backend/server.js` — one line mount
+- `prop-scout-v7.jsx` — new tab button, state, effect, render block
+
+**Do NOT touch:** The existing Board tab (`view === "board"`), its render block, its state, or its compute functions. Zero changes to anything in the existing Board.
+
+---
+
+### Overview
+
+A new **AI Board** tab (`view === "ai-board"`) that ranks prop candidates across all four markets (K, Outs, HR, Hits) using an AI-generated composite score from Claude Haiku. Cards are sorted by `aiScore` (not the algorithmic `score`). Available to `isScoutUser` only.
+
+---
+
+### Backend — `backend/routes/aiBoard.js`
+
+Create this file. Follow the exact same pattern as `backend/routes/cardSummary.js`.
+
+```js
+const express = require("express");
+const crypto = require("crypto");
+const Anthropic = require("@anthropic-ai/sdk");
+const cache = require("../services/cache");
+
+const router = express.Router();
+const AI_BOARD_TTL = 4 * 60 * 60 * 1000; // 4h
+const MODEL = "claude-haiku-4-5-20251001";
+
+let _anthropic = null;
+function getAnthropic() {
+  if (!_anthropic) {
+    if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
+    _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return _anthropic;
+}
+
+function safeJsonParse(text) {
+  const raw = String(text ?? "").trim()
+    .replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "");
+  return JSON.parse(raw);
+}
+
+function fallbackScore(candidate) {
+  // Deterministic fallback: blend algo score and simConfidence
+  const algo = candidate.score ?? 50;
+  const sim = candidate.simConfidence ?? 50;
+  return Math.round(algo * 0.6 + sim * 0.4);
+}
+
+router.post("/score", async (req, res) => {
+  const inputCandidates = Array.isArray(req.body?.candidates) ? req.body.candidates : [];
+  if (!inputCandidates.length) return res.status(400).json({ error: "candidates[] required" });
+
+  const scores = {};
+  const uncached = [];
+
+  inputCandidates.forEach((c) => {
+    if (!c?.id) return;
+    const hash = crypto.createHash("md5").update(JSON.stringify({
+      id: c.id, market: c.market, score: c.score, simConfidence: c.simConfidence,
+      bookLine: c.bookLine, stats: c.stats,
+    })).digest("hex");
+    const cacheKey = `ai-board:${hash}`;
+    const cached = cache.get(cacheKey);
+    if (cached) { scores[c.id] = cached; return; }
+    uncached.push({ ...c, _cacheKey: cacheKey });
+  });
+
+  if (!uncached.length) return res.json({ scores });
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    uncached.forEach((c) => { scores[c.id] = { aiScore: fallbackScore(c), aiReason: null }; });
+    return res.json({ scores, fallback: true });
+  }
+
+  try {
+    const client = getAnthropic();
+    const message = await client.messages.create({
+      model: MODEL,
+      max_tokens: 1200,
+      temperature: 0.15,
+      system:
+        "You score MLB prop betting candidates on a 0–100 scale. " +
+        "Use only the supplied stats. Do not invent numbers or players. " +
+        "Score meaning: 75–100 = strong edge, 55–74 = moderate lean, 40–54 = neutral, below 40 = weak. " +
+        "Weight inputs: algorithmic score (35%), simulation confidence (35%), stat quality (30%). " +
+        "Write one factual reason sentence per candidate, 10–20 words, no hype or emojis. " +
+        "Return strict JSON only: {\"scores\":[{\"id\":\"...\",\"aiScore\":75,\"aiReason\":\"...\"}]}",
+      messages: [{
+        role: "user",
+        content: JSON.stringify({
+          candidates: uncached.map((c) => ({
+            id: c.id,
+            market: c.market,
+            playerName: c.playerName,
+            team: c.team,
+            gameLabel: c.gameLabel,
+            score: c.score,
+            simConfidence: c.simConfidence,
+            bookLine: c.bookLine,
+            stats: c.stats,
+          })),
+        }),
+      }],
+    });
+
+    const text = message.content?.find((p) => p.type === "text")?.text ?? "";
+    const parsed = safeJsonParse(text);
+    const byId = new Map(
+      Array.isArray(parsed?.scores)
+        ? parsed.scores.map((s) => [s?.id, { aiScore: Math.round(Number(s?.aiScore ?? 50)), aiReason: String(s?.aiReason ?? "").trim() }])
+        : []
+    );
+
+    uncached.forEach((c) => {
+      const result = byId.get(c.id) ?? { aiScore: fallbackScore(c), aiReason: null };
+      scores[c.id] = result;
+      cache.set(c._cacheKey, result, AI_BOARD_TTL);
+    });
+
+    return res.json({ scores });
+  } catch (err) {
+    console.warn(`  ⚠ ai-board scoring failed: ${err.message}`);
+    uncached.forEach((c) => { scores[c.id] = { aiScore: fallbackScore(c), aiReason: null }; });
+    return res.json({ scores, fallback: true });
+  }
+});
+
+module.exports = router;
+```
+
+---
+
+### Backend — `backend/server.js`
+
+Add one line after the `card-summary` mount (around line 43):
+
+```js
+app.use("/api/ai-board", require("./routes/aiBoard"));
+```
+
+---
+
+### Frontend — `prop-scout-v7.jsx`
+
+#### 1. New state variables
+
+Add these near the existing `labCalibration` / `labCalibrationLoading` state block (around line 3272):
+
+```js
+const [aiBoardData, setAiBoardData] = useState(null);
+const [aiBoardLoading, setAiBoardLoading] = useState(false);
+```
+
+#### 2. Helper — `buildAiBoardPayload`
+
+Add this as a module-level pure function, directly below the `computeBatterBoard` function (after line ~2330):
+
+```js
+// Builds the candidate list for the AI Board POST payload.
+// Takes top 8 per market to keep the Haiku call compact.
+function buildAiBoardPayload(liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, liveLineups, liveWeather, liveHittingLog, liveStatSplits) {
+  const kCandidates = computePitcherBoard("k", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats).slice(0, 8);
+  const outsCandidates = computePitcherBoard("outs", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats).slice(0, 8);
+  const hrCandidates = computeBatterBoard("hr", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits).slice(0, 8);
+  const hitsCandidates = computeBatterBoard("hits", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits).slice(0, 8);
+
+  const mapCandidate = (c, market) => {
+    const bookLine = c.propLine?.books?.DK?.line ?? c.propLine?.books?.FD?.line ?? c.propLine?.books?.CZR?.line ?? c.suggestedLine ?? null;
+    let stats = {};
+    if (market === "k") {
+      stats = { k9: c.k9, avgK3: c.avgK3, era: c.era, whip: c.whip, umpireRating: c.umpireRating };
+    } else if (market === "outs") {
+      stats = { avgIP: c.avgIP, whip: c.whip, era: c.era };
+    } else if (market === "hr") {
+      stats = { slg: c.slg, hr: c.hr, ops: c.ops, parkFactor: c.parkFactor, windFav: c.windFav, order: c.order, platoonSLG: c.matchup?.batterVsHand?.slg ?? null };
+    } else {
+      stats = { avg: c.avg, ops: c.ops, parkFactor: c.parkFactor, order: c.order, l5: c.hitRate?.slice(0,5).filter(Boolean).length ?? null, platoonAVG: c.matchup?.batterVsHand?.avg ?? null };
+    }
+    return {
+      id: `${market}:${c.id}:${c.gamePk}`,
+      market,
+      playerName: c.name,
+      team: c.team,
+      gameLabel: c.gameLabel,
+      score: c.score,
+      simConfidence: c.simConfidence,
+      bookLine,
+      stats,
+      // Keep full candidate ref for UI rendering — not sent to backend
+      _candidate: c,
+    };
+  };
+
+  return [
+    ...kCandidates.map((c) => mapCandidate(c, "k")),
+    ...outsCandidates.map((c) => mapCandidate(c, "outs")),
+    ...hrCandidates.map((c) => mapCandidate(c, "hr")),
+    ...hitsCandidates.map((c) => mapCandidate(c, "hits")),
+  ];
+}
+```
+
+#### 3. useEffect — fetch AI scores when tab opens
+
+Add this effect near the other lab/scout fetch effects (around line 3880). The effect must not fire until the underlying live data is available:
+
+```js
+useEffect(() => {
+  if (view !== "ai-board" || !currentUser || !isScoutUser) return;
+  if (aiBoardData !== null || aiBoardLoading) return;
+  if (!liveSlate?.length) return; // wait for slate
+  setAiBoardLoading(true);
+  const payload = buildAiBoardPayload(
+    liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
+    liveLineups, liveWeather, liveHittingLog, liveStatSplits
+  );
+  if (!payload.length) { setAiBoardLoading(false); return; }
+  // Strip _candidate before POSTing (not serialisable cleanly and not needed by backend)
+  const postPayload = payload.map(({ _candidate, ...rest }) => rest);
+  apiFetch("/api/ai-board/score", { method: "POST", body: JSON.stringify({ candidates: postPayload }) })
+    .then((data) => {
+      const scored = payload.map((c) => ({
+        ...c._candidate,
+        id: c.id,          // use the composite id (market:playerId:gamePk)
+        market: c.market,
+        bookLine: c.bookLine,
+        aiScore: data?.scores?.[c.id]?.aiScore ?? fallbackAiScore(c),
+        aiReason: data?.scores?.[c.id]?.aiReason ?? null,
+      }));
+      scored.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
+      setAiBoardData(scored);
+    })
+    .catch(() => {
+      // Fallback: use algo+sim blend
+      const scored = payload.map((c) => ({
+        ...c._candidate,
+        id: c.id,
+        market: c.market,
+        bookLine: c.bookLine,
+        aiScore: Math.round((c.score ?? 50) * 0.6 + (c.simConfidence ?? 50) * 0.4),
+        aiReason: null,
+      }));
+      scored.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
+      setAiBoardData(scored);
+    })
+    .finally(() => setAiBoardLoading(false));
+}, [view, currentUser, isScoutUser, liveSlate, aiBoardData, aiBoardLoading]); // eslint-disable-line react-hooks/exhaustive-deps
+```
+
+Add this small inline helper near where `fallbackScore` would be referenced (just before the effect or at module level):
+
+```js
+function fallbackAiScore(c) {
+  return Math.round((c.score ?? 50) * 0.6 + (c.simConfidence ?? 50) * 0.4);
+}
+```
+
+Also: `handleSoftRefresh` should reset `aiBoardData` to null. Find the `handleSoftRefresh` function and add `setAiBoardData(null);` alongside the other state resets.
+
+#### 4. Tab button
+
+Add this immediately after the existing `Board` tab button and before the soft refresh div:
+
+```jsx
+{isScoutUser && (
+  <button
+    onClick={() => setView("ai-board")}
+    style={{
+      background: view === "ai-board" ? "#a78bfa" : "#161827",
+      border: `1px solid ${view === "ai-board" ? "#a78bfa" : "#1f2437"}`,
+      borderRadius: 8,
+      padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+      fontSize: isNarrowPhone ? 9 : 10,
+      color: view === "ai-board" ? "#000" : "#9ca3af",
+      fontFamily: "monospace",
+      fontWeight: 700,
+      cursor: "pointer",
+      textTransform: "uppercase",
+    }}
+  >
+    🤖 AI Board
+  </button>
+)}
+```
+
+#### 5. View render block
+
+Add this render block immediately after the existing Board view block (`view === "board"`) closes. Find the closing `})()}` of the Board block and insert after it:
+
+```jsx
+{/* ════════════════════════════════════
+    AI BOARD VIEW
+════════════════════════════════════ */}
+{view === "ai-board" && isScoutUser && (() => {
+  const MARKET_META = {
+    k:    { label: "K Prop",   color: "#38bdf8" },
+    outs: { label: "Outs",     color: "#a78bfa" },
+    hr:   { label: "HR",       color: "#fb923c" },
+    hits: { label: "Hits",     color: "#34d399" },
+  };
+
+  return (
+    <div style={{ padding: "12px 0" }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>🤖 AI BOARD</span>
+            <TierBadge tier="ai" />
+          </div>
+          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>AI-scored picks across all markets · ranked by AI confidence</div>
+        </div>
+        <button
+          onClick={() => { setAiBoardData(null); }}
+          disabled={aiBoardLoading}
+          style={{ background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 8, padding: "6px 10px", fontSize: 10, fontWeight: 700, color: aiBoardLoading ? "#4b5563" : "#a78bfa", cursor: aiBoardLoading ? "default" : "pointer", fontFamily: "monospace" }}
+        >
+          ↺ Refresh
+        </button>
+      </div>
+
+      {/* Loading */}
+      {aiBoardLoading && (
+        <div style={{ textAlign: "center", padding: 48, color: "#6b7280", fontSize: 11 }}>
+          <div style={{ fontSize: 24, marginBottom: 8 }}>🤖</div>
+          Running AI analysis across all markets…
+        </div>
+      )}
+
+      {/* No slate */}
+      {!aiBoardLoading && !aiBoardData && !liveSlate?.length && (
+        <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>No slate available.</div>
+      )}
+
+      {/* Cards */}
+      {!aiBoardLoading && aiBoardData?.length > 0 && (
+        <div>
+          {aiBoardData.map((c, i) => {
+            const meta = MARKET_META[c.market] ?? { label: c.market, color: "#6b7280" };
+            const aiColor = c.aiScore >= 75 ? "#34d399" : c.aiScore >= 55 ? "#fbbf24" : "#f87171";
+            return (
+              <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px" }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                  {/* AI score column */}
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flexShrink: 0 }}>
+                    <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280" }}>{i + 1}</div>
+                    <div style={{ fontSize: 20, fontWeight: 900, color: aiColor, fontFamily: "monospace", lineHeight: 1 }}>{c.aiScore}</div>
+                    <div style={{ fontSize: 7, color: "#4b5563", fontFamily: "monospace" }}>AI</div>
+                    {/* Secondary: algo + sim */}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
+                      <div style={{ background: "#141726", border: "1px solid #1f2437", borderRadius: 5, padding: "2px 5px", textAlign: "center" }}>
+                        <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace" }}>{c.score}</div>
+                        <div style={{ fontSize: 6, color: "#374151" }}>ALG</div>
+                      </div>
+                      {c.simConfidence != null && (
+                        <div style={{ background: "#141726", border: "1px solid #1f2437", borderRadius: 5, padding: "2px 5px", textAlign: "center" }}>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", fontFamily: "monospace" }}>{c.simConfidence}%</div>
+                          <div style={{ fontSize: 6, color: "#374151" }}>SIM</div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Main content */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
+                      <span style={{ fontSize: 8, fontWeight: 700, color: meta.color, background: `${meta.color}18`, border: `1px solid ${meta.color}40`, borderRadius: 4, padding: "1px 6px", fontFamily: "monospace" }}>{meta.label}</span>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: c.aiReason ? 4 : 0 }}>{c.gameLabel}</div>
+                    {c.aiReason && (
+                      <div style={{ fontSize: 10, color: "#d1d5db", fontStyle: "italic", lineHeight: 1.4 }}>{c.aiReason}</div>
+                    )}
+                    {c.bookLine != null && (
+                      <div style={{ marginTop: 4, fontSize: 9, color: "#6b7280" }}>
+                        Line: <span style={{ color: "#9ca3af", fontFamily: "monospace" }}>{c.bookLine}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Empty state after load */}
+      {!aiBoardLoading && aiBoardData?.length === 0 && (
+        <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>No AI Board picks available for today&apos;s slate.</div>
+      )}
+    </div>
+  );
+})()}
+```
+
+---
+
+### Do NOT
+
+- Do not change the existing Board tab (`view === "board"`) in any way
+- Do not change `computePitcherBoard`, `computeBatterBoard`, or any scoring functions
+- Do not add `ai-board` to `handleSoftRefresh`'s state resets other than `setAiBoardData(null)`
+- Do not remove Scout, HR Scout, or Advisor tabs (separate future task)
+- Do not add `aiBoard` to the Lab calibration or picks systems
+
+---
+
+### Verification
+
+1. `node --check backend/routes/aiBoard.js`
+2. `POST /api/ai-board/score` returns `{ scores: { "k:123:456": { aiScore: 72, aiReason: "..." } } }`
+3. AI Board tab appears in nav for scout users only
+4. Loading spinner shows while fetching
+5. Cards render sorted by `aiScore` descending, showing AI score large, ALG + SIM small
+6. Market chip (K Prop / Outs / HR / Hits) shows in correct color
+7. Refresh button clears `aiBoardData` and re-triggers the effect
+8. Existing Board tab is completely unchanged
+
+---
+
+### HANDOFF NOTE — 2026-05-06 — CODEX TASK 90 COMPLETED (AI Board Tab)
+
+Implemented across:
+- `backend/routes/aiBoard.js` (new)
+- `backend/server.js`
+- `prop-scout-v7.jsx`
+
+Backend:
+- Added `POST /api/ai-board/score`
+- Uses a single batched Claude Haiku call for up to 32 candidates (top 8 per market)
+- Per-candidate MD5 cache with `4h` TTL via `cache`
+- Fallback when `ANTHROPIC_API_KEY` is missing or scoring fails:
+  - `aiScore = 60% algo score + 40% simConfidence`
+  - `aiReason = null`
+
+Frontend:
+- Added `aiBoardData` + `aiBoardLoading` state
+- Added module-level `buildAiBoardPayload(...)`
+  - computes top 8 each for `k`, `outs`, `hr`, `hits`
+  - strips to lean stat objects for backend POST
+  - preserves full candidate ref locally for UI render
+- Added AI Board fetch effect gated on:
+  - `view === "ai-board"`
+  - `currentUser`
+  - `isScoutUser`
+  - `liveSlate` ready
+- Added `🤖 AI Board` nav button for scout users only
+- Added standalone `view === "ai-board"` render block:
+  - cards sorted by `aiScore` descending
+  - large AI score with green/yellow/red thresholds
+  - small `ALG` + `SIM` secondary badges
+  - market chip
+  - italic AI reason
+  - book line when available
+- `handleSoftRefresh` now resets `aiBoardData` to `null`
+
+Important scope note:
+- Existing `Board` view was left unchanged
+- No calibration, pick logging, or backend DB changes were added for AI Board
+
+Verification:
+- `node --check backend/routes/aiBoard.js` passed
+- `node --check backend/server.js` passed
+- `npm run build` passed
+- Existing Vite large-chunk warning remains unchanged / non-blocking
+
+---
+
+## CODEX TASK 91 — Remove Scout, HR Scout, and Advisor Tabs
+
+**File:** `prop-scout-v7.jsx` only — no backend changes, no server.js changes.
+
+**Goal:** Delete all Scout, HR Scout, and Advisor UI and logic. These tabs are being replaced by the AI Board. All removals must be clean — no orphaned refs or unused state.
+
+---
+
+### REMOVALS — in order from top of file to bottom
+
+#### 1. State variables (lines ~3387–3411) — remove all 20 of these lines:
+```js
+const [scoutPicks, setScoutPicks] = useState(null);
+const [scoutEval, setScoutEval] = useState(null);
+const [scoutLoading, setScoutLoading] = useState(false);
+const [scoutEvalLoading, setScoutEvalLoading] = useState(false);
+const [scoutError, setScoutError] = useState(null);
+const [scoutExpanded, setScoutExpanded] = useState(null);
+const [scoutEvalExpanded, setScoutEvalExpanded] = useState(null);
+const [scoutGenerationsLeft, setScoutGenerationsLeft] = useState(3);
+const [hrScoutPicks, setHrScoutPicks] = useState(null);       // null = not yet loaded
+const [hrScoutLoading, setHrScoutLoading] = useState(false);
+const [hrScoutError, setHrScoutError] = useState(null);
+const [hrScoutGenerationsLeft, setHrScoutGenerationsLeft] = useState(3);
+const [hrScoutExpanded, setHrScoutExpanded] = useState(null); // index of expanded card
+const [hrScoutGeneratedAt, setHrScoutGeneratedAt] = useState(null);
+const [advisorPersona, setAdvisorPersona] = useState("pro");
+const [advisorHistory, setAdvisorHistory] = useState([]);
+const [advisorInput, setAdvisorInput] = useState("");
+const [advisorLoading, setAdvisorLoading] = useState(false);
+const [advisorError, setAdvisorError] = useState(null);
+const [advisorMessagesLeft, setAdvisorMessagesLeft] = useState(20);
+```
+
+#### 2. Ref (line ~3498) — remove this line:
+```js
+const advisorBottomRef = useRef(null);
+```
+
+#### 3. handleLogout cleanup (lines ~3846–3849) — remove these 4 lines from inside handleLogout:
+```js
+    setScoutPicks(null);
+    setScoutEval(null);
+    setScoutError(null);
+    setScoutGenerationsLeft(3);
+```
+
+#### 4. Scout fetch useEffect (lines ~3870–3891) — remove entire block:
+```js
+  useEffect(() => {
+    if (view !== "scout" || !currentUser || scoutPicks !== null || scoutLoading || scoutError) return;
+
+    setScoutLoading(true);
+    setScoutError(null);
+    apiFetch("/api/scout/picks")
+      .then((data) => {
+        setScoutPicks(data.picks ?? []);
+        setScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
+      })
+      .catch((err) => setScoutError(err.message))
+      .finally(() => setScoutLoading(false));
+
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    setScoutEvalLoading(true);
+    apiFetch(`/api/scout/evaluation/${yDate}`)
+      .then((data) => { if (data.evaluated) setScoutEval(data); })
+      .catch(() => {})
+      .finally(() => setScoutEvalLoading(false));
+  }, [view, currentUser, scoutPicks, scoutLoading]);
+```
+
+#### 5. HR Scout fetch useEffect (lines ~3893–3906) — remove entire block:
+```js
+  useEffect(() => {
+    if (view !== "hr-scout" || !currentUser || hrScoutPicks !== null || hrScoutLoading || hrScoutError) return;
+
+    setHrScoutLoading(true);
+    setHrScoutError(null);
+    apiFetch("/api/hr-scout/picks")
+      .then((data) => {
+        setHrScoutPicks(data.picks ?? []);
+        setHrScoutGeneratedAt(data.generatedAt ?? null);
+        setHrScoutGenerationsLeft(Math.max(0, (data.maxGenerationsPerDay ?? 3) - (data.generationsUsedToday ?? 0)));
+      })
+      .catch((err) => setHrScoutError(err.message ?? "Failed to load HR Scout picks"))
+      .finally(() => setHrScoutLoading(false));
+  }, [view, currentUser, hrScoutPicks, hrScoutLoading, hrScoutError]);
+```
+
+#### 6. Advisor scroll useEffect (lines ~4161–4163) — remove entire block:
+```js
+  useEffect(() => {
+    advisorBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [advisorHistory, advisorLoading]);
+```
+
+#### 7. handleAdvisorSend function + handleAdvisorPersonaSwitch function (lines ~5050–5097) — remove entire block:
+```js
+  async function handleAdvisorSend(messageOverride) {
+    // ... entire function body ...
+  }
+
+  function handleAdvisorPersonaSwitch(newPersona) {
+    if (newPersona === advisorPersona) return;
+    setAdvisorPersona(newPersona);
+    setAdvisorHistory([]);
+    setAdvisorError(null);
+  }
+```
+
+#### 8. Scout nav button (lines ~5894–5896) — remove entire block:
+```jsx
+            {isScoutUser && (
+              <button onClick={() => setView("scout")} style={{ background: view === "scout" ? "#38bdf8" : "#161827", border: `1px solid ${view === "scout" ? "#38bdf8" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "scout" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Scout</button>
+            )}
+```
+
+#### 9. HR Scout nav button (lines ~5897–5915) — remove entire block:
+```jsx
+            {isScoutUser && (
+              <button
+                onClick={() => setView("hr-scout")}
+                style={{
+                  background: view === "hr-scout" ? "#fb923c" : "#161827",
+                  border: `1px solid ${view === "hr-scout" ? "#fb923c" : "#1f2437"}`,
+                  borderRadius: 8,
+                  padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+                  fontSize: isNarrowPhone ? 9 : 10,
+                  color: view === "hr-scout" ? "#000" : "#9ca3af",
+                  fontFamily: "monospace",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  textTransform: "uppercase",
+                }}
+              >
+                ⚾ HR Scout
+              </button>
+            )}
+```
+
+#### 10. Advisor nav button (lines ~5916–5921) — remove entire block:
+```jsx
+            {isScoutUser && (
+              <button onClick={() => setView("advisor")}
+                style={{ background: view === "advisor" ? "#f59e0b" : "#161827", border: `1px solid ${view === "advisor" ? "#f59e0b" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "advisor" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
+                🧠 Advisor
+              </button>
+            )}
+```
+
+#### 11. Advisor view block (lines ~6522–6677) — remove entire block:
+```jsx
+        {view === "advisor" && isScoutUser && (
+          <div style={{ height: "calc(100vh - 120px)", display: "flex", flexDirection: "column", gap: 10 }}>
+            // ... entire advisor chat UI ...
+          </div>
+        )}
+```
+The block starts at `{view === "advisor" && isScoutUser && (` and ends at the closing `)}` just before `{view === "lab" && isScoutUser && (() => {`.
+
+#### 12. Scout view block (lines ~7743–7935) — remove entire block:
+```jsx
+        {view === "scout" && isScoutUser && (
+          <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+            // ... entire scout UI ...
+          </div>
+        )}
+```
+The block starts at `{view === "scout" && isScoutUser && (` and ends at the closing `)}` just before `{view === "hr-scout" && isScoutUser && (`.
+
+#### 13. HR Scout view block (lines ~7937–8137) — remove entire block:
+```jsx
+        {view === "hr-scout" && isScoutUser && (
+          <div style={{ padding: "12px 0", display: "flex", flexDirection: "column", gap: 12 }}>
+            // ... entire hr-scout UI ...
+          </div>
+        )}
+```
+The block starts at `{view === "hr-scout" && isScoutUser && (` and ends at the closing `)}` just before `{/* ════ GAME VIEW ════ */}`.
+
+---
+
+### VERIFICATION CHECKLIST
+
+After all removals, verify:
+
+1. No references to `scoutPicks`, `scoutEval`, `scoutLoading`, `scoutEvalLoading`, `scoutError`, `scoutExpanded`, `scoutEvalExpanded`, `scoutGenerationsLeft` remain
+2. No references to `hrScoutPicks`, `hrScoutLoading`, `hrScoutError`, `hrScoutGenerationsLeft`, `hrScoutExpanded`, `hrScoutGeneratedAt` remain
+3. No references to `advisorPersona`, `advisorHistory`, `advisorInput`, `advisorLoading`, `advisorError`, `advisorMessagesLeft` remain
+4. No references to `advisorBottomRef` remain
+5. No references to `handleAdvisorSend` or `handleAdvisorPersonaSwitch` remain
+6. No nav buttons render for `view === "scout"`, `view === "hr-scout"`, or `view === "advisor"`
+7. No view blocks exist for scout, hr-scout, or advisor
+8. `handleLogout` no longer resets scout state (still resets chat state — that stays)
+9. Lab, Models, Board, AI Board, Chat tabs all remain intact and unmodified
+10. `node --input-type=module < prop-scout-v7.jsx` or similar parse check passes
+
+---
+
+### HANDOFF NOTE — 2026-05-06 — CODEX TASK 91 COMPLETED (Remove Scout / HR Scout / Advisor Frontend)
+
+Frontend-only removal is complete in `prop-scout-v7.jsx`.
+
+Removed:
+- all `scout*`, `hrScout*`, and `advisor*` React state declarations
+- `advisorBottomRef`
+- Scout state resets from `handleLogout`
+- Scout fetch `useEffect`
+- HR Scout fetch `useEffect`
+- Advisor auto-scroll `useEffect`
+- `handleScoutRegenerate`
+- `handleHRScoutRegenerate`
+- `handleAdvisorSend`
+- `handleAdvisorPersonaSwitch`
+- Scout nav button
+- HR Scout nav button
+- Advisor nav button
+- full Advisor view block
+- full Scout view block
+- full HR Scout view block
+
+Verification:
+- symbol sweep confirmed no remaining references to removed Scout / HR Scout / Advisor frontend symbols
+- `npm run build` passed
+
+Scope constraints honored:
+- no backend files changed
+- `/api/scout`, `/api/hr-scout`, and `/api/advisor` routes remain in place for later cleanup
+- Lab / Models / Board / AI Board / Chat remain intact

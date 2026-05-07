@@ -41,6 +41,7 @@ app.use("/api/boxscore",    require("./routes/boxscore"));    // MLB Stats: full
 app.use("/api/stat-splits", require("./routes/statSplits")); // MLB Stats: home/away + vs L/R + day/night splits
 app.use("/api/trends",   require("./routes/trends"));    // Anthropic: AI-generated bettor trend summary per game
 app.use("/api/card-summary", require("./routes/cardSummary")); // Hybrid AI one-line rewrites for Board / Model cards
+app.use("/api/ai-board", require("./routes/aiBoard"));
 app.use("/api/odds",         require("./routes/odds"));         // Odds API: h2h + totals + spreads for all MLB games (shared 20-min cache)
 app.use("/api/polymarket",   require("./routes/polymarket"));   // Public Polymarket Gamma API: MLB win probabilities
 app.use("/api/prediction-markets", require("./routes/predictionMarkets"));
