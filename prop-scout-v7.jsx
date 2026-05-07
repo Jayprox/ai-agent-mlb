@@ -3403,6 +3403,7 @@ export default function App() {
   const [labCalibrationLoading, setLabCalibrationLoading] = useState(false);
   const [aiBoardData, setAiBoardData] = useState(null);
   const [aiBoardLoading, setAiBoardLoading] = useState(false);
+  const [aiBoardTab, setAiBoardTab] = useState("all");
   const [showLabTrackRecord, setShowLabTrackRecord] = useState(true);
   // Prop result tracker — persisted to localStorage
   const [propLog, setPropLog] = useState(() => {
@@ -3809,6 +3810,7 @@ export default function App() {
     setLiveBoardResults({});
     setAiCardSummaries({});
     setAiBoardData(null);
+    setAiBoardTab("all");
     setLastRefreshed(new Date());
     setTimeout(() => setIsRefreshing(false), 2000);
   };
@@ -11054,14 +11056,64 @@ export default function App() {
             hr:   { label: "HR",       color: "#fb923c" },
             hits: { label: "Hits",     color: "#34d399" },
           };
+          const getAiBoardGrade = (c) => {
+            const todayResult = liveBoardResults[c.id] ?? null;
+            if (c.market === "k" || c.market === "outs") {
+              const hasResolvedResult = !!todayResult && !todayResult.live;
+              const propLineValue = c.propLine?.line ?? c.suggestedLine;
+              const boardLean = c.score >= 55 ? "OVER" : "UNDER";
+              if (!hasResolvedResult || propLineValue == null) return null;
+              return c.market === "k"
+                ? (boardLean === "UNDER" ? todayResult.k < propLineValue : todayResult.k > propLineValue)
+                : (boardLean === "UNDER" ? todayResult.outs < propLineValue : todayResult.outs > propLineValue);
+            }
+
+            const boardGameStatus = getBoardGameStatus(c.gamePk);
+            const hasResult = todayResult && todayResult.ab > 0;
+            if (c.market === "hr") {
+              if (boardGameStatus !== "FINAL") return null;
+              return hasResult ? todayResult.hr > 0 : false;
+            }
+            if (c.market === "hits") {
+              if (hasResult && (todayResult.hr > 0 || todayResult.h > 0)) return true;
+              if (boardGameStatus === "FINAL" && hasResult && todayResult.h === 0) return false;
+            }
+            return null;
+          };
+          const aiBoardSettled = (aiBoardData ?? []).reduce((acc, c) => {
+            const grade = getAiBoardGrade(c);
+            if (grade === true) {
+              acc.hits += 1;
+              acc.graded += 1;
+            } else if (grade === false) {
+              acc.graded += 1;
+            }
+            return acc;
+          }, { hits: 0, graded: 0 });
+          const aiBoardTabHitSummary = ["k", "outs", "hr", "hits"].reduce((acc, mkt) => {
+            const mktCards = (aiBoardData ?? []).filter(c => c.market === mkt);
+            const settled = mktCards.reduce((sum, c) => {
+              const grade = getAiBoardGrade(c);
+              if (grade === true) sum.hits += 1;
+              if (grade !== null) sum.graded += 1;
+              return sum;
+            }, { hits: 0, graded: 0 });
+            acc[mkt] = settled;
+            return acc;
+          }, {});
 
           return (
             <div style={{ padding: "12px 0" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
                 <div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>🤖 AI BOARD</span>
                     <TierBadge tier="ai" />
+                    {aiBoardSettled.graded > 0 && (
+                      <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                        {aiBoardSettled.hits}/{aiBoardSettled.graded} hit
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>AI-scored picks across all markets · ranked by AI confidence</div>
                 </div>
@@ -11072,6 +11124,46 @@ export default function App() {
                 >
                   ↺ Refresh
                 </button>
+              </div>
+
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                {[
+                  ["all", "All"],
+                  ["k", "K"],
+                  ["outs", "Outs"],
+                  ["hr", "HR"],
+                  ["hits", "Hits"],
+                ].map(([mkt, label]) => {
+                  const isActive = aiBoardTab === mkt;
+                  const summary = mkt !== "all" ? aiBoardTabHitSummary[mkt] : null;
+                  return (
+                    <button
+                      key={mkt}
+                      onClick={() => setAiBoardTab(mkt)}
+                      style={{
+                        background: isActive ? "rgba(167,139,250,0.18)" : "#161827",
+                        border: `1px solid ${isActive ? "rgba(167,139,250,0.45)" : "#1f2437"}`,
+                        borderRadius: 8,
+                        padding: "6px 10px",
+                        fontSize: 10,
+                        fontWeight: 700,
+                        color: isActive ? "#a78bfa" : "#9ca3af",
+                        cursor: "pointer",
+                        fontFamily: "monospace",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                      }}
+                    >
+                      <span>{label}</span>
+                      {summary?.graded > 0 && (
+                        <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 999, padding: "1px 6px", fontFamily: "monospace" }}>
+                          {summary.hits}/{summary.graded}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
 
               {aiBoardLoading && (
@@ -11087,11 +11179,27 @@ export default function App() {
 
               {!aiBoardLoading && aiBoardData?.length > 0 && (
                 <div>
-                  {aiBoardData.map((c, i) => {
+                  {(() => {
+                    const visibleCards = aiBoardTab === "all"
+                      ? aiBoardData
+                      : aiBoardData.filter(c => c.market === aiBoardTab);
+                    if (visibleCards.length === 0) {
+                      return (
+                        <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
+                          No {aiBoardTab.toUpperCase()} candidates available.
+                        </div>
+                      );
+                    }
+                    return visibleCards.map((c, i) => {
                     const meta = MARKET_META[c.market] ?? { label: c.market, color: "#6b7280" };
                     const aiColor = c.aiScore >= 75 ? "#34d399" : c.aiScore >= 55 ? "#fbbf24" : "#f87171";
+                    const aiGrade = getAiBoardGrade(c);
+                    const resultBorderColor = aiGrade === true ? "#22c55e" : aiGrade === false ? "#ef4444" : null;
+                    const resultCardStyle = resultBorderColor
+                      ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
+                      : {};
                     return (
-                      <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px" }}>
+                      <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px", ...resultCardStyle }}>
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flexShrink: 0 }}>
                             <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280" }}>{i + 1}</div>
@@ -11116,6 +11224,16 @@ export default function App() {
                               <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
                               <span style={{ fontSize: 8, fontWeight: 700, color: meta.color, background: `${meta.color}18`, border: `1px solid ${meta.color}40`, borderRadius: 4, padding: "1px 6px", fontFamily: "monospace" }}>{meta.label}</span>
                               <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
+                              {aiGrade === true && (
+                                <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>
+                                  ✓ HIT
+                                </span>
+                              )}
+                              {aiGrade === false && (
+                                <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>
+                                  ✗ MISS
+                                </span>
+                              )}
                             </div>
                             <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: c.aiReason ? 4 : 0 }}>{c.gameLabel}</div>
                             {c.aiReason && (
@@ -11130,7 +11248,8 @@ export default function App() {
                         </div>
                       </Card>
                     );
-                  })}
+                    });
+                  })()}
                 </div>
               )}
 

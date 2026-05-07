@@ -5564,3 +5564,28 @@ Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 91**.
 **No backend changes** — `/api/scout`, `/api/hr-scout`, `/api/advisor` routes can be cleaned up in a separate task later.
 
 *Updated 2026-05-06 — Session 80 complete · CODEX TASK 91 specced*
+
+---
+
+## 🗒 Session 81 — CW: Task 91 Approved + Task 92 Specced (AI Board Market Filter Tabs)
+
+**Task 91 approved:** Scout, HR Scout, and Advisor tabs fully removed. Zero orphaned references. Brace/paren balance confirmed perfect. File reduced by ~700 lines to 11,781.
+
+---
+
+### CODEX TASK 92 — AI Board Market Filter Tabs (pending Codex)
+
+Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 92**.
+
+**Summary:**
+- New `aiBoardTab` state: `"all" | "k" | "outs" | "hr" | "hits"`, default `"all"`
+- Tab toggle row: All / K / Outs / HR / Hits — inserted between the AI Board header and loading spinner
+- Active color: purple `#a78bfa` (matches AI Board branding)
+- Per-tab hit/total badge: computed from `getAiBoardGrade` per market, same badge style as regular Board
+- Filtered card list: `aiBoardTab === "all"` → show all 32; otherwise filter by `c.market === aiBoardTab`
+- Empty state per market: "No X candidates available."
+- Rank numbers (i+1) reset within filtered view
+- Soft refresh resets `aiBoardTab` back to `"all"`
+- No backend changes, no new API calls
+
+*Updated 2026-05-06 — Session 81 complete · CODEX TASK 92 specced*

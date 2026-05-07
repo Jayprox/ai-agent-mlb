@@ -14564,3 +14564,153 @@ Scope constraints honored:
 - no backend files changed
 - `/api/scout`, `/api/hr-scout`, and `/api/advisor` routes remain in place for later cleanup
 - Lab / Models / Board / AI Board / Chat remain intact
+
+---
+
+## CODEX TASK 92 — AI Board Market Filter Tabs
+
+**File:** `prop-scout-v7.jsx` only — no backend changes.
+
+**Goal:** Add per-market filter tabs to the AI Board (All / K / Outs / HR / Hits). Currently all 32 candidates render in one flat list. After this task, the user can click a tab chip to see only that market's cards, or stay on "All" to see everything ranked by aiScore.
+
+---
+
+### CHANGE 1 — New state variable
+
+Near line 3424 (next to `aiBoardData` and `aiBoardLoading`), add:
+
+```js
+const [aiBoardTab, setAiBoardTab] = useState("all"); // "all" | "k" | "outs" | "hr" | "hits"
+```
+
+---
+
+### CHANGE 2 — Per-tab hit summary (inside AI Board IIFE, after `aiBoardSettled`)
+
+Inside the `{view === "ai-board" && isScoutUser && (() => { ... })()}` IIFE, after the existing `aiBoardSettled` computation, add:
+
+```js
+const aiBoardTabHitSummary = ["k", "outs", "hr", "hits"].reduce((acc, mkt) => {
+  const mktCards = (aiBoardData ?? []).filter(c => c.market === mkt);
+  const hits  = mktCards.filter(c => getAiBoardGrade(c) === true).length;
+  const total = mktCards.filter(c => getAiBoardGrade(c) !== null).length;
+  acc[mkt] = { hits, total };
+  return acc;
+}, {});
+```
+
+---
+
+### CHANGE 3 — Tab toggle row (inside AI Board IIFE, in the returned JSX)
+
+In the returned JSX, **immediately after the header row `<div>` and before the loading spinner**, insert a tab toggle row:
+
+```jsx
+{/* Market filter tabs */}
+<div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+  {[["all", "🤖 All"], ["k", "⚡ K"], ["outs", "📋 Outs"], ["hr", "⚾ HR"], ["hits", "🎯 Hits"]].map(([mkt, label]) => {
+    const isActive = aiBoardTab === mkt;
+    const summary = mkt !== "all" ? aiBoardTabHitSummary[mkt] : null;
+    return (
+      <button key={mkt} onClick={() => setAiBoardTab(mkt)}
+        style={{ position: "relative", flex: 1, background: isActive ? "#a78bfa" : "#161827",
+          border: `1px solid ${isActive ? "#a78bfa" : "#1f2437"}`,
+          borderRadius: 8, padding: "7px", fontSize: 10, fontFamily: "monospace",
+          fontWeight: 700, color: isActive ? "#000" : "#9ca3af", cursor: "pointer" }}>
+        {label}
+        {summary && summary.total > 0 && (
+          <span style={{ position: "absolute", top: -7, right: -5,
+            background: summary.hits > 0 ? "#22c55e" : "#374151",
+            color: summary.hits > 0 ? "#03140a" : "#d1d5db",
+            border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999,
+            padding: "1px 5px", fontSize: 7, fontWeight: 900, lineHeight: 1.2,
+            fontFamily: "monospace", whiteSpace: "nowrap" }}>
+            {summary.hits}/{summary.total} hit
+          </span>
+        )}
+      </button>
+    );
+  })}
+</div>
+```
+
+---
+
+### CHANGE 4 — Filter cards by selected tab
+
+In the render block `{!aiBoardLoading && aiBoardData?.length > 0 && (...)}`, before the `.map()` call, derive the filtered list:
+
+Replace the existing:
+```js
+{aiBoardData.map((c, i) => {
+```
+
+With:
+```js
+{(() => {
+  const visibleCards = aiBoardTab === "all"
+    ? aiBoardData
+    : aiBoardData.filter(c => c.market === aiBoardTab);
+  if (!visibleCards.length) return (
+    <div style={{ textAlign: "center", padding: 32, color: "#6b7280", fontSize: 11 }}>
+      No {aiBoardTab.toUpperCase()} candidates available.
+    </div>
+  );
+  return visibleCards.map((c, i) => {
+```
+
+And close the IIFE properly at the end of the map:
+```js
+  });
+})()}
+```
+
+---
+
+### CHANGE 5 — Reset aiBoardTab on soft refresh
+
+In `handleSoftRefresh`, where `setAiBoardData(null)` is called, add immediately after:
+```js
+setAiBoardTab("all");
+```
+
+---
+
+### VERIFICATION CHECKLIST
+
+1. "All" tab is active by default — all 32 candidates shown ranked by aiScore
+2. Clicking "K" shows only K Prop candidates (up to 8)
+3. Clicking "Outs" shows only Outs candidates
+4. Clicking "HR" shows only HR candidates
+5. Clicking "Hits" shows only Hits candidates
+6. Hit count badges appear on tabs once games have resolved (hits/total graded)
+7. "No X candidates available" empty state shows correctly when a market has no data
+8. Soft refresh resets tab back to "All"
+9. Card rank numbers (i + 1) reset to 1 within the filtered view
+10. Existing Board tab is completely unchanged
+
+---
+
+### HANDOFF NOTE — 2026-05-06 — CODEX TASK 92 COMPLETED (AI Board Market Filter Tabs)
+
+Frontend-only update in `prop-scout-v7.jsx`.
+
+Added:
+- `aiBoardTab` state with default `"all"`
+- per-market settled hit summaries for:
+  - `k`
+  - `outs`
+  - `hr`
+  - `hits`
+- AI Board filter chips:
+  - `All`
+  - `K`
+  - `Outs`
+  - `HR`
+  - `Hits`
+- filtered AI Board card list by active market
+- per-market empty state when a tab has zero visible candidates
+- soft refresh now resets `aiBoardTab` back to `"all"`
+
+Verification:
+- `npm run build` passed
