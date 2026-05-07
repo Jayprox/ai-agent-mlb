@@ -3879,7 +3879,7 @@ export default function App() {
 
   useEffect(() => {
     if (view !== "ai-board" || !currentUser || !isScoutUser) return;
-    if (aiBoardData !== null || aiBoardLoading) return;
+    if ((Array.isArray(aiBoardData) && aiBoardData.length > 0) || aiBoardLoading) return;
     if (!liveSlate?.length) return;
     setAiBoardLoading(true);
     const payload = buildAiBoardPayload(
