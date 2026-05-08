@@ -15408,3 +15408,436 @@ All 4 simulation functions in `prop-scout-v7.jsx` updated from `n = 50` to `n = 
 - `simHitsConfidence` (line 1952)
 
 Rationale: cuts worst-case standard error from ±7.1% to ±3.5%, eliminating threshold-crossing noise in simConfidence scores. No performance impact.
+
+---
+
+## CODEX TASK 95 — Strengthen Monte Carlo: Bayesian Prior Blending + Correlated Inputs
+
+**File:** `prop-scout-v7.jsx`
+**Scope:** Refactor the 4 simulation functions (`simKConfidence`, `simOutsConfidence`, `simHRConfidence`, `simHitsConfidence`) and the `sampleNormal` helper block. No other files change.
+
+### Why
+
+The current sims have two weaknesses:
+1. **Overweighting recent form** — `simKConfidence` uses `avgK3` directly as `mu`. Three hot starts inflate confidence vs season rate. `simHitsConfidence` uses `vsHandAVG` directly, which is a small-sample platoon split that can be noisy.
+2. **Deterministic environmental adjustments** — park factor, umpire, and wind are applied as fixed point estimates to the mean before the loop. They don't vary across iterations, meaning all uncertainty is in the outcome, not the environment. In reality, these factors are uncertain estimates and they interact.
+
+### Part A — Add `sampleStdNormal` and `sampleCorrelated` helpers
+
+Replace the existing `sampleNormal` helper block (currently lines ~1888–1892) with three functions:
+
+```js
+// Box-Muller standard normal sample
+function sampleStdNormal() {
+  const u1 = Math.random() || 1e-10;
+  const u2 = Math.random() || 1e-10;
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+// Normal sample with given mean and std
+function sampleNormal(mean, std) {
+  return mean + std * sampleStdNormal();
+}
+
+// Two correlated standard normal samples via Cholesky decomposition
+// rho: correlation coefficient (-1 to 1)
+// Returns [z1, z2] where Corr(z1, z2) = rho
+function sampleCorrelated(rho) {
+  const z1 = sampleStdNormal();
+  const z2 = sampleStdNormal();
+  return [z1, rho * z1 + Math.sqrt(1 - rho * rho) * z2];
+}
+```
+
+The existing `sampleNormal` call signature and behavior is preserved exactly — no callers need to change.
+
+---
+
+### Part B — `simKConfidence` (Bayesian + Correlated)
+
+**Current:**
+```js
+function simKConfidence(candidate, line, n = 500) {
+  if (line == null) return null;
+  const mean = parseFloat(candidate.avgK3) || null;
+  const k9 = parseFloat(candidate.k9) || 0;
+  if (!mean && k9 === 0) return null;
+  const mu = mean ?? (k9 * 5.5 / 9);
+  const std = 1.8;
+  const parkAdj = ((candidate.parkFactor ?? 1.0) - 1.0) * 1.5;
+  const umpAdj = candidate.umpireRating === "pitcher" ? 0.5 : candidate.umpireRating === "batter" ? -0.5 : 0;
+  const adjMu = mu + parkAdj + umpAdj;
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const result = Math.max(0, sampleNormal(adjMu, std));
+    if (result > line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+**New:**
+```js
+function simKConfidence(candidate, line, n = 500) {
+  if (line == null) return null;
+  const mean = parseFloat(candidate.avgK3) || null;
+  const k9   = parseFloat(candidate.k9)    || 0;
+  if (!mean && k9 === 0) return null;
+  const std = 1.8;
+
+  // ── Bayesian prior blend ──────────────────────────────────────────────────
+  // Prior: season K per start derived from k9 × estimated IP
+  const avgIPStr  = candidate.avgIP;
+  const estimatedIP = (() => {
+    if (!avgIPStr || avgIPStr === "—") return 5.5;
+    const [w, f = "0"] = String(avgIPStr).split(".");
+    return parseInt(w) + parseInt(f) / 3;
+  })();
+  const priorMu  = k9 > 0 ? (k9 * estimatedIP / 9) : null;
+  const recentMu = mean ?? (k9 * estimatedIP / 9);
+
+  // Blend recent form toward season prior (normal-normal conjugate, n=3 obs)
+  let posteriorMu;
+  if (priorMu != null) {
+    const priorVar = 3.0;
+    const likeVar  = std * std; // 3.24
+    const nObs     = 3;
+    const postVar  = 1 / (1 / priorVar + nObs / likeVar);
+    posteriorMu    = postVar * (priorMu / priorVar + (nObs * recentMu) / likeVar);
+  } else {
+    posteriorMu = recentMu;
+  }
+
+  // ── Pre-compute deterministic adjustment means ────────────────────────────
+  const parkAdjMean = ((candidate.parkFactor ?? 1.0) - 1.0) * 1.5;
+  const umpAdjMean  = candidate.umpireRating === "pitcher" ? 0.5
+                    : candidate.umpireRating === "batter"  ? -0.5 : 0;
+  const parkAdjStd  = 0.4;  // uncertainty in park effect on Ks
+  const umpAdjStd   = 0.35; // uncertainty in umpire effect
+  const rho         = 0.3;  // park + ump share "pitcher environment" signal
+
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    // Correlated environmental samples per iteration
+    const [zp, zu]   = sampleCorrelated(rho);
+    const parkSample = parkAdjMean + parkAdjStd * zp;
+    const umpSample  = umpAdjMean  + umpAdjStd  * zu;
+    const iterMu     = posteriorMu + parkSample + umpSample;
+    const result     = Math.max(0, sampleNormal(iterMu, std));
+    if (result > line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+---
+
+### Part C — `simOutsConfidence` (Bayesian only)
+
+**Current:**
+```js
+function simOutsConfidence(candidate, line, n = 500) {
+  if (line == null) return null;
+  const avgIPStr = candidate.avgIP;
+  if (!avgIPStr || avgIPStr === "—") return null;
+  const [whole, frac = "0"] = String(avgIPStr).split(".");
+  const avgIPNum = parseInt(whole) + parseInt(frac) / 3;
+  const meanOuts = avgIPNum * 3;
+  const std = 2.8;
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const result = Math.max(0, sampleNormal(meanOuts, std));
+    if (result > line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+**New:**
+```js
+function simOutsConfidence(candidate, line, n = 500) {
+  if (line == null) return null;
+  const avgIPStr = candidate.avgIP;
+  if (!avgIPStr || avgIPStr === "—") return null;
+  const [whole, frac = "0"] = String(avgIPStr).split(".");
+  const avgIPNum  = parseInt(whole) + parseInt(frac) / 3;
+  const meanOuts  = avgIPNum * 3;
+  const std       = 2.8;
+
+  // ── Bayesian prior blend ──────────────────────────────────────────────────
+  // Prior: league-average SP outs per start (≈5.5 IP × 3 = 16.5)
+  // High prior variance (9.0) reflects that we don't have the pitcher's season IP total.
+  // Shrinks extreme avgIP readings (e.g. injured pitcher returning on a 3-inning limit)
+  // back toward a realistic MLB starter baseline.
+  const priorMu  = 16.5;
+  const priorVar = 9.0;
+  const likeVar  = std * std; // 7.84
+  const nObs     = 3;
+  const postVar  = 1 / (1 / priorVar + nObs / likeVar);
+  const posteriorMu = postVar * (priorMu / priorVar + (nObs * meanOuts) / likeVar);
+
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const result = Math.max(0, sampleNormal(posteriorMu, std));
+    if (result > line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+---
+
+### Part D — `simHRConfidence` (Bayesian + Correlated)
+
+**Current:**
+```js
+function simHRConfidence(candidate, line, n = 500) {
+  if (line == null) return null;
+  const hr  = parseInt(candidate.hr)  || 0;
+  const slg = parseFloat(candidate.slg) || 0;
+  if (hr === 0 && slg < 0.35) return null;
+  const basePHR    = hr > 0 ? Math.min(0.25, hr / 162) : Math.max(0.04, (slg - 0.35) * 0.12);
+  const parkMult   = candidate.parkFactor ?? 1.0;
+  const windBonus  = candidate.windFav ? 1.12 : 1.0;
+  const vsHandSLG  = candidate.matchup?.batterVsHand?.slg != null
+    ? parseFloat(candidate.matchup.batterVsHand.slg) : slg;
+  const platoonMult = slg > 0 ? (vsHandSLG / slg) : 1.0;
+  const pHR = Math.min(0.35, basePHR * parkMult * windBonus * platoonMult);
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    if (Math.random() < pHR) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+**New:**
+```js
+function simHRConfidence(candidate, line, n = 500) {
+  if (line == null) return null;
+  const hr  = parseInt(candidate.hr)    || 0;
+  const slg = parseFloat(candidate.slg) || 0;
+  if (hr === 0 && slg < 0.35) return null;
+
+  const rawBasePHR = hr > 0 ? Math.min(0.25, hr / 162) : Math.max(0.04, (slg - 0.35) * 0.12);
+
+  // ── Bayesian Beta shrinkage on basePHR ────────────────────────────────────
+  // Pull basePHR toward league average (≈3.5%) when HR count is small.
+  // pseudoObs=8 means a player with 8 HR gets 50/50 prior/data blend;
+  // a player with 30 HR gets ~79% data-driven.
+  const leagueAvgPHR = 0.035;
+  const pseudoObs    = 8;
+  const shrinkage    = hr / (hr + pseudoObs);
+  const posteriorBasePHR = shrinkage * rawBasePHR + (1 - shrinkage) * leagueAvgPHR;
+
+  const parkMultMean  = candidate.parkFactor ?? 1.0;
+  const windMean      = candidate.windFav ? 1.12 : 1.0;
+  const vsHandSLG     = candidate.matchup?.batterVsHand?.slg != null
+    ? parseFloat(candidate.matchup.batterVsHand.slg) : slg;
+  const platoonMult   = slg > 0 ? (vsHandSLG / slg) : 1.0;
+
+  // ── Correlated environmental multipliers ─────────────────────────────────
+  // Park factor and wind both affect power environment — positively correlated.
+  const parkStd = 0.08;
+  const windStd = 0.06;
+  const rho     = 0.45;
+
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    const [zp, zw]   = sampleCorrelated(rho);
+    const parkSample = Math.max(0.7, parkMultMean + parkStd * zp);
+    const windSample = Math.max(0.85, windMean    + windStd * zw);
+    const iterPHR    = Math.min(0.40, posteriorBasePHR * parkSample * windSample * platoonMult);
+    if (Math.random() < iterPHR) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+---
+
+### Part E — `simHitsConfidence` (Bayesian + stochastic park)
+
+**Current:**
+```js
+function simHitsConfidence(candidate, line, n = 500) {
+  if (line == null) return null;
+  const avg = parseFloat(candidate.avg) || 0;
+  if (avg === 0) return null;
+  const vsHandAVG   = candidate.matchup?.batterVsHand?.avg != null
+    ? parseFloat(candidate.matchup.batterVsHand.avg) : avg;
+  const parkMult    = candidate.parkFactor ?? 1.0;
+  const adjAvg      = Math.min(0.450, vsHandAVG * parkMult);
+  const pa          = candidate.order != null && candidate.order <= 3 ? 4 : candidate.order >= 8 ? 3 : 4;
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    let gameHits = 0;
+    for (let j = 0; j < pa; j++) {
+      if (Math.random() < adjAvg) gameHits++;
+    }
+    if (gameHits >= line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+**New:**
+```js
+function simHitsConfidence(candidate, line, n = 500) {
+  if (line == null) return null;
+  const avg = parseFloat(candidate.avg) || 0;
+  if (avg === 0) return null;
+  const rawVsHandAVG = candidate.matchup?.batterVsHand?.avg != null
+    ? parseFloat(candidate.matchup.batterVsHand.avg) : avg;
+
+  // ── Bayesian shrinkage on platoon split ───────────────────────────────────
+  // vsHandAVG is a small-sample stat — shrink it 35% toward season avg.
+  // Prevents extreme platoon multipliers (e.g. .400 vs RHP from 20 PA) from
+  // dominating the sim.
+  const vsHandAVG = 0.65 * rawVsHandAVG + 0.35 * avg;
+
+  const parkMultMean = candidate.parkFactor ?? 1.0;
+  const parkStd      = 0.06; // stochastic park factor per iteration
+  const pa           = candidate.order != null && candidate.order <= 3 ? 4 : candidate.order >= 8 ? 3 : 4;
+
+  let hits = 0;
+  for (let i = 0; i < n; i++) {
+    // Stochastic park factor (no correlated pair needed — platoon already Bayesian-shrunk)
+    const parkSample = Math.max(0.8, parkMultMean + parkStd * sampleStdNormal());
+    const adjAvg     = Math.min(0.450, vsHandAVG * parkSample);
+    let gameHits = 0;
+    for (let j = 0; j < pa; j++) {
+      if (Math.random() < adjAvg) gameHits++;
+    }
+    if (gameHits >= line) hits++;
+  }
+  return Math.round((hits / n) * 100);
+}
+```
+
+---
+
+### Summary of changes
+
+| Function | Bayesian | Correlated |
+|---|---|---|
+| `simKConfidence` | Normal-normal conjugate blends `avgK3` with `k9`-derived season prior | park ↔ umpire (ρ=0.3), sampled per iteration |
+| `simOutsConfidence` | Normal-normal conjugate shrinks `meanOuts` toward league avg 16.5 | none |
+| `simHRConfidence` | Beta shrinkage on `basePHR` toward league avg (pseudoObs=8) | park ↔ wind (ρ=0.45), sampled per iteration |
+| `simHitsConfidence` | Fixed 35% shrinkage of `vsHandAVG` toward season `avg` | park stochastic per iteration (σ=0.06) |
+
+New helpers added: `sampleStdNormal()`, `sampleCorrelated(rho)`.
+`sampleNormal` preserved with identical signature — no call-site changes needed.
+
+### Validation
+
+After making changes, run in browser console:
+```js
+// Should return a number 0-100 for all 4:
+console.log(simKConfidence({ avgK3: "7.3", k9: "9.2", avgIP: "5.2", parkFactor: 1.05, umpireRating: "pitcher" }, 5.5));
+console.log(simOutsConfidence({ avgIP: "5.1" }, 14.5));
+console.log(simHRConfidence({ hr: 15, slg: ".480", parkFactor: 1.08, windFav: true, matchup: {} }, 0.5));
+console.log(simHitsConfidence({ avg: ".295", parkFactor: 1.02, order: 2, matchup: { batterVsHand: { avg: ".330" } } }, 1.5));
+// Should return null (insufficient data):
+console.log(simKConfidence({ avgK3: null, k9: 0 }, 5.5));
+console.log(simHRConfidence({ hr: 0, slg: ".290" }, 0.5));
+```
+
+---
+
+**HANDOFF NOTE — 2026-05-07 — CODEX TASK 95 COMPLETED**
+
+- Added `sampleStdNormal()` and `sampleCorrelated(rho)` above the sim helper block while keeping `sampleNormal(mean, std)` unchanged at the call-site level
+- `simKConfidence(...)` now performs a normal-normal Bayesian blend of `avgK3` with a `k9 × estimated IP` prior and samples correlated park/umpire environment per iteration (`ρ = 0.3`)
+- `simOutsConfidence(...)` now shrinks observed outs toward a 16.5-out starter baseline prior
+- `simHRConfidence(...)` now Beta-shrinks raw HR pace toward a 3.5% league baseline and samples correlated park/wind multipliers (`ρ = 0.45`)
+- `simHitsConfidence(...)` now shrinks platoon AVG 35% toward season AVG and applies stochastic park factor per iteration
+- Threaded `avgIP` into the K sim call so the season-prior estimate uses the pitcher’s workload context
+- No backend changes; board sort order and UI contract unchanged
+
+---
+
+**HANDOFF NOTE — 2026-05-07 — Nav Declutter Applied**
+
+- Removed the `🔬 Lab` nav button from the top-level navigation
+- Removed the `📊 Models` nav button from the top-level navigation
+- Removed the inline `↺ Refresh` button from the `AI Board` header
+- Underlying `lab` / `models` view code remains in place for now; this was intentionally a surface-level declutter pass only
+- Global soft refresh (`↻`) in the main nav remains the single refresh control
+
+---
+
+**HANDOFF NOTE — 2026-05-07 — AI Board Hits Badge Fix**
+
+- Fixed `AI Board` Hits grading in `getAiBoardGrade(...)` so the market-level `#/# hit` badge resolves from final batter `h` totals directly
+- The missing Hits badge was caused by overly strict result-shape checks, not missing upstream data
+- No backend changes; this was a frontend-only grading/display fix in `prop-scout-v7.jsx`
+
+---
+
+**HANDOFF NOTE — 2026-05-07 — AI Board Render Loop Fix**
+
+- Fixed the `AI Board` maximum update depth loop when candidate generation returned no cards
+- Root cause: the AI Board fetch effect depended on `aiBoardData` while also writing a fresh empty `[]` into that same state
+- Removed `aiBoardData` from the effect dependency list and made the empty-payload path preserve the existing empty array reference
+- No backend changes; this was a frontend-only stability fix in `prop-scout-v7.jsx`
+
+---
+
+**HANDOFF NOTE — 2026-05-07 — AI Board Empty-State Clarification**
+
+- Updated the `AI Board` market-filter empty state so it distinguishes between “no candidates for this selected market” and “no AI Board picks at all”
+- When a specific tab such as `Hits` is empty but other markets are available, the message now suggests trying the available markets or `All`
+- No backend or scoring changes; this was a frontend-only UX clarification in `prop-scout-v7.jsx`
+
+---
+
+**HANDOFF NOTE — 2026-05-08 — AI Board Partial-Market Retry Fix**
+
+- Fixed a frontend-only AI Board refresh bug where the first non-empty AI result set could lock in too early
+- Root cause: `aiBoardData` could fill with only `HR/Hits` candidates before `K/Outs` upstream board inputs were ready, and the old fetch gate treated any non-empty AI payload as “done”
+- Added an `aiBoardPayloadSig` ref and now re-run AI Board scoring whenever the candidate signature changes
+- This allows `K/Outs` to appear later once pitcher-board candidates finish loading, without requiring a manual refresh
+- Soft refresh now also clears the AI Board payload signature so the next pass starts cleanly
+
+---
+
+**HANDOFF NOTE — 2026-05-08 — AI Board Prefetch Parity Fix**
+
+- Fixed a second AI Board data-availability gap: the preload effect for pitcher/batter/props data was only running for `board` and `model`
+- AI Board now participates in that same prefetch effect, so opening `ai-board` directly will kick off the same upstream fetches as the normal Board
+- This is especially important for `K/Outs`, which depend on pitcher stats, game logs, and props being hydrated before AI Board can score them
+- No backend changes; this was a frontend-only data-hydration fix in `prop-scout-v7.jsx`
+
+---
+
+**HANDOFF NOTE — 2026-05-08 — AI Board Result-Key Fix (Hits Badge + Card Accents)**
+
+- Fixed an AI Board grading mismatch where card grading was looking up `liveBoardResults` by the synthetic AI card id instead of the original player/pitcher entity id
+- Added `entityId` to the AI Board payload and carried it through the scored-card mapping
+- `getAiBoardGrade(...)` now resolves against `liveBoardResults[c.entityId]`, which restores correct settlement for market-level hit badges and per-card hit/miss accents
+- This specifically unblocks the missing `Hits` tab `#/#` badge and allows hit cards to render their green accent reliably
+
+---
+
+**HANDOFF NOTE — 2026-05-08 — Backlog Brainstorm: Separate Predictive Product Lane**
+
+- Product direction brainstorm only; no implementation started
+- Keep Prop Scout’s core identity as a research-first app
+- Explore a separate predictive-product lane as its own tab / surface rather than blending predictive outputs into the core Board / research flows
+- AI Board in its current form is still best understood as an AI-assisted ranking layer, not a true predictive model
+- Future predictive work should stay explicitly separated, similar to the earlier Lab / model experiments, with clear labeling so users understand:
+  - research / algorithmic recommendations
+  - AI-assisted ranking
+  - predictive-model outputs
+- If pursued later, this should be treated as a scoped product brainstorm / architecture review before implementation
+
+---
+
+**HANDOFF NOTE — 2026-05-08 — Remove Remaining Top-Nav Refresh Control**
+
+- Removed the remaining global top-nav soft refresh button (`↻`) and its adjacent "just now" label from the header
+- This completes the recent declutter direction: no inline refresh control remains in the main nav or AI Board surface
+- No backend changes; underlying `handleSoftRefresh` logic still exists in code for now, but the visible header control has been removed
+
+---

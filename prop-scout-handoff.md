@@ -5651,3 +5651,159 @@ Full spec in `AGENT_SYSTEM_PROMPT.md` under **CODEX TASK 94**.
 **Monte Carlo simulation bump:** All 4 sim functions updated from `n = 50` → `n = 200` directly in `prop-scout-v7.jsx`. Reduces worst-case standard error from ±7.1% to ±3.5%, virtually eliminating threshold-crossing noise. Zero performance impact in browser. No spec needed — change applied directly by CW.
 
 *Updated 2026-05-07 — Session 83 complete · Picks rebuild done · MC N=200*
+
+---
+
+## 🗒 Session 84 — CW: CODEX TASK 95 Specced + Backlog updates
+
+**Monte Carlo N=500:** All 4 sim functions bumped from `n = 200` → `n = 500` directly by CW. Reduces worst-case standard error to ±2.2%.
+
+**Task #49 added to backlog:** Add K and Outs cards to AI Board (filter tabs already wired, just need card generation logic).
+
+**CODEX TASK 95 completed:** Strengthen Monte Carlo — Bayesian Prior Blending + Correlated Inputs. Single file change (`prop-scout-v7.jsx`), 4 sim functions + helper block.
+
+Changes per function:
+- `simKConfidence` — normal-normal Bayesian blend of `avgK3` with `k9`-derived season prior; park ↔ umpire correlated sampling per iteration (ρ=0.3)
+- `simOutsConfidence` — Bayesian shrinkage of `meanOuts` toward league-avg 16.5 outs; no correlated inputs
+- `simHRConfidence` — Beta shrinkage of `basePHR` toward league avg 3.5% (pseudoObs=8); park ↔ wind correlated per iteration (ρ=0.45)
+- `simHitsConfidence` — 35% shrinkage of `vsHandAVG` toward season `avg`; stochastic park per iteration (σ=0.06)
+
+New helpers: `sampleStdNormal()`, `sampleCorrelated(rho)`. `sampleNormal` signature preserved.
+
+**Completion notes:**
+- Added `sampleStdNormal()` and `sampleCorrelated(rho)` helpers while preserving `sampleNormal(mean, std)` signature
+- `simKConfidence` now uses a normal-normal Bayesian blend of recent K form with a `k9 × estimated IP` season prior, plus correlated park/umpire sampling (`ρ = 0.3`)
+- `simOutsConfidence` now shrinks observed outs toward a 16.5-out league-average starter prior
+- `simHRConfidence` now Beta-shrinks HR rate toward a 3.5% league baseline and samples correlated park/wind effects (`ρ = 0.45`)
+- `simHitsConfidence` now shrinks platoon AVG 35% toward season AVG and samples stochastic park factor per iteration
+- Threaded `avgIP` into the K sim call so the season-prior estimate uses the pitcher’s existing workload context
+
+*Updated 2026-05-07 — Session 84 complete · CODEX TASK 95 completed*
+
+---
+
+## 🗒 Session 85 — Codex: Nav Declutter (AI Board focus)
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Removed the `🔬 Lab` nav button
+- Removed the `📊 Models` nav button
+- Removed the inline `↺ Refresh` button from the `AI Board` header
+
+**Notes:**
+- Underlying `lab` / `models` view code was left intact for now; this was a surface-level declutter pass only
+- Global soft refresh button in the top nav remains available
+
+*Updated 2026-05-07 — Session 85 complete · Nav declutter applied*
+
+---
+
+## 🗒 Session 86 — Codex: AI Board Hits Badge Fix
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Fixed `AI Board` Hits grading so the per-tab `#/# hit` badge resolves from final batter `h` totals directly
+- This was a result-shape issue in `getAiBoardGrade(...)`, not a missing-data issue
+
+*Updated 2026-05-07 — Session 86 complete · AI Hits badge fixed*
+
+---
+
+## 🗒 Session 87 — Codex: AI Board Render Loop Fix
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Fixed `AI Board` maximum update depth loop when no candidates were available
+- Root cause: the AI Board fetch effect depended on `aiBoardData` while also writing a fresh empty `[]` back into that same state
+- Fix:
+  - removed `aiBoardData` from the effect dependency list
+  - made the empty-payload branch preserve the existing empty array reference instead of creating a new one every pass
+
+*Updated 2026-05-07 — Session 87 complete · AI Board loop fixed*
+
+---
+
+## 🗒 Session 88 — Codex: AI Board Empty-State Clarification
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Improved the `AI Board` market-filter empty state message
+- When a specific tab like `Hits` has no candidates but other AI Board markets do, the message now explicitly suggests trying the available markets or `All`
+- No scoring or fetch logic changed; this was a UI clarity pass only
+
+*Updated 2026-05-07 — Session 88 complete · AI Board empty-state clarified*
+
+---
+
+## 🗒 Session 89 — Codex: AI Board Partial-Market Retry Fix
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Fixed an AI Board refresh bug where early `HR/Hits` results could lock the view before `K/Outs` candidates were ready
+- Root cause: the AI Board fetch effect treated any non-empty AI result set as fully loaded, even if the underlying candidate mix later changed
+- Added an `aiBoardPayloadSig` ref and now re-run scoring whenever the AI Board candidate signature changes
+- Soft refresh now also clears that signature so the next pass starts cleanly
+
+*Updated 2026-05-08 — Session 89 complete · AI Board partial-market retry fixed*
+
+---
+
+## 🗒 Session 90 — Codex: AI Board Prefetch Parity Fix
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Fixed a second AI Board data-availability gap: the prefetch effect for pitcher/batter/props data was only running for `board` and `model`
+- AI Board now participates in that same prefetch effect, so opening `ai-board` directly will kick off the same upstream fetches as the normal Board
+- This is especially important for `K/Outs`, which depend on pitcher stats, game logs, and props being hydrated before AI Board can score them
+
+*Updated 2026-05-08 — Session 90 complete · AI Board prefetch parity fixed*
+
+---
+
+## 🗒 Session 91 — Codex: AI Board Result-Key Fix
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Fixed an AI Board grading mismatch where card grading was looking up `liveBoardResults` by the synthetic AI card id instead of the original player/pitcher entity id
+- Added `entityId` to the AI Board payload and preserved it when AI-scored cards are materialized
+- `getAiBoardGrade(...)` now resolves against `liveBoardResults[c.entityId]`, which restores correct settlement for market-level `#/#` badges and per-card hit/miss accents
+- This specifically unblocks the missing `Hits` tab badge and allows settled hit cards to render their green accent reliably
+
+*Updated 2026-05-08 — Session 91 complete · AI Board result-key fix applied*
+
+---
+
+## 🗒 Session 92 — Backlog Brainstorm: Separate Predictive Product Lane
+
+**Status:** Brainstorm only — no implementation started
+
+**Direction captured:**
+- Keep Prop Scout’s main identity as a research-first app
+- Explore a separate predictive-model lane as its own tab / product surface rather than merging it into the core research flows
+- Current `AI Board` should still be thought of as AI-assisted ranking, not a true predictive model
+- Any future predictive tab should stay clearly labeled and separated from:
+  - algorithmic / research recommendations
+  - AI-assisted ranking views
+- Treat this as a future product / architecture brainstorm before any implementation work
+
+*Updated 2026-05-08 — Session 92 added · predictive product lane brainstorm logged*
+
+---
+
+## 🗒 Session 93 — Codex: Remove Remaining Top-Nav Refresh Control
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Removed the remaining global top-nav soft refresh button (`↻`)
+- Removed the adjacent "just now" label from the header
+- Underlying `handleSoftRefresh` logic remains in code for now; this was a UI declutter pass only
+
+*Updated 2026-05-08 — Session 93 complete · top-nav refresh control removed*

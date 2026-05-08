@@ -4,7 +4,7 @@ const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
 
 const SEASON = new Date().getFullYear();
-const GAMELOG_TTL_MS = 30 * 60 * 1000;
+const GAMELOG_TTL_MS = 6 * 60 * 60 * 1000;
 const H2H_TTL_MS = 24 * 60 * 60 * 1000;
 const RBI_CTX_TTL_MS = 6 * 60 * 60 * 1000;
 

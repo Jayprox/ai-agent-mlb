@@ -1886,9 +1886,17 @@ function computeTopSlatePicks(liveSlate, livePitcherStats, liveLineups, liveWeat
 
 // ─── HR / Hit board scoring ───────────────────────────────────────────────────
 function sampleNormal(mean, std) {
+  return mean + sampleStdNormal() * std;
+}
+function sampleStdNormal() {
   const u1 = Math.random() || 1e-10;
   const u2 = Math.random() || 1e-10;
-  return mean + std * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+function sampleCorrelated(rho) {
+  const z1 = sampleStdNormal();
+  const z2 = sampleStdNormal();
+  return [z1, rho * z1 + Math.sqrt(1 - rho * rho) * z2];
 }
 
 // Returns % of N sims where pitcher Ks > line (OVER). Returns null if insufficient data.
@@ -1897,14 +1905,42 @@ function simKConfidence(candidate, line, n = 500) {
   const mean = parseFloat(candidate.avgK3) || null;
   const k9 = parseFloat(candidate.k9) || 0;
   if (!mean && k9 === 0) return null;
-  const mu = mean ?? (k9 * 5.5 / 9);
   const std = 1.8;
-  const parkAdj = ((candidate.parkFactor ?? 1.0) - 1.0) * 1.5;
-  const umpAdj = candidate.umpireRating === "pitcher" ? 0.5 : candidate.umpireRating === "batter" ? -0.5 : 0;
-  const adjMu = mu + parkAdj + umpAdj;
+
+  const avgIPStr = candidate.avgIP;
+  const estimatedIP = (() => {
+    if (!avgIPStr || avgIPStr === "—") return 5.5;
+    const [w, f = "0"] = String(avgIPStr).split(".");
+    return parseInt(w) + parseInt(f) / 3;
+  })();
+  const priorMu = k9 > 0 ? (k9 * estimatedIP / 9) : null;
+  const recentMu = mean ?? (k9 * estimatedIP / 9);
+
+  let posteriorMu;
+  if (priorMu != null) {
+    const priorVar = 3.0;
+    const likeVar = std * std;
+    const nObs = 3;
+    const postVar = 1 / (1 / priorVar + nObs / likeVar);
+    posteriorMu = postVar * (priorMu / priorVar + (nObs * recentMu) / likeVar);
+  } else {
+    posteriorMu = recentMu;
+  }
+
+  const parkAdjMean = ((candidate.parkFactor ?? 1.0) - 1.0) * 1.5;
+  const umpAdjMean = candidate.umpireRating === "pitcher" ? 0.5
+    : candidate.umpireRating === "batter" ? -0.5 : 0;
+  const parkAdjStd = 0.4;
+  const umpAdjStd = 0.35;
+  const rho = 0.3;
+
   let hits = 0;
   for (let i = 0; i < n; i++) {
-    const result = Math.max(0, sampleNormal(adjMu, std));
+    const [zp, zu] = sampleCorrelated(rho);
+    const parkSample = parkAdjMean + parkAdjStd * zp;
+    const umpSample = umpAdjMean + umpAdjStd * zu;
+    const iterMu = posteriorMu + parkSample + umpSample;
+    const result = Math.max(0, sampleNormal(iterMu, std));
     if (result > line) hits++;
   }
   return Math.round((hits / n) * 100);
@@ -1919,9 +1955,15 @@ function simOutsConfidence(candidate, line, n = 500) {
   const avgIPNum = parseInt(whole) + parseInt(frac) / 3;
   const meanOuts = avgIPNum * 3;
   const std = 2.8;
+  const priorMu = 16.5;
+  const priorVar = 9.0;
+  const likeVar = std * std;
+  const nObs = 3;
+  const postVar = 1 / (1 / priorVar + nObs / likeVar);
+  const posteriorMu = postVar * (priorMu / priorVar + (nObs * meanOuts) / likeVar);
   let hits = 0;
   for (let i = 0; i < n; i++) {
-    const result = Math.max(0, sampleNormal(meanOuts, std));
+    const result = Math.max(0, sampleNormal(posteriorMu, std));
     if (result > line) hits++;
   }
   return Math.round((hits / n) * 100);
@@ -1933,17 +1975,27 @@ function simHRConfidence(candidate, line, n = 500) {
   const hr = parseInt(candidate.hr) || 0;
   const slg = parseFloat(candidate.slg) || 0;
   if (hr === 0 && slg < 0.35) return null;
-  const basePHR = hr > 0 ? Math.min(0.25, hr / 162) : Math.max(0.04, (slg - 0.35) * 0.12);
-  const parkMult = candidate.parkFactor ?? 1.0;
-  const windBonus = candidate.windFav ? 1.12 : 1.0;
+  const rawBasePHR = hr > 0 ? Math.min(0.25, hr / 162) : Math.max(0.04, (slg - 0.35) * 0.12);
+  const leagueAvgPHR = 0.035;
+  const pseudoObs = 8;
+  const shrinkage = hr / (hr + pseudoObs);
+  const posteriorBasePHR = shrinkage * rawBasePHR + (1 - shrinkage) * leagueAvgPHR;
+  const parkMultMean = candidate.parkFactor ?? 1.0;
+  const windMean = candidate.windFav ? 1.12 : 1.0;
   const vsHandSLG = candidate.matchup?.batterVsHand?.slg != null
     ? parseFloat(candidate.matchup.batterVsHand.slg)
     : slg;
   const platoonMult = slg > 0 ? (vsHandSLG / slg) : 1.0;
-  const pHR = Math.min(0.35, basePHR * parkMult * windBonus * platoonMult);
+  const parkStd = 0.08;
+  const windStd = 0.06;
+  const rho = 0.45;
   let hits = 0;
   for (let i = 0; i < n; i++) {
-    if (Math.random() < pHR) hits++;
+    const [zp, zw] = sampleCorrelated(rho);
+    const parkSample = Math.max(0.7, parkMultMean + parkStd * zp);
+    const windSample = Math.max(0.85, windMean + windStd * zw);
+    const iterPHR = Math.min(0.40, posteriorBasePHR * parkSample * windSample * platoonMult);
+    if (Math.random() < iterPHR) hits++;
   }
   return Math.round((hits / n) * 100);
 }
@@ -1953,14 +2005,17 @@ function simHitsConfidence(candidate, line, n = 500) {
   if (line == null) return null;
   const avg = parseFloat(candidate.avg) || 0;
   if (avg === 0) return null;
-  const vsHandAVG = candidate.matchup?.batterVsHand?.avg != null
+  const rawVsHandAVG = candidate.matchup?.batterVsHand?.avg != null
     ? parseFloat(candidate.matchup.batterVsHand.avg)
     : avg;
-  const parkMult = candidate.parkFactor ?? 1.0;
-  const adjAvg = Math.min(0.450, vsHandAVG * parkMult);
+  const vsHandAVG = 0.65 * rawVsHandAVG + 0.35 * avg;
+  const parkMultMean = candidate.parkFactor ?? 1.0;
+  const parkStd = 0.06;
   const pa = candidate.order != null && candidate.order <= 3 ? 4 : candidate.order >= 8 ? 3 : 4;
   let hits = 0;
   for (let i = 0; i < n; i++) {
+    const parkSample = Math.max(0.8, parkMultMean + parkStd * sampleStdNormal());
+    const adjAvg = Math.min(0.450, vsHandAVG * parkSample);
     let gameHits = 0;
     for (let j = 0; j < pa; j++) {
       if (Math.random() < adjAvg) gameHits++;
@@ -2206,7 +2261,7 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
             ?? propLine?.books?.CZR?.line
             ?? suggestedLine;
           return type === "k"
-            ? simKConfidence({ avgK3, k9: merged.kPer9 ?? merged.k9 ?? 0, parkFactor: pf.k, umpireRating: umpire?.rating ?? null }, line)
+            ? simKConfidence({ avgK3, k9: merged.kPer9 ?? merged.k9 ?? 0, avgIP: gamelog?.avgIP ?? "—", parkFactor: pf.k, umpireRating: umpire?.rating ?? null }, line)
             : simOutsConfidence({ avgIP: gamelog?.avgIP ?? "—" }, line);
         })(),
         signals,
@@ -2350,6 +2405,7 @@ function buildAiBoardPayload(liveSlate, livePitcherStats, liveGameLog, liveUmpir
     }
     return {
       id: `${market}:${c.id}:${c.gamePk}`,
+      entityId: c.id,
       market,
       playerName: c.name,
       team: c.team,
@@ -3465,6 +3521,7 @@ export default function App() {
   const trendsFetched  = useRef(new Set());                  // tracks gamePks already fetched (avoids stale-closure re-fetch)
   const aiPropsFetched = useRef(new Set());                  // prevents repeat fetches per gamePk
   const aiSummaryInFlight = useRef(new Set());               // summaryKey values currently fetching
+  const aiBoardPayloadSig = useRef("");
   const [livePlayerProps, setLivePlayerProps] = useState({}); // gamePk → { props: [] } | "loading" | null
   const [dailyCard,      setDailyCard]      = useState(null);  // null | "loading" | { card, date, gamesAnalyzed, cap, ... }
   const [dailyCardOpen,  setDailyCardOpen]  = useState(false); // controls panel visibility
@@ -3650,9 +3707,9 @@ export default function App() {
       });
   }, [view, selectedId, tab]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Pre-fetch all data needed by the Board + Model views when opened
+  // Pre-fetch all data needed by the Board + Model + AI Board views when opened
   useEffect(() => {
-    if (view !== "board" && view !== "model") return;
+    if (view !== "board" && view !== "model" && view !== "ai-board") return;
 
     // ── Batter data (HR + Hits tabs) ──────────────────────────────────────────
     Object.values(liveLineups).forEach(lu => {
@@ -3820,6 +3877,7 @@ export default function App() {
     setLiveBoardResults({});
     setAiCardSummaries({});
     setAiBoardData(null);
+    aiBoardPayloadSig.current = "";
     setAiBoardTab("all");
     setLastRefreshed(new Date());
     setTimeout(() => setIsRefreshing(false), 2000);
@@ -3907,15 +3965,18 @@ export default function App() {
 
   useEffect(() => {
     if (view !== "ai-board" || !currentUser || !isScoutUser) return;
-    if ((Array.isArray(aiBoardData) && aiBoardData.length > 0) || aiBoardLoading) return;
+    if (aiBoardLoading) return;
     if (!liveSlate?.length) return;
-    setAiBoardLoading(true);
     const payload = buildAiBoardPayload(
       liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
       liveLineups, liveWeather, liveHittingLog, liveStatSplits
     );
+    const payloadSig = payload.map(c => `${c.market}:${c.id}`).join("|");
+    if (aiBoardPayloadSig.current === payloadSig && aiBoardData !== null) return;
+    aiBoardPayloadSig.current = payloadSig;
+    setAiBoardLoading(true);
     if (!payload.length) {
-      setAiBoardData([]);
+      setAiBoardData(prev => (Array.isArray(prev) && prev.length === 0 ? prev : []));
       setAiBoardLoading(false);
       return;
     }
@@ -3925,6 +3986,7 @@ export default function App() {
         const scored = payload.map((c) => ({
           ...c._candidate,
           id: c.id,
+          entityId: c.entityId,
           market: c.market,
           bookLine: c.bookLine,
           aiScore: data?.scores?.[c.id]?.aiScore ?? fallbackAiScore(c),
@@ -3937,6 +3999,7 @@ export default function App() {
         const scored = payload.map((c) => ({
           ...c._candidate,
           id: c.id,
+          entityId: c.entityId,
           market: c.market,
           bookLine: c.bookLine,
           aiScore: Math.round((c.score ?? 50) * 0.6 + (c.simConfidence ?? 50) * 0.4),
@@ -3946,7 +4009,7 @@ export default function App() {
         setAiBoardData(scored);
       })
       .finally(() => setAiBoardLoading(false));
-  }, [view, currentUser, isScoutUser, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, liveLineups, liveWeather, liveHittingLog, liveStatSplits, aiBoardData, aiBoardLoading]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, currentUser, isScoutUser, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, liveLineups, liveWeather, liveHittingLog, liveStatSplits, aiBoardLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!currentUser || !isScoutUser || !labData?.games?.length || !labData?.date) return;
@@ -5799,31 +5862,6 @@ export default function App() {
               {propLog.length > 0 && <span style={{ position: "absolute", top: -5, right: -5, background: "#a78bfa", color: "#000", fontSize: 8, fontWeight: 800, borderRadius: "50%", width: 14, height: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>{propLog.length > 99 ? "99" : propLog.length}</span>}
             </button>
             <button onClick={() => setView("model")} style={{ background: view === "model" ? "#fbbf24" : "#161827", border: `1px solid ${view === "model" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "model" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Model</button>
-            {isScoutUser && (
-              <button onClick={() => setView("lab")}
-                style={{ background: view === "lab" ? "#34d399" : "#161827", border: `1px solid ${view === "lab" ? "#34d399" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "lab" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
-                🔬 Lab
-              </button>
-            )}
-            {isScoutUser && (
-              <button
-                onClick={() => setView("models")}
-                style={{
-                  background: view === "models" ? "#a78bfa" : "#161827",
-                  border: `1px solid ${view === "models" ? "#a78bfa" : "#1f2437"}`,
-                  borderRadius: 8,
-                  padding: isNarrowPhone ? "6px 10px" : "6px 12px",
-                  fontSize: isNarrowPhone ? 9 : 10,
-                  color: view === "models" ? "#000" : "#9ca3af",
-                  fontFamily: "monospace",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                  textTransform: "uppercase",
-                }}
-              >
-                📊 Models
-              </button>
-            )}
             {isChatUser && (
               <button onClick={() => setView("chat")} style={{ background: view === "chat" ? "#a78bfa" : "#161827", border: `1px solid ${view === "chat" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>💬 Chat</button>
             )}
@@ -5847,40 +5885,6 @@ export default function App() {
                 🤖 AI Board
               </button>
             )}
-            {/* ── Soft Refresh button ── */}
-            <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
-              <button
-                onClick={handleSoftRefresh}
-                disabled={isRefreshing}
-                title="Refresh data"
-                style={{
-                  background: "transparent",
-                  border: "1px solid #1f2437",
-                  borderRadius: "50%",
-                  width: 28,
-                  height: 28,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  cursor: isRefreshing ? "default" : "pointer",
-                  color: isRefreshing ? "#4b5563" : "#6b7280",
-                  fontSize: 14,
-                  flexShrink: 0,
-                  transition: "color 0.2s",
-                }}
-              >
-                <span style={{ display: "inline-block", animation: isRefreshing ? "spin 1s linear infinite" : "none" }}>↻</span>
-              </button>
-              {lastRefreshed && (
-                <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace", whiteSpace: "nowrap" }}>
-                  {(() => {
-                    const diffMs = Date.now() - lastRefreshed.getTime();
-                    const mins = Math.floor(diffMs / 60000);
-                    return mins < 1 ? "just now" : `${mins}m ago`;
-                  })()}
-                </span>
-              )}
-            </div>
           </div>
         </div>
 
@@ -11119,7 +11123,7 @@ export default function App() {
             hits: { label: "Hits",     color: "#34d399" },
           };
           const getAiBoardGrade = (c) => {
-            const todayResult = liveBoardResults[c.id] ?? null;
+            const todayResult = liveBoardResults[c.entityId ?? c.id] ?? null;
             if (c.market === "k" || c.market === "outs") {
               const hasResolvedResult = !!todayResult && !todayResult.live;
               const propLineValue = c.propLine?.line ?? c.suggestedLine;
@@ -11137,8 +11141,9 @@ export default function App() {
               return hasResult ? todayResult.hr > 0 : false;
             }
             if (c.market === "hits") {
-              if (hasResult && (todayResult.hr > 0 || todayResult.h > 0)) return true;
-              if (boardGameStatus === "FINAL" && hasResult && todayResult.h === 0) return false;
+              if (boardGameStatus !== "FINAL") return null;
+              if (!todayResult || typeof todayResult.h !== "number") return null;
+              return todayResult.h > 0;
             }
             return null;
           };
@@ -11179,13 +11184,6 @@ export default function App() {
                   </div>
                   <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>AI-scored picks across all markets · ranked by AI confidence</div>
                 </div>
-                <button
-                  onClick={() => { setAiBoardData(null); }}
-                  disabled={aiBoardLoading}
-                  style={{ background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 8, padding: "6px 10px", fontSize: 10, fontWeight: 700, color: aiBoardLoading ? "#4b5563" : "#a78bfa", cursor: aiBoardLoading ? "default" : "pointer", fontFamily: "monospace" }}
-                >
-                  ↺ Refresh
-                </button>
               </div>
 
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
@@ -11252,9 +11250,13 @@ export default function App() {
                       ? aiBoardData
                       : aiBoardData.filter(c => c.market === aiBoardTab);
                     if (visibleCards.length === 0) {
+                      const otherMarkets = [...new Set((aiBoardData ?? []).map(c => c.market))];
+                      const hasOtherMarkets = aiBoardTab !== "all" && otherMarkets.length > 0;
                       return (
                         <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
-                          No {aiBoardTab.toUpperCase()} candidates available.
+                          {hasOtherMarkets
+                            ? `No ${aiBoardTab.toUpperCase()} candidates available yet. Try ${otherMarkets.map(m => (MARKET_META[m]?.label ?? m)).join(" / ")} or All.`
+                            : `No ${aiBoardTab.toUpperCase()} candidates available.`}
                         </div>
                       );
                     }
@@ -11264,7 +11266,7 @@ export default function App() {
                     const aiGrade = getAiBoardGrade(c);
                     const resultBorderColor = aiGrade === true ? "#22c55e" : aiGrade === false ? "#ef4444" : null;
                     const resultCardStyle = resultBorderColor
-                      ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
+                      ? { borderLeft: `3px solid ${resultBorderColor}`, borderColor: resultBorderColor, paddingLeft: 10 }
                       : {};
                     return (
                       <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px", ...resultCardStyle }}>
