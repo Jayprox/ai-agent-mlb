@@ -15841,3 +15841,2472 @@ console.log(simHRConfidence({ hr: 0, slg: ".290" }, 0.5));
 - No backend changes; underlying `handleSoftRefresh` logic still exists in code for now, but the visible header control has been removed
 
 ---
+
+**HANDOFF NOTE — 2026-05-08 — Backlog Brainstorm: AI Board Expansion to F5 Game Markets**
+
+- Brainstorm only; no implementation started
+- Explore expanding `AI Board` to cover `F5 Moneyline` first, with `F5 Run Line` as a possible second step later
+- Recommendation is to start with `F5 ML` because it is cleaner and more intuitive than `F5 RL`:
+  - stronger starting-pitcher signal
+  - reduced bullpen noise
+  - simpler validation path
+- This would fit well with the existing Monte Carlo work: AI Board could consume structured F5 candidates that already include algo score, market context, and any future simulation confidence for early-game outcomes
+- Keep the same product pattern as current AI Board:
+  - algorithm / sim candidate generation first
+  - AI re-ranking + concise reason second
+- If pursued later, treat `F5 ML` as the first scoped experiment before evaluating whether `F5 RL` is worth adding
+
+---
+
+**HANDOFF NOTE — 2026-05-09 — Backlog Brainstorm: Sim Model Options Beyond Monte Carlo**
+
+- Brainstorm only; no implementation started
+- Captured the broader sim discussion so future predictive / AI Board work is not limited to Monte Carlo alone
+- Monte Carlo should be thought of as the outer simulation wrapper, often paired with an underlying distributional model
+- Market-to-model mapping captured for future exploration:
+  - `F5 ML / F5 RL / Totals`: Poisson first, then Negative Binomial or inning-state/Markov simulation
+  - `Ks`: Poisson count model + Bayesian shrinkage
+  - `Outs`: Normal / bootstrap / shrinkage-based outing model
+  - `Hits`: Binomial by plate appearance
+  - `HR`: Bernoulli / rare-event Poisson
+  - `NRFI / YRFI`: Bernoulli or first-inning run Poisson
+- If the predictive lane expands later, this sim-menu should be revisited market by market instead of defaulting every idea to Monte Carlo only
+
+---
+
+---
+
+## CODEX TASK 96 — Board Option C: Rolling Lock + Per-Game Cap (HR / Hits / K / Outs tabs)
+
+**File:** `prop-scout-v7.jsx` only.
+
+### Problem being solved
+
+The Board (HR, Hits, K, Outs tabs) has two bugs:
+1. **Survivorship bias in result tracking** — `tabHitSummary` (the "X/Y hit" badge on tab buttons) counts against the *live* board. Players whose games finished as misses fall off the board; only hits stay visible. End-of-day accuracy is inflated.
+2. **Early games crowd out primetime** — Early games (1 PM ET) get confirmed lineups first and fill the global top-N. Late games (7–10 PM ET) can't break in until early games are over.
+
+### Solution: Option C
+
+- **Live board** — only candidates from *unstarted* games. Grouped by game. Soft cap of 5 candidates per game (take whatever qualifies up to 5, never pad or force it).
+- **Locked section** — when a game goes `"In Progress"` or `"Warmup"`, its candidates are frozen into `lockedBoardCandidates` state. They stay there all day regardless of lineup changes. Misses included.
+- **Result tracking** (`tabHitSummary`, `boardOutcome`) reads from locked candidates only, not from the live board.
+- Locked candidates restore from `localStorage` on page refresh (keyed by Honolulu date).
+
+---
+
+### Part A — New state: `lockedBoardCandidates`
+
+Add near the other board state vars (around the `boardTab` state declaration):
+
+```js
+const [lockedBoardCandidates, setLockedBoardCandidates] = useState(() => {
+  try {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const stored = JSON.parse(localStorage.getItem("board_locked_snapshot") || "{}");
+    return stored.date === today ? (stored.candidates ?? {}) : {};
+  } catch { return {}; }
+});
+// Shape: { [gamePk]: { hits: Candidate[], hr: Candidate[], k: Candidate[], outs: Candidate[] } }
+```
+
+---
+
+### Part B — New helper: `getBoardGamePhase`
+
+Add near the other game-status helpers (around `getPickStatus`, `isPickUnsettled`):
+
+```js
+const getBoardGamePhase = (gamePk) => {
+  const game = (liveSlate ?? []).find(g => String(g.gamePk) === String(gamePk));
+  const s = game?.status ?? "";
+  if (s === "Final" || s === "Game Over" || s === "Completed Early") return "final";
+  if (s === "In Progress" || s === "Warmup") return "live";
+  return "upcoming";
+};
+```
+
+---
+
+### Part C — Modify `computeBatterBoard` return (line 2383)
+
+**Current:**
+```js
+return candidates.sort((a, b) => b.score - a.score).slice(0, 20);
+```
+
+**New — per-game cap of 5 (soft), no global slice:**
+```js
+const byGame = {};
+candidates.forEach(c => {
+  if (!byGame[c.gamePk]) byGame[c.gamePk] = [];
+  byGame[c.gamePk].push(c);
+});
+const capped = Object.values(byGame).flatMap(group =>
+  group.sort((a, b) => b.score - a.score).slice(0, 5)
+);
+return capped.sort((a, b) => b.score - a.score);
+```
+
+No change needed to `computePitcherBoard` — pitchers already produce at most 2 per game (home/away SP), so the soft cap has no practical effect there.
+
+---
+
+### Part D — New useEffect: lock candidates at first pitch
+
+Add after the existing board-related useEffects:
+
+```js
+// Lock board candidates when a game goes live — prevents survivorship bias in result tracking.
+// Runs when liveSlate updates. Idempotent: only locks a gamePk once.
+useEffect(() => {
+  if (!liveSlate || view !== "board") return;
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+
+  liveSlate.forEach(game => {
+    const phase = getBoardGamePhase(game.gamePk);
+    if (phase === "upcoming") return;                     // not started yet
+    if (lockedBoardCandidates[game.gamePk]) return;       // already locked
+
+    const newEntry = {
+      hits: computeBatterBoard("hits", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
+              .filter(c => String(c.gamePk) === String(game.gamePk)),
+      hr:   computeBatterBoard("hr", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
+              .filter(c => String(c.gamePk) === String(game.gamePk)),
+      k:    computePitcherBoard("k", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
+              .filter(c => String(c.gamePk) === String(game.gamePk)),
+      outs: computePitcherBoard("outs", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
+              .filter(c => String(c.gamePk) === String(game.gamePk)),
+    };
+
+    setLockedBoardCandidates(prev => {
+      const updated = { ...prev, [game.gamePk]: newEntry };
+      localStorage.setItem("board_locked_snapshot", JSON.stringify({ date: today, candidates: updated }));
+      return updated;
+    });
+  }, [liveSlate, view]); // eslint-disable-line react-hooks/exhaustive-deps
+```
+
+Note: the `useEffect` closing bracket should close the `forEach` and the effect correctly.
+
+---
+
+### Part E — Fix `hitSummary` and `tabHitSummary` (lines 10396–10411)
+
+**Current:** `hitSummary` takes a live `items` array and counts outcomes.
+
+**New:** count from locked candidates only (so misses are never lost):
+
+Replace the `hitSummary` function and `tabHitSummary` object with:
+
+```js
+const lockedCandidatesForType = (type) =>
+  Object.values(lockedBoardCandidates).flatMap(g => g[type] ?? []);
+
+const hitSummary = (type) => {
+  const items = lockedCandidatesForType(type);
+  if (!items.length) return null;
+  const resolved = items.map(item => boardOutcome(type, item)).filter(v => v !== null);
+  if (!resolved.length) return null;
+  return { hits: resolved.filter(Boolean).length, total: items.length };
+};
+
+const tabHitSummary = {
+  hr:   hitSummary("hr"),
+  hits: hitSummary("hits"),
+  k:    hitSummary("k"),
+  outs: hitSummary("outs"),
+};
+```
+
+The `boardOutcome` function is unchanged — it already reads from `liveBoardResults[id]` keyed by player ID, which works for locked candidates.
+
+---
+
+### Part F — Board rendering split (view === "board" IIFE, starting ~line 10346)
+
+The board currently renders `boardCandidates` as a flat list. Split into two sections.
+
+#### Compute split candidates before the render return:
+
+Add these derived values at the top of the board IIFE (after `boardCandidatesByType` is declared):
+
+```js
+// Separate live candidates (upcoming games only) from locked candidates
+const liveBoardCandidates = (boardCandidatesByType[boardTab] ?? []).filter(c =>
+  getBoardGamePhase(c.gamePk) === "upcoming"
+);
+
+// Group live candidates by gamePk, preserving game time order
+const liveCandidatesByGame = (() => {
+  const groups = {};
+  liveBoardCandidates.forEach(c => {
+    if (!groups[c.gamePk]) groups[c.gamePk] = { gameLabel: c.gameLabel, gameTime: c.gameTime, gamePk: c.gamePk, candidates: [] };
+    groups[c.gamePk].candidates.push(c);
+  });
+  return Object.values(groups).sort((a, b) => {
+    const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
+    const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
+    return ta - tb;
+  });
+})();
+
+// All locked candidates for this tab, grouped by gamePk
+const lockedCandidatesByGame = (() => {
+  const groups = {};
+  Object.entries(lockedBoardCandidates).forEach(([gamePk, entry]) => {
+    const candidates = (entry[boardTab] ?? []);
+    if (!candidates.length) return;
+    const first = candidates[0];
+    groups[gamePk] = { gameLabel: first?.gameLabel ?? gamePk, gameTime: first?.gameTime ?? null, gamePk, candidates };
+  });
+  return Object.values(groups).sort((a, b) => {
+    const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
+    const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
+    return ta - tb;
+  });
+})();
+
+const hasLocked = lockedCandidatesByGame.length > 0;
+```
+
+#### Replace the flat card list render with the two-section layout:
+
+Find where `boardCandidates.map(item => ...)` renders the cards (currently a flat `.map()` loop for HR/Hits/K/Outs). Replace with:
+
+```jsx
+{/* ── Live board (upcoming games only) ── */}
+{liveCandidatesByGame.length > 0 && (
+  <div style={{ marginBottom: hasLocked ? 16 : 0 }}>
+    {liveCandidatesByGame.map(group => (
+      <div key={group.gamePk} style={{ marginBottom: 12 }}>
+        {/* Game group header */}
+        <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace",
+          letterSpacing: "0.06em", textTransform: "uppercase", padding: "4px 2px 6px",
+          borderBottom: "1px solid rgba(255,255,255,0.06)", marginBottom: 6,
+          display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{group.gameLabel}</span>
+          {group.gameTime && (
+            <span style={{ color: "#38bdf8" }}>
+              {new Date(group.gameTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/New_York" })} ET
+            </span>
+          )}
+        </div>
+        {group.candidates.map(item => (
+          /* EXISTING card render for item — identical to current card markup, no changes needed */
+          /* Key: item.id */
+        ))}
+      </div>
+    ))}
+  </div>
+)}
+
+{liveCandidatesByGame.length === 0 && !hasLocked && (
+  <div style={{ textAlign: "center", color: "#4b5563", fontSize: 12, padding: "24px 0" }}>
+    No confirmed lineups yet
+  </div>
+)}
+
+{/* ── Locked section (in play / final) ── */}
+{hasLocked && (
+  <div>
+    <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace",
+      letterSpacing: "0.06em", textTransform: "uppercase", padding: "4px 2px 8px",
+      display: "flex", alignItems: "center", gap: 6 }}>
+      <span style={{ color: "#a855f7" }}>⊘</span> Locked · in play / final
+    </div>
+    {lockedCandidatesByGame.map(group => {
+      const phase = getBoardGamePhase(group.gamePk);
+      return (
+        <div key={group.gamePk} style={{ marginBottom: 12, opacity: phase === "final" ? 0.85 : 1 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace",
+            letterSpacing: "0.06em", textTransform: "uppercase", padding: "4px 2px 6px",
+            borderBottom: "1px solid rgba(255,255,255,0.06)", marginBottom: 6,
+            display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>{group.gameLabel}</span>
+            <span style={{ color: phase === "live" ? "#22c55e" : "#6b7280" }}>
+              {phase === "live" ? "● LIVE" : "FINAL"}
+            </span>
+          </div>
+          {group.candidates.map(item => (
+            /* EXISTING card render for item — identical markup, no changes to card internals */
+            /* Key: item.id */
+          ))}
+        </div>
+      );
+    })}
+  </div>
+)}
+```
+
+**Important:** The card internals (score badge, player name, stats, log button, etc.) are identical for both sections. Do not change the card markup — only the grouping/section wrapper changes.
+
+---
+
+### Part G — Remove old `boardCandidates` usage in tab count/status bar
+
+The `loadedBatters` count and the `totalBatters` count in the board header bar currently uses `boardCandidates.length`. Update to use `liveBoardCandidates.length` for the live count, and add locked count separately if desired. At minimum, don't show stale totals:
+
+```js
+const loadedBatters = liveBoardCandidates.length;
+const lockedCount   = lockedCandidatesByGame.reduce((sum, g) => sum + g.candidates.length, 0);
+```
+
+---
+
+### Summary
+
+| Change | Location |
+|---|---|
+| `lockedBoardCandidates` state + localStorage restore | Near `boardTab` state |
+| `getBoardGamePhase(gamePk)` helper | Near `getPickStatus` |
+| `computeBatterBoard` per-game cap of 5 | Line 2383 |
+| Lock useEffect (fires on `liveSlate` change) | After board useEffects |
+| `hitSummary` reads from locked candidates | Lines 10396–10411 |
+| Board render split: live section + locked section | Board IIFE ~line 10346 |
+
+### Edge cases
+
+- **Page load mid-day**: `lockedBoardCandidates` restores from localStorage. Locked sections show immediately with live result indicators.
+- **All games final by end of day**: Live section empty, only locked section visible. All results tracked correctly.
+- **Game not yet in `liveSlate`**: `getBoardGamePhase` returns `"upcoming"` — never prematurely locks.
+- **Pitcher board (K/Outs)**: Same logic applies. Since there are at most 2 pitchers per game, the per-game cap doesn't change behavior but the lock mechanism still fires, keeping K/Outs results consistent.
+- **Day boundary**: `board_locked_snapshot` is keyed by Honolulu date. When the date changes, the snapshot is ignored and `lockedBoardCandidates` initializes to `{}`.
+
+---
+
+## CODEX TASK 97 — AI Board F5 Moneyline Market
+
+**File:** `prop-scout-v7.jsx` only. No backend changes needed — `aiBoard.js` is already generic and handles any market type.
+
+### Goal
+
+Add F5 ML (First 5 Innings Moneyline) as a new market on the AI Board. The scoring logic already exists in `computeGameBoard("f5ml", ...)`. This task wires it into the AI Board pipeline: payload generation, tab filter, card rendering, and result grading.
+
+**Explicitly not a predictive model** — this is AI-assisted ranking of algorithmically-scored game candidates, consistent with the rest of the AI Board.
+
+---
+
+### Part A — Update `buildAiBoardPayload` signature and add F5 ML candidates
+
+The function currently lives at line ~2388. It needs two new parameters (`liveNrfiData`, `liveOddsMap`) to call `computeGameBoard`.
+
+**New signature:**
+```js
+function buildAiBoardPayload(
+  liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
+  liveLineups, liveWeather, liveHittingLog, liveStatSplits,
+  liveNrfiData, liveOddsMap   // ← new
+)
+```
+
+**Add F5 ML candidates** (after the existing `hitsCandidates` line):
+```js
+const f5mlCandidates = computeGameBoard(
+  "f5ml", liveSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires
+).slice(0, 5);
+```
+
+**Add a `mapGameCandidate` helper** alongside the existing `mapCandidate`:
+```js
+const mapGameCandidate = (g, market) => ({
+  id: `${market}:${g.gamePk}`,
+  entityId: g.gamePk,           // used for result lookup keyed by gamePk
+  market,
+  playerName: null,             // game card — no individual player
+  name: g.gameLabel,            // "NYY @ BOS" — used as display name
+  team: null,
+  gameLabel: g.gameLabel,
+  gamePk: g.gamePk,
+  gameTime: g.gameTime ?? null,
+  score: g.score,
+  simConfidence: null,          // no MC sim for game markets
+  bookLine: g.line ?? null,     // F5 ML odds string, e.g. "-130"
+  lean: g.lean,                 // "HOME" | "AWAY"
+  leanAbbr: g.leanAbbr,        // e.g. "NYY"
+  leanLabel: g.leanLabel,       // e.g. "NYY F5 ML -130"
+  stats: {
+    homeSP:  g.homeSP?.name ?? null,
+    homeEra: g.factors?.find(f => f.label === "SP ERA Matchup")?.value ?? null,
+    awaySP:  g.awaySP?.name ?? null,
+    umpire:  g.factors?.find(f => f.label === "Umpire Tendency")?.value ?? null,
+    topFactor: g.factors?.[0]?.detail ?? null,
+  },
+  factors: g.factors ?? [],
+  _candidate: g,
+});
+```
+
+**Update the return array** to include F5 ML:
+```js
+return [
+  ...kCandidates.map((c) => mapCandidate(c, "k")),
+  ...outsCandidates.map((c) => mapCandidate(c, "outs")),
+  ...hrCandidates.map((c) => mapCandidate(c, "hr")),
+  ...hitsCandidates.map((c) => mapCandidate(c, "hits")),
+  ...f5mlCandidates.map((g) => mapGameCandidate(g, "f5ml")),  // ← new
+];
+```
+
+---
+
+### Part B — Update `buildAiBoardPayload` call site (line ~3970)
+
+Pass the two new arguments:
+```js
+const payload = buildAiBoardPayload(
+  liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
+  liveLineups, liveWeather, liveHittingLog, liveStatSplits,
+  liveNrfiData, liveOddsMap   // ← new
+);
+```
+
+No other call sites to update — `buildAiBoardPayload` is only called once.
+
+---
+
+### Part C — Add `f5ml` to `MARKET_META` in the AI Board render IIFE (~line 11119)
+
+**Current:**
+```js
+const MARKET_META = {
+  k:    { label: "K Prop",   color: "#38bdf8" },
+  outs: { label: "Outs",     color: "#a78bfa" },
+  hr:   { label: "HR",       color: "#fb923c" },
+  hits: { label: "Hits",     color: "#34d399" },
+};
+```
+
+**New:**
+```js
+const MARKET_META = {
+  k:    { label: "K Prop",   color: "#38bdf8" },
+  outs: { label: "Outs",     color: "#a78bfa" },
+  hr:   { label: "HR",       color: "#fb923c" },
+  hits: { label: "Hits",     color: "#34d399" },
+  f5ml: { label: "F5 ML",    color: "#fbbf24" },  // ← amber — game market
+};
+```
+
+---
+
+### Part D — Add "F5 ML" tab to the market filter tab row (~line 11189)
+
+**Current tabs array:**
+```js
+[
+  ["all",  "All"],
+  ["k",    "K"],
+  ["outs", "Outs"],
+  ["hr",   "HR"],
+  ["hits", "Hits"],
+]
+```
+
+**New — add F5 ML at the end:**
+```js
+[
+  ["all",   "All"],
+  ["k",     "K"],
+  ["outs",  "Outs"],
+  ["hr",    "HR"],
+  ["hits",  "Hits"],
+  ["f5ml",  "F5 ML"],
+]
+```
+
+---
+
+### Part E — Add `f5ml` to `aiBoardTabHitSummary` (~line 11160)
+
+**Current:**
+```js
+const aiBoardTabHitSummary = ["k", "outs", "hr", "hits"].reduce(...)
+```
+
+**New:**
+```js
+const aiBoardTabHitSummary = ["k", "outs", "hr", "hits", "f5ml"].reduce(...)
+```
+
+The `getAiBoardGrade` function handles the per-market grading — F5 ML gets its own branch (Part F below).
+
+---
+
+### Part F — Add `f5ml` grading to `getAiBoardGrade` (~line 11125)
+
+`getAiBoardGrade` currently handles `k`, `outs`, `hr`, `hits`. Add an `f5ml` branch:
+
+```js
+if (c.market === "f5ml") {
+  const box = liveBoxscores[c.gamePk] ?? liveBoxscores[c.entityId];
+  if (!box?.isFinal) return null;
+  const innings = box.linescore?.innings ?? [];
+  if (innings.length < 5) return null;
+  const f5Away = innings.slice(0, 5).reduce((sum, inn) => sum + (inn?.away ?? 0), 0);
+  const f5Home = innings.slice(0, 5).reduce((sum, inn) => sum + (inn?.home ?? 0), 0);
+  if (f5Away === f5Home) return null; // push/tie — unresolved
+  const leanWon = c.lean === "HOME" ? f5Home > f5Away : f5Away > f5Home;
+  return leanWon;
+}
+```
+
+Note: `c.gamePk` is set on the F5 ML candidate via `mapGameCandidate`. `entityId` is the gamePk as well.
+
+---
+
+### Part G — F5 ML card rendering
+
+The AI Board cards currently render a player-centric layout. F5 ML cards have no player name and show a game matchup with a lean direction instead. Detect `c.market === "f5ml"` in the card render to swap the header section.
+
+Find the card body section (inside the `.map((c, i) =>` loop, after the score column) where `c.name`, team badge, and book line are displayed. The structure is:
+
+```jsx
+<div style={{ flex: 1, minWidth: 0 }}>
+  <div style={{ display: "flex", alignItems: "center", gap: 6, ... }}>
+    <span style={{ fontSize: 13, fontWeight: 800 }}>{c.name}</span>
+    <span>{/* market badge */}</span>
+    <span>{/* team badge */}</span>
+    {/* HIT/MISS badge */}
+  </div>
+  <div>{/* game label / book line / ai reason */}</div>
+```
+
+**For `c.market === "f5ml"`, replace the name + team row with:**
+```jsx
+{c.market === "f5ml" ? (
+  <>
+    <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.gameLabel}</span>
+    <span style={{ fontSize: 8, fontWeight: 700, color: meta.color, background: `${meta.color}18`, border: `1px solid ${meta.color}40`, borderRadius: 4, padding: "1px 6px", fontFamily: "monospace" }}>{meta.label}</span>
+    <span style={{ fontSize: 9, fontWeight: 700, color: "#fbbf24", background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 4, padding: "1px 5px", fontFamily: "monospace" }}>
+      {c.lean} {c.bookLine ?? "—"}
+    </span>
+  </>
+) : (
+  /* existing player name + team badge JSX unchanged */
+)}
+```
+
+**Below the name row, the game/line/reason row:**
+For F5 ML, show the lean label and SP matchup instead of book line:
+```jsx
+{c.market === "f5ml" ? (
+  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
+    {c.stats?.homeSP && c.stats?.awaySP
+      ? `${c.away?.abbr ?? ""} ${c.stats.awaySP} vs ${c.home?.abbr ?? ""} ${c.stats.homeSP}`
+      : c.leanLabel ?? c.gameLabel}
+  </div>
+) : (
+  /* existing game label + book line JSX unchanged */
+)}
+```
+
+**Hide the SIM mini-badge** for F5 ML cards (no `simConfidence`):
+The SIM badge is already conditional on `c.simConfidence != null` — no change needed, it will simply not render for F5 ML cards since `simConfidence` is null.
+
+---
+
+### Summary of changes
+
+| Change | Location |
+|---|---|
+| `buildAiBoardPayload` new params + F5 ML candidates | ~line 2388 |
+| `mapGameCandidate` helper | inside `buildAiBoardPayload` |
+| Call site updated with new params | ~line 3970 |
+| `MARKET_META` + `f5ml` entry | AI Board IIFE ~line 11119 |
+| Market filter tab "F5 ML" added | ~line 11189 |
+| `aiBoardTabHitSummary` includes `f5ml` | ~line 11160 |
+| `getAiBoardGrade` F5 ML branch | ~line 11125 |
+| Card header: game-level layout for f5ml | card render loop |
+
+### Validation
+
+After making changes:
+1. Open AI Board — should see F5 ML tab alongside K / Outs / HR / Hits
+2. F5 ML cards show game matchup (e.g. "NYY @ BOS"), lean direction, and F5 ML odds line
+3. No SIM badge on F5 ML cards (simConfidence null)
+4. Once games finish, F5 ML cards resolve with green ✓ HIT or red ✗ MISS border
+5. The "X/Y hit" badge on the F5 ML tab counts correctly from resolved games
+
+---
+
+## CODEX TASK 97 — AMENDMENT: F5 ML sim confidence + AI Board sim requirement
+
+### Architectural rule (apply to all future AI Board markets)
+
+Every market on the AI Board **must** supply a `simConfidence` value. The AI fallback scorer at line ~3395 is `algo * 0.6 + sim * 0.4` — a null sim degrades every card's AI score to algo-only. All four existing markets (K, Outs, HR, Hits) already compute `simConfidence` via Monte Carlo in their board candidate builders. F5 ML must do the same. Any future market added to the AI Board must include an appropriate sim.
+
+---
+
+### Override Part A — Add `simF5MLConfidence` function
+
+Add after the existing `simHitsConfidence` function (~line 2026), alongside the other sim functions:
+
+```js
+// Returns % of N sims where the lean side wins the F5 innings.
+// homeEra / awayEra in standard ERA format (runs per 9 innings).
+// lean: "HOME" | "AWAY"
+function simF5MLConfidence(homeEra, awayEra, parkFactor, umpireRating, lean, n = 500) {
+  if (!homeEra || !awayEra || !lean) return null;
+
+  // Expected F5 runs scored: ERA is per 9 innings → scale to 5
+  // home offense scores off away SP; away offense scores off home SP
+  const homeMean = Math.max(0, awayEra * (5 / 9));
+  const awayMean = Math.max(0, homeEra * (5 / 9));
+
+  // Environmental adjustments (same logic pattern as simKConfidence)
+  const parkAdj = ((parkFactor ?? 1.0) - 1.0) * 0.5;
+  const umpAdj  = umpireRating === "pitcher" ? -0.12
+                : umpireRating === "hitter"  ?  0.12 : 0;
+  const std = 1.5; // F5 run scoring std dev — tighter than full game
+
+  let leanWins = 0;
+  let resolved = 0;
+
+  for (let i = 0; i < n; i++) {
+    const [zpH, zpA] = sampleCorrelated(0.35); // park/ump affect both offenses
+    const homeRuns = Math.max(0, sampleNormal(homeMean + parkAdj + umpAdj, std) + 0.1 * zpH);
+    const awayRuns = Math.max(0, sampleNormal(awayMean + parkAdj + umpAdj, std) + 0.1 * zpA);
+    if (Math.abs(homeRuns - awayRuns) < 0.4) continue; // near-tie — skip (push)
+    resolved++;
+    const homeWon = homeRuns > awayRuns;
+    if ((lean === "HOME" && homeWon) || (lean === "AWAY" && !homeWon)) leanWins++;
+  }
+
+  return resolved > 0 ? Math.round((leanWins / resolved) * 100) : null;
+}
+```
+
+Note: `sampleCorrelated(0.35)` is used because park and umpire adjustments affect both offenses simultaneously — they share a common environment signal.
+
+---
+
+### Override Part B — Surface ERA/park/umpire on f5ml candidate from `computeGameBoard`
+
+In the f5ml branch of `computeGameBoard` (~line 2791), the `games.push(...)` call must include the raw numeric values needed by `simF5MLConfidence`. Add them to the pushed object:
+
+```js
+games.push({
+  gamePk: game.gamePk,
+  name: `${game.away.abbr} @ ${game.home.abbr}`,
+  gameLabel: `${game.away.abbr} @ ${game.home.abbr}`,
+  away: game.away, home: game.home,
+  gameTime: game.gameTime ?? null,
+  score, lean, leanAbbr,
+  leanLabel: `${leanAbbr} F5 ML ${mlLine}`,
+  line: mlLine, odds,
+  factors, homeSP, awaySP, weather: wx, stadium: game.stadium,
+  // ← add these for simF5MLConfidence:
+  homeEra:     homeEra ?? null,
+  awayEra:     awayEra ?? null,
+  parkFactor:  pf.hit ?? pf.hr ?? 1.0,   // use hit park factor for run scoring
+  umpireRating: umpire?.rating ?? null,
+});
+```
+
+---
+
+### Override Part C — Compute `simConfidence` in `mapGameCandidate`
+
+In the original spec, `mapGameCandidate` set `simConfidence: null`. **Replace that line** with:
+
+```js
+simConfidence: simF5MLConfidence(
+  g.homeEra, g.awayEra, g.parkFactor, g.umpireRating, g.lean
+),
+```
+
+This means the SIM mini-badge will now render on F5 ML cards (same as all other AI Board markets), and the AI fallback scorer will use it.
+
+---
+
+### Summary of overrides to original Task 97 spec
+
+| Original | Override |
+|---|---|
+| `simConfidence: null` in `mapGameCandidate` | `simConfidence: simF5MLConfidence(...)` |
+| No sim function for game markets | `simF5MLConfidence` added after `simHitsConfidence` |
+| `computeGameBoard` f5ml push unchanged | Add `homeEra`, `awayEra`, `parkFactor`, `umpireRating` to pushed object |
+
+All other parts of Task 97 (MARKET_META, tab filter, getAiBoardGrade, card rendering) are unchanged.
+
+---
+
+**HANDOFF NOTE — 2026-05-09 — CODEX TASK 97 COMPLETED (AI Board F5 Moneyline + simF5MLConfidence)**
+
+- Added `simF5MLConfidence(...)` after the existing sim helpers using correlated park/ump sampling (`ρ = 0.35`) and ERA-derived F5 run means
+- Updated `computeGameBoard("f5ml")` to surface the raw numeric fields needed by the sim layer:
+  - `homeEra`
+  - `awayEra`
+  - `parkFactor`
+  - `umpireRating`
+- Expanded `buildAiBoardPayload(...)` with:
+  - new `liveNrfiData` / `liveOddsMap` params
+  - top-5 `f5ml` candidates from `computeGameBoard(...)`
+  - `mapGameCandidate(...)` with non-null `simConfidence`
+- Updated the AI Board fetch call site to pass the two new arguments
+- Added `f5ml` to:
+  - `MARKET_META`
+  - AI Board tab filters
+  - `aiBoardTabHitSummary`
+  - `getAiBoardGrade(...)` using final boxscore innings 1–5
+- AI Board F5 ML cards now render game-level content:
+  - matchup
+  - lean + F5 price
+  - SP matchup sub-line
+  - SIM badge via `simF5MLConfidence(...)`
+- No backend changes; this was a single-file frontend implementation in `prop-scout-v7.jsx`
+
+---
+
+## CODEX TASK 98 — AI Board Survivorship Bias Fix
+
+**File:** `prop-scout-v7.jsx` only.
+
+### Problem
+
+The AI Board's hit counter (`aiBoardSettled`, `aiBoardTabHitSummary`) reads from `aiBoardData` — the live, current candidate list. `aiBoardData` can be replaced when the board payload changes (lineup updates, stats refreshing, or a manual soft-refresh). When that happens, candidates who have already been scored and had misses may be dropped from the new payload, removing them from the hit counter. Only candidates with wins tend to remain visible (because they're still in the active lineup), inflating accuracy every night.
+
+This is the same root cause as the Board survivorship bias fixed in Task 96, but for the AI Board view specifically.
+
+### Fix
+
+Lock the AI Board's scored candidates the first time they're populated each day into a `lockedAiBoardSnapshot` state. Count `aiBoardSettled` and `aiBoardTabHitSummary` against the snapshot, not the live `aiBoardData`. The display cards continue to use live `aiBoardData`.
+
+The snapshot is persisted to `localStorage` under key `ai_board_snapshot` with a Honolulu date. It clears automatically at the day boundary.
+
+---
+
+### Part A — Add `lockedAiBoardSnapshot` state (near `aiBoardData` state, ~line 3535)
+
+```js
+const [lockedAiBoardSnapshot, setLockedAiBoardSnapshot] = useState(() => {
+  try {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const stored = JSON.parse(localStorage.getItem("ai_board_snapshot") || "{}");
+    return stored.date === today ? (stored.data ?? null) : null;
+  } catch { return null; }
+});
+```
+
+Restores from `localStorage` on page load. Returns `null` (not `[]`) when there is no snapshot for today, so the board can distinguish "no snapshot yet" from "snapshot is empty."
+
+---
+
+### Part B — Lock snapshot when `aiBoardData` is first set (~line 4086)
+
+Inside the AI Board useEffect, there are two places `setAiBoardData` is called — the `.then()` branch (success) and the `.catch()` branch (fallback). After each `setAiBoardData(scored)` call, add the snapshot lock:
+
+```js
+setAiBoardData(scored);
+setLockedAiBoardSnapshot(prev => {
+  if (prev !== null) return prev; // already locked for today — don't overwrite
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+  localStorage.setItem("ai_board_snapshot", JSON.stringify({ date: today, data: scored }));
+  return scored;
+});
+```
+
+Add this block in **both** the `.then()` and `.catch()` branches immediately after `setAiBoardData(scored)`.
+
+---
+
+### Part C — Update `aiBoardSettled` to read from snapshot (~line 11385)
+
+**Current:**
+```js
+const aiBoardSettled = (aiBoardData ?? []).reduce(...)
+```
+
+**New:**
+```js
+const aiBoardSettled = (lockedAiBoardSnapshot ?? aiBoardData ?? []).reduce(...)
+```
+
+---
+
+### Part D — Update `aiBoardTabHitSummary` to read from snapshot (~line 11395)
+
+**Current:**
+```js
+const aiBoardTabHitSummary = ["k", "outs", "hr", "hits", "f5ml"].reduce((acc, mkt) => {
+  const mktCards = (aiBoardData ?? []).filter(c => c.market === mkt);
+  ...
+```
+
+**New:**
+```js
+const aiBoardTabHitSummary = ["k", "outs", "hr", "hits", "f5ml"].reduce((acc, mkt) => {
+  const mktCards = (lockedAiBoardSnapshot ?? aiBoardData ?? []).filter(c => c.market === mkt);
+  ...
+```
+
+---
+
+### Edge cases
+
+- **Manual soft-refresh**: `aiBoardData` is set to `null` (line ~3961), but `lockedAiBoardSnapshot` is NOT reset. The snapshot persists, keeping the hit counter stable. The display refetches fresh candidates — correct behavior.
+- **Page reload**: Snapshot restores from `localStorage` — hit counter is immediately accurate even before the board re-fetches.
+- **Day boundary**: Honolulu date key causes `lockedAiBoardSnapshot` to init as `null` the next morning. The first successful score of the day locks a fresh snapshot.
+- **No snapshot yet**: `lockedAiBoardSnapshot` is `null` until the first score. The `?? aiBoardData` fallback ensures the counter still works for the brief window before the lock fires.
+- **Empty board**: If `aiBoardData` is legitimately empty (no slate), `scored` will be `[]`. The snapshot will lock to `[]` — correct, nothing to count.
+
+---
+
+### Summary of changes
+
+| Change | Location |
+|---|---|
+| `lockedAiBoardSnapshot` state + localStorage restore | Near `aiBoardData` state (~line 3535) |
+| Lock snapshot in `.then()` branch | Inside AI Board useEffect after `setAiBoardData` (~line 4086) |
+| Lock snapshot in `.catch()` branch | Inside AI Board useEffect after `setAiBoardData` (~line 4095) |
+| `aiBoardSettled` reads from snapshot | AI Board render IIFE (~line 11385) |
+| `aiBoardTabHitSummary` reads from snapshot | AI Board render IIFE (~line 11395) |
+
+### Validation
+
+1. Open AI Board — candidates appear, hit counter visible.
+2. Manually trigger a soft-refresh (if available) — hit counter does not change.
+3. Navigate away from AI Board and back — hit counter persists.
+4. Reload page — hit counter restores from snapshot correctly.
+5. No regression on display cards (still show current live candidates).
+
+---
+
+## CODEX TASK 99 — Lock Odds to Pre-Game Snapshot
+
+**File:** `prop-scout-v7.jsx` only.
+
+### Problem
+
+`liveOddsMap` is refreshed every 20 minutes via an auto-refresh interval (line ~4381). Once a game goes in-progress, sportsbooks update their lines to live/in-game odds. Since the app doesn't support live betting, these in-game line changes are noise — they shift ML, totals, and spreads in ways that don't reflect the pre-game research decision. The user wants to see the odds that existed at first pitch, frozen, for all in-progress and final games.
+
+### Fix
+
+1. Add `lockedOddsMap` state — `{ [gamePk]: oddsObject }`, localStorage-backed, Honolulu date keyed.
+2. A lock useEffect — when `liveSlate` changes, for each game that's no longer "upcoming" and not yet locked, snapshot its current odds from `liveOddsMap` into `lockedOddsMap`.
+3. Derive `effectiveOddsMap` — a computed merge: `liveOddsMap` base, with locked entries overriding for all live/final games.
+4. Replace `liveOddsMap` with `effectiveOddsMap` in all display and scoring calls.
+
+---
+
+### Part A — Add `lockedOddsMap` state (near `liveOddsMap` state, ~line 3568)
+
+```js
+const [lockedOddsMap, setLockedOddsMap] = useState(() => {
+  try {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const stored = JSON.parse(localStorage.getItem("locked_odds_snapshot") || "{}");
+    return stored.date === today ? (stored.data ?? {}) : {};
+  } catch { return {}; }
+});
+// Shape: { [gamePk]: oddsObject } — keyed by gamePk, same values as liveOddsMap entries
+```
+
+---
+
+### Part B — Add lock useEffect (after odds auto-refresh useEffect, ~line 4388)
+
+```js
+// Lock odds at first pitch — prevents live in-game lines from overwriting pre-game research odds.
+// Idempotent: only locks a gamePk once per day.
+useEffect(() => {
+  if (!liveSlate?.length || !Object.keys(liveOddsMap).length) return;
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+  let updated = false;
+  const next = { ...lockedOddsMap };
+
+  liveSlate.forEach(game => {
+    if (next[game.gamePk]) return; // already locked
+    const s = game.status ?? "";
+    const isLiveOrFinal = s === "In Progress" || s === "Warmup" || s === "Final" || s === "Game Over" || s === "Completed Early";
+    if (!isLiveOrFinal) return;
+    const key = `${game.away.name}|${game.home.name}`;
+    const oddsEntry = liveOddsMap[key];
+    if (!oddsEntry) return; // no odds to lock yet
+    next[game.gamePk] = oddsEntry;
+    updated = true;
+  });
+
+  if (!updated) return;
+  localStorage.setItem("locked_odds_snapshot", JSON.stringify({ date: today, data: next }));
+  setLockedOddsMap(next);
+}, [liveSlate, liveOddsMap]); // eslint-disable-line react-hooks/exhaustive-deps
+```
+
+---
+
+### Part C — Derive `effectiveOddsMap` (after `lockedOddsMap` state, or near where `liveOddsMap` is used)
+
+Add this derived value near the state declarations or before the first render block that uses odds. It can be a `useMemo` or a plain computed variable — `useMemo` is preferred to avoid recalculating on every render:
+
+```js
+const effectiveOddsMap = useMemo(() => {
+  if (!liveSlate?.length) return liveOddsMap;
+  const map = { ...liveOddsMap };
+  liveSlate.forEach(game => {
+    if (!lockedOddsMap[game.gamePk]) return;
+    const key = `${game.away.name}|${game.home.name}`;
+    map[key] = lockedOddsMap[game.gamePk];
+  });
+  return map;
+}, [liveOddsMap, lockedOddsMap, liveSlate]);
+```
+
+---
+
+### Part D — Replace `liveOddsMap` with `effectiveOddsMap` in all display and scoring calls
+
+Find every place `liveOddsMap` is passed as an argument or prop for display/scoring. Replace with `effectiveOddsMap`. There are 8 call sites:
+
+1. **SlateCard prop** (~line 6362):
+   ```jsx
+   <SlateCard ... liveOddsMap={effectiveOddsMap} ... />
+   ```
+
+2. **`getGameOdds` function body** (~line 4798) — this function reads `liveOddsMap[key]` directly via closure. Change that one reference:
+   ```js
+   const live = effectiveOddsMap[key];
+   ```
+
+3. **Board `computeGameBoard` call** (~line 5099):
+   ```js
+   computeGameBoard(gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)
+   ```
+
+4. **Board `computeGameBoard` in the board IIFE** (~line 10527):
+   ```js
+   computeGameBoard(gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)
+   ```
+
+5–6. **`gameHitSummary` calls** (~lines 10677–10682) — 6 calls, all replace `liveOddsMap` with `effectiveOddsMap`:
+   ```js
+   gameHitSummary("nrfi", computeGameBoard("nrfi", activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, ...))
+   // ... same for total, spread, ml, f5ml, f5spread
+   ```
+
+7. **`buildAiBoardPayload` call site** (~line 4059):
+   ```js
+   const payload = buildAiBoardPayload(
+     liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
+     liveLineups, liveWeather, liveHittingLog, liveStatSplits,
+     liveNrfiData, effectiveOddsMap   // ← was liveOddsMap
+   );
+   ```
+
+8. **Game board deps array** (~line 5112) — add `effectiveOddsMap` to the useEffect dep array (remove `liveOddsMap` from this specific dep if it was there):
+   ```js
+   }, [view, boardTab, gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, ...]);
+   ```
+
+**Do NOT change:**
+- The odds auto-refresh useEffect itself (line ~4381) — it still updates `liveOddsMap` as before.
+- The `setLiveOddsMap({})` in the soft-refresh function — still correct.
+- The `lockedOddsMap` is NOT reset on soft-refresh — locked odds persist.
+- The `fetchOdds` function and `oddsCache` — no change.
+- Any place that reads `liveOddsMap` for non-display purposes (e.g., API info header showing remaining calls).
+
+---
+
+### Edge cases
+
+- **Soft-refresh**: `liveOddsMap` resets to `{}`, but `lockedOddsMap` is untouched. `effectiveOddsMap` temporarily falls back to the empty map for upcoming games, then repopulates on next odds fetch. Locked games keep their pre-game lines throughout.
+- **Page reload**: `lockedOddsMap` restores from localStorage. If `liveOddsMap` hasn't loaded yet, `effectiveOddsMap` will show locked odds for locked games and empty for the rest — correct.
+- **Day boundary**: Honolulu date key clears `lockedOddsMap` the next morning.
+- **No odds yet when game starts**: The lock useEffect checks `!oddsEntry` and skips the lock. Next time `liveOddsMap` updates (within 20 min), the lock fires again — catches it on the next pass.
+
+---
+
+### Summary
+
+| Change | Location |
+|---|---|
+| `lockedOddsMap` state + localStorage restore | Near `liveOddsMap` state (~line 3568) |
+| Lock useEffect | After odds auto-refresh useEffect (~line 4388) |
+| `effectiveOddsMap` derived value | After state declarations |
+| 8 call-site replacements | SlateCard, getGameOdds, computeGameBoard ×4, buildAiBoardPayload, dep array |
+
+### Validation
+
+1. Pre-game: odds display normally — no change in behavior.
+2. When a game goes "In Progress", slate card and game overview still show pre-game ML/total/spread (not live lines).
+3. Odds do not change on the 20-min auto-refresh for in-progress games.
+4. Page reload with a game in-progress — locked odds restore from localStorage, not live lines.
+5. Upcoming games still update odds normally on each refresh cycle.
+
+---
+
+## CODEX TASK 100 — DB-backed Player Gamelog Snapshots
+
+### Problem being solved
+
+Every time a player card opens, the backend calls the MLB Stats API live for the gamelog (`/people/:id/stats?stats=gameLog`). With 20–30 players per slate, this generates dozens of live outbound calls each session. The interim fix (6-hour in-memory TTL) only helps if the server hasn't restarted and the same player was already fetched in that process lifetime. On Railway, dyno restarts wipe the cache cold.
+
+The proper fix: persist gamelog data to PostgreSQL. The `/api/players/:playerId/gamelog` route reads from the DB first; on a miss it fetches from MLB, writes through to the DB, then serves the result. A daily cron pre-fetches all starting pitchers at 10 AM Honolulu so their gamelogs are already warm before any user opens a card.
+
+---
+
+### Files to modify (4 total)
+
+1. `backend/migrations/004_gamelog_snapshots.sql` — **new file** (already created)
+2. `backend/routes/players.js` — gamelog route: DB read-through + write-through
+3. `backend/jobs/snapshotJobs.js` — `snapshotPitcherGamelogs()` + table creation
+4. `backend/jobs/scheduler.js` — import + schedule
+
+---
+
+### Change 1 — Migration file (already created)
+
+`backend/migrations/004_gamelog_snapshots.sql` exists with this DDL:
+
+```sql
+CREATE TABLE IF NOT EXISTS player_gamelog_snapshots (
+  player_id   INTEGER      NOT NULL,
+  stat_group  TEXT         NOT NULL,   -- 'pitching' or 'hitting'
+  slate_date  DATE         NOT NULL,
+  fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  data        JSONB        NOT NULL,
+  PRIMARY KEY (player_id, stat_group, slate_date)
+);
+```
+
+The migration file is already written. Do NOT recreate it.
+
+---
+
+### Change 2 — Update `backend/routes/players.js`
+
+**Add `db` import at top** (after existing requires):
+```js
+const db = require("../services/db");
+```
+
+**Add `todayHonolulu` helper** near top of the file (after the `TEAM_ABBR` constant):
+```js
+function todayHonolulu() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+}
+```
+
+**Rewrite the `/:playerId/gamelog` route handler** — replace the entire route body with DB read-through / write-through logic:
+
+```js
+router.get("/:playerId/gamelog", async (req, res) => {
+  const { playerId } = req.params;
+  const group = req.query.group === "pitching" ? "pitching" : "hitting";
+  const cacheKey = `gamelog:${playerId}:${group}`;
+  const today = todayHonolulu();
+
+  // 1. In-memory cache (fastest — same-request dedup within one process lifetime)
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    res.setHeader("X-Cache", "HIT");
+    return res.json(cached);
+  }
+
+  // 2. DB snapshot for today (survives dyno restarts)
+  if (db.isConnected()) {
+    try {
+      const dbResult = await db.query(
+        `SELECT data FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = $2 AND slate_date = $3`,
+        [parseInt(playerId, 10), group, today]
+      );
+      if (dbResult?.rows?.length) {
+        const result = dbResult.rows[0].data;
+        cache.set(cacheKey, result, GAMELOG_TTL_MS);
+        res.setHeader("X-Cache", "DB_HIT");
+        return res.json(result);
+      }
+    } catch (dbErr) {
+      console.warn(`gamelog DB read failed for ${playerId}:`, dbErr.message);
+      // fall through to MLB API
+    }
+  }
+
+  // 3. MLB API fetch — write through to DB and in-memory cache
+  try {
+    let season = SEASON;
+    let splits = await gamelogStatsFor(playerId, group, season);
+
+    if (!splits.length) {
+      season -= 1;
+      splits = await gamelogStatsFor(playerId, group, season);
+    }
+
+    const { person, seasonSplit } = await seasonStatsFor(playerId, group, season);
+    if (!person) return res.status(404).json({ error: "Player not found" });
+
+    const sorted = [...splits].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+
+    const result = group === "pitching"
+      ? (() => {
+          const starts = sorted
+            .filter(g => (g.stat?.gamesStarted ?? 0) > 0)
+            .slice(0, 5);
+          const games = starts.map(g => ({
+            date:     g.date,
+            opponent: TEAM_ABBR[g.opponent?.id] ?? g.opponent?.name ?? "?",
+            ip:       g.stat?.inningsPitched ?? "0.0",
+            k:        g.stat?.strikeOuts ?? 0,
+            er:       g.stat?.earnedRuns ?? 0,
+            pc:       g.stat?.numberOfPitches ?? null,
+            era:      g.stat?.era ?? "0.00",
+            result:   (g.stat?.wins ?? 0) > 0 ? "W" : (g.stat?.losses ?? 0) > 0 ? "L" : "ND",
+          }));
+          const totalOuts = games.reduce((sum, g) => sum + parseIpToOuts(g.ip), 0);
+          const avgIPOuts  = games.length > 0 ? totalOuts / games.length : 0;
+          const avgIPWhole  = Math.floor(avgIPOuts / 3);
+          const avgIPThirds = Math.round(avgIPOuts % 3);
+          const avgIP = games.length > 0 ? `${avgIPWhole}.${avgIPThirds}` : "—";
+          return { group: "pitching", games, avgIP, seasonEra: seasonSplit?.era ?? "0.00" };
+        })()
+      : (() => {
+          const games = sorted
+            .slice(0, 10)
+            .map(g => ({
+              date:     g.date,
+              opponent: TEAM_ABBR[g.opponent?.id] ?? g.opponent?.name ?? "?",
+              ab:       g.stat?.atBats ?? 0,
+              h:        g.stat?.hits ?? 0,
+              hr:       g.stat?.homeRuns ?? 0,
+              rbi:      g.stat?.rbi ?? 0,
+              avg:      g.stat?.avg ?? ".000",
+            }));
+
+          const last7Games = sorted
+            .filter(g => (g.stat?.atBats ?? 0) > 0)
+            .slice(0, 7);
+          const last7Hits = last7Games.reduce((sum, g) => sum + (g.stat?.hits ?? 0), 0);
+          const last7Abs = last7Games.reduce((sum, g) => sum + (g.stat?.atBats ?? 0), 0);
+
+          const gp    = Number(seasonSplit?.gamesPlayed) || 0;
+          const tbTot = Number(seasonSplit?.totalBases) || 0;
+          return {
+            group:     "hitting",
+            games,
+            seasonAvg: seasonSplit?.avg    ?? ".000",
+            last7Avg:  last7Abs > 0 ? `${(last7Hits / last7Abs).toFixed(3).replace(/^0/, "")}` : ".000",
+            avg:    seasonSplit?.avg      ?? ".000",
+            ops:    seasonSplit?.ops      ?? ".000",
+            slg:    seasonSplit?.sluggingPercentage ?? ".000",
+            hr:     seasonSplit?.homeRuns ?? 0,
+            avgTB:  gp > 0 ? (tbTot / gp).toFixed(1) : "—",
+            hand:   person?.batSide?.code ?? null,
+            hitRate: games.slice(0, 5).map(g => g.h > 0 ? 1 : 0),
+          };
+        })();
+
+    // Write through to DB (best-effort — never block the response)
+    if (db.isConnected()) {
+      db.query(
+        `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
+         VALUES ($1, $2, $3, NOW(), $4)
+         ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
+           SET fetched_at = NOW(), data = $4`,
+        [parseInt(playerId, 10), group, today, JSON.stringify(result)]
+      ).catch(err => console.warn(`gamelog DB write failed for ${playerId}:`, err.message));
+    }
+
+    cache.set(cacheKey, result, GAMELOG_TTL_MS);
+    res.setHeader("X-Cache", "MISS");
+    return res.json(result);
+  } catch (err) {
+    return res.status(502).json({ error: "MLB API unavailable", detail: err.message });
+  }
+});
+```
+
+**Important:** The shape of `result` is identical to the current route — this is a pure infrastructure change. The response contract does not change.
+
+---
+
+### Change 3 — Update `backend/jobs/snapshotJobs.js`
+
+**Add `player_gamelog_snapshots` to `ensurePhaseOneTables()`** — add this block inside the function, after the existing `scout_evaluations` CREATE TABLE:
+
+```js
+await query(`
+  CREATE TABLE IF NOT EXISTS player_gamelog_snapshots (
+    player_id   INTEGER      NOT NULL,
+    stat_group  TEXT         NOT NULL,
+    slate_date  DATE         NOT NULL,
+    fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    data        JSONB        NOT NULL,
+    PRIMARY KEY (player_id, stat_group, slate_date)
+  )
+`);
+```
+
+**Add `snapshotPitcherGamelogs` function** — insert after `pollPlayerProps` and before `ipStringToOuts`:
+
+```js
+async function snapshotPitcherGamelogs(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: snapshotPitcherGamelogs  date=${date}`);
+  await ensurePhaseOneTables();
+
+  // Get today's probable pitchers from the schedule snapshot
+  const result = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const games = result?.rows?.[0]?.games ?? [];
+
+  const pitcherIds = [
+    ...new Set(
+      games
+        .flatMap(g => [
+          g.probablePitchers?.away?.id,
+          g.probablePitchers?.home?.id,
+        ])
+        .filter(Boolean)
+    ),
+  ];
+
+  if (!pitcherIds.length) {
+    console.log(`  · snapshotPitcherGamelogs: no pitchers found for ${date}`);
+    return;
+  }
+
+  console.log(`  · snapshotPitcherGamelogs: fetching ${pitcherIds.length} pitchers`);
+
+  const TEAM_ABBR_LOCAL = {
+    108: "LAA", 109: "ARI", 110: "BAL", 111: "BOS", 112: "CHC",
+    113: "CIN", 114: "CLE", 115: "COL", 116: "DET", 117: "HOU",
+    118: "KC",  119: "LAD", 120: "WSH", 121: "NYM", 133: "OAK",
+    134: "PIT", 135: "SD",  136: "SEA", 137: "SF",  138: "STL",
+    139: "TB",  140: "TEX", 141: "TOR", 142: "MIN", 143: "PHI",
+    144: "ATL", 145: "CWS", 146: "MIA", 147: "NYY", 158: "MIL",
+  };
+
+  let fetched = 0;
+  let skipped = 0;
+
+  for (const pitcherId of pitcherIds) {
+    // Skip if already snapshotted today
+    try {
+      const existing = await query(
+        `SELECT 1 FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = 'pitching' AND slate_date = $2`,
+        [pitcherId, date]
+      );
+      if (existing?.rows?.length) {
+        skipped++;
+        continue;
+      }
+    } catch (err) {
+      console.warn(`  ⚠ snapshotPitcherGamelogs: DB check failed for ${pitcherId}:`, err.message);
+    }
+
+    try {
+      const season = SEASON;
+      const { data: statsData } = await mlb.get(`/people/${pitcherId}/stats`, {
+        params: { stats: "gameLog", group: "pitching", season },
+      });
+      let splits = statsData.stats?.[0]?.splits ?? [];
+
+      if (!splits.length) {
+        const { data: prevData } = await mlb.get(`/people/${pitcherId}/stats`, {
+          params: { stats: "gameLog", group: "pitching", season: season - 1 },
+        });
+        splits = prevData.stats?.[0]?.splits ?? [];
+      }
+
+      const { data: personData } = await mlb.get(`/people/${pitcherId}/stats`, {
+        params: { stats: "season", group: "pitching", season },
+      });
+      const seasonSplit = personData.stats?.[0]?.splits?.[0]?.stat ?? {};
+
+      const sorted = [...splits].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+      const starts = sorted
+        .filter(g => (g.stat?.gamesStarted ?? 0) > 0)
+        .slice(0, 5);
+      const gameRows = starts.map(g => ({
+        date:     g.date,
+        opponent: TEAM_ABBR_LOCAL[g.opponent?.id] ?? g.opponent?.name ?? "?",
+        ip:       g.stat?.inningsPitched ?? "0.0",
+        k:        g.stat?.strikeOuts ?? 0,
+        er:       g.stat?.earnedRuns ?? 0,
+        pc:       g.stat?.numberOfPitches ?? null,
+        era:      g.stat?.era ?? "0.00",
+        result:   (g.stat?.wins ?? 0) > 0 ? "W" : (g.stat?.losses ?? 0) > 0 ? "L" : "ND",
+      }));
+
+      const totalOuts = gameRows.reduce((sum, g) => sum + ipStringToOuts(g.ip), 0);
+      const avgIPOuts  = gameRows.length > 0 ? totalOuts / gameRows.length : 0;
+      const avgIPWhole  = Math.floor(avgIPOuts / 3);
+      const avgIPThirds = Math.round(avgIPOuts % 3);
+      const avgIP = gameRows.length > 0 ? `${avgIPWhole}.${avgIPThirds}` : "—";
+
+      const payload = {
+        group: "pitching",
+        games: gameRows,
+        avgIP,
+        seasonEra: seasonSplit?.era ?? "0.00",
+      };
+
+      await query(
+        `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
+         VALUES ($1, $2, $3, NOW(), $4)
+         ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
+           SET fetched_at = NOW(), data = $4`,
+        [pitcherId, "pitching", date, JSON.stringify(payload)]
+      );
+
+      fetched++;
+    } catch (err) {
+      console.warn(`  ⚠ snapshotPitcherGamelogs: fetch failed for ${pitcherId}:`, err.message);
+    }
+
+    // 600ms spacing — respectful of MLB API rate limits
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  console.log(`  ✓ snapshotPitcherGamelogs  date=${date}  fetched=${fetched}  skipped=${skipped}`);
+}
+```
+
+**Update `module.exports`** — add `snapshotPitcherGamelogs` to the exports object:
+
+```js
+module.exports = {
+  snapshotSlate,
+  snapshotOdds,
+  snapshotBullpen,
+  snapshotLinescore,
+  snapshotUmpires,
+  pollSchedule,
+  pollInjuries,
+  pollPlayerProps,
+  snapshotPitcherGamelogs,   // ← add
+  runScoutEvaluation,
+  todayHonolulu,
+};
+```
+
+**Important:** `ipStringToOuts` is already defined in this file — do not redefine it. The `snapshotPitcherGamelogs` function calls it directly since it's in the same module scope.
+
+---
+
+### Change 4 — Update `backend/jobs/scheduler.js`
+
+**Update the import** at the top to include `snapshotPitcherGamelogs`:
+
+```js
+const {
+  snapshotSlate, snapshotOdds, snapshotBullpen,
+  snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps,
+  snapshotPitcherGamelogs,   // ← add
+  runScoutEvaluation, todayHonolulu,
+} = require("./snapshotJobs");
+```
+
+**Add cron schedule** inside `startScheduler()` — add after the existing `0 10 * * *` umpires schedule:
+
+```js
+// Pre-fetch pitcher gamelogs at 10 AM and 2 PM Honolulu
+// Keeps SP recent-form data warm before users open game cards
+cron.schedule("0 10,14 * * *", () => snapshotPitcherGamelogs(), { timezone: "Pacific/Honolulu" });
+```
+
+---
+
+### What does NOT change
+
+- The response shape of `/api/players/:playerId/gamelog` — identical JSON in all paths.
+- The in-memory cache TTL (`GAMELOG_TTL_MS = 6 * 60 * 60 * 1000`) — still used as the L1 layer.
+- All other routes in `players.js` (`/stats`, `/rbi-context`, `/vs/:pitcherId`) — untouched.
+- `prop-scout-v7.jsx` — no frontend changes required.
+- Any existing snapshot tables or jobs — no modifications.
+
+---
+
+### Layered cache behavior
+
+| Layer | Source | Populated by | Lifetime |
+|---|---|---|---|
+| L1 | In-memory (`cache.get`) | Any miss that hits MLB API | 6 h or process restart |
+| L2 | `player_gamelog_snapshots` DB | MLB API write-through + cron pre-fetch | Until Honolulu date rolls over |
+| L3 | MLB Stats API | On L1 + L2 miss | Live |
+
+On a cold dyno restart mid-day: L1 is empty, L2 serves yesterday's rows until today's cron runs (or a fresh user request triggers write-through for that player). Yesterday's data is still useful — pitcher recent form doesn't change between midnight and the cron window.
+
+---
+
+### Validation checklist
+
+1. No server startup errors.
+2. First request for a player gamelog after dyno restart → `X-Cache: MISS`, data appears.
+3. Second request for same player → `X-Cache: HIT` (in-memory).
+4. After clearing in-memory cache (restart), second request → `X-Cache: DB_HIT`.
+5. DB row exists in `player_gamelog_snapshots` for the fetched player.
+6. 10 AM Honolulu cron logs `snapshotPitcherGamelogs` with correct pitcher count.
+7. After cron runs, opening a pitcher card shows `X-Cache: DB_HIT` (not MISS).
+8. No regression on other player routes (`/stats`, `/rbi-context`, `/vs/:pitcherId`).
+
+---
+
+## TASK 55 — Separate Predictive Product Lane (Architecture Spec)
+
+> **Status: Architecture direction only — no implementation started.**
+> This document defines the product vision, existing building blocks, what needs to be built, and a phased implementation plan. Implementation tasks will be specced individually when ready.
+
+---
+
+### The problem with blending prediction into ranking
+
+The app currently has three product surfaces that produce "recommendations," and they get blurred together:
+
+- **Board (HR / Hits / K / Outs / Games tabs)** — Algorithmic scoring. Rule-based formula outputs a ranked list of candidates. No probability estimate, no edge calculation, no AI.
+- **AI Board** — AI-assisted ranking. Algorithm score + Monte Carlo sim (`simConfidence`) → Anthropic re-ranker → ranked candidates with a one-sentence reason. The sim % appears on cards but is not explicitly compared to book odds.
+- **Picks** — User-logged bets with outcome tracking.
+
+The issue: a user looking at the AI Board sees a 72% sim confidence on a K prop. Is that a good bet? They don't know — because 72% of what, exactly? If the sportsbook's implied probability for that same Over is also 68%, the edge is only 4 points. If the book is at 52%, the edge is 20 points. Right now, the user has to mentally compute this themselves.
+
+A **Predictive Product Lane** solves this by surfacing only the plays where the model's probability exceeds the book's implied probability — with the edge explicitly displayed. This turns "here are the best candidates" into "here are the plays where the model has a calculable advantage."
+
+---
+
+### Product tier definitions (post-spec)
+
+| Tier | Tab | What it does | AI involved? |
+|---|---|---|---|
+| Research | Game cards, Lineups, Props | Raw data display | No |
+| Algorithmic | Board (HR/Hits/K/Outs/Games) | Rule-based ranking | No |
+| AI-ranked | AI Board | Algo + sim → AI re-ranker | Yes (ranking + explanation) |
+| **Predictive** | **Predict** (new) | Edge plays: model prob > book implied prob | Sim only (no re-ranker needed) |
+
+The Predict tab is intentionally simpler than the AI Board. It doesn't need the AI re-ranker — the edge calculation IS the signal. The AI reason sentence from the AI Board can optionally be surfaced, but it's not the primary feature.
+
+---
+
+### What already exists
+
+Almost everything needed for Phase 1 is already built:
+
+| Building block | Location | What it provides |
+|---|---|---|
+| `simConfidence` | AI Board card object | Model probability (0–100) for each candidate |
+| `bookLine` | AI Board card object | The prop threshold (e.g., 6.5 Ks) |
+| `livePlayerProps` | Frontend state | American odds per book per market per side (Over/Under) |
+| `effectiveOddsMap` | Frontend state (useMemo) | Pre-game ML/total/spread with American odds |
+| `lab_outcomes` DB table | `backend/migrations/002_picks_users_lab.sql` | `lean_prob`, `lean_edge`, `has_edge`, `book_line` — already tracks edge per prediction |
+| `lockedAiBoardSnapshot` | Frontend state | Survivorship-bias-free AI Board history for calibration |
+| `getAiBoardGrade` | Frontend function | Resolves each locked candidate to HIT / MISS / null |
+| `resolveLabCalibration` cron | `backend/jobs/scheduler.js` | Nightly job that settles lab_outcomes entries |
+
+**The missing piece:** `simConfidence` and `impliedProb` are not currently on the same card at the same time. The AI Board card object has `simConfidence` and `bookLine` (the prop threshold), but not the American odds for that line. American odds are in `livePlayerProps` but not piped into `buildAiBoardPayload`.
+
+---
+
+### Implied probability — how to compute it
+
+For player prop markets (K, Outs, HR, Hits):
+- `livePlayerProps` has `overLine` and `underLine` (American odds per book per prop)
+- The model always takes a `lean` direction (OVER or UNDER)
+- The relevant American odds = `overLine` if lean is OVER, `underLine` if lean is UNDER
+- Implied prob from American odds: if negative (e.g., -150): `150 / (150 + 100)`; if positive (e.g., +130): `100 / (130 + 100)`
+- Vig-stripped (two-sided): `rawOver / (rawOver + rawUnder)` where `rawX = 1 / impliedX`
+
+For game markets (F5 ML):
+- `effectiveOddsMap[key].h2h` has the American ML odds per team per book
+- The lean is HOME or AWAY, so pull the corresponding team's ML odds
+
+Edge = `(simConfidence / 100) - vigStrippedImpliedProb`
+
+---
+
+### Proposed UX — "Predict" tab
+
+**Entry point:** A new top-level tab alongside Board, AI Board, etc. OR a sub-tab within AI Board labeled "Edge Plays." The standalone tab is preferred — it signals clearly that this is a different product surface.
+
+**Tab header:**
+```
+PREDICT             Today: 4 edge plays   3/4 hit (75%)
+```
+
+**Card layout (one card per edge play):**
+```
+┌─────────────────────────────────────────────────────┐
+│  Gerrit Cole   K Prop Over 7.5    NYY @ BOS  7:05 ET│
+│                                                     │
+│  SIM  74%   BOOK  58%   EDGE  +16pts                │
+│                                                     │
+│  "High K upside vs BOS lineup ranked bottom-5..."   │
+└─────────────────────────────────────────────────────┘
+```
+
+Cards sorted by edge descending. Minimum edge threshold to appear: 8–10 points (configurable, start at 8). Cards for locked/final games show the result badge (✓ HIT / ✗ MISS).
+
+**Calibration panel** (below the card list, or as a second sub-tab):
+- Groups resolved plays by `simConfidence` bucket: 55–64%, 65–74%, 75–84%, 85%+
+- Shows: `predicted X% → actual Y% over N plays`
+- A simple SVG bar or text table is fine — no need for heavy charting
+
+---
+
+### Implementation phases
+
+#### Phase 1 — Pipe implied probability into AI Board cards
+
+**Files:** `prop-scout-v7.jsx` only.
+
+In `buildAiBoardPayload`, for each candidate:
+- For player prop markets (K, Outs, HR, Hits): look up the prop in `livePlayerProps` for the candidate's `gamePk` + `playerId` + `market`. Find the best available book's American odds for the lean direction. Compute `impliedProb` (vig-stripped if both sides available, raw if only one side available).
+- For F5 ML: compute from `effectiveOddsMap` for the lean team.
+- Add `bookOdds` (American, integer) and `impliedProb` (float, 0–1) to the candidate object.
+- Add `edge` = `(simConfidence / 100) - impliedProb` to the candidate object. Can be negative (no edge).
+
+This is a data-plumbing change only — no new UI yet.
+
+#### Phase 2 — "Predict" tab
+
+**Files:** `prop-scout-v7.jsx` only.
+
+- Add `view === "predict"` (or a sub-view controlled by an existing view state variable).
+- Source: `aiBoardData` filtered to candidates where `edge >= 0.08` (8-point minimum, adjustable).
+- Sort by `edge` descending.
+- Card layout per above — SIM %, BOOK %, EDGE pts, lean direction, book line, AI reason.
+- Result badge from `getAiBoardGrade` for settled games.
+- Daily header: total edge plays today, hits/total.
+- Locked section (in-progress/final games) below upcoming games — same pattern as Board tabs.
+
+#### Phase 3 — Calibration display
+
+**Files:** `prop-scout-v7.jsx` only (reads from `lockedAiBoardSnapshot` + `getAiBoardGrade`).
+
+- At the top of the Predict tab (or a sub-panel): calibration table grouped by `simConfidence` bucket.
+- Buckets: 55–64%, 65–74%, 75–84%, 85%+.
+- For each bucket: count resolved plays, actual hit rate vs. expected (the bucket midpoint).
+- Data source: `lockedAiBoardSnapshot` resolved via `getAiBoardGrade` — same data that `aiBoardTabHitSummary` uses, just grouped differently.
+- No new backend required for Phase 3.
+
+---
+
+### What does NOT change
+
+- The AI Board tab remains unchanged — it keeps AI-assisted ranking with sim badges. It is not replaced by the Predict tab.
+- The Board tabs (HR/Hits/K/Outs/Games) remain unchanged — pure algorithmic, no edge display.
+- No backend changes required for any of the three phases — all data is already available in frontend state.
+- The AI re-ranker (Anthropic API call in the AI Board useEffect) is not called by the Predict tab — it reads from the existing `aiBoardData` which is already scored.
+
+---
+
+### Key design principles
+
+1. **Edge is the primary sort key**, not AI score or algo score. A 70% sim at 55% book is a better play than an 80% sim at 75% book.
+2. **The Predict tab only shows plays where the model has an advantage.** Zero or negative edge plays are filtered out — they belong on the AI Board for research, not on Predict.
+3. **Calibration is the trust signal.** If the 65–74% bucket is actually hitting at 68% over 50+ plays, users can trust the model. If it's hitting at 48%, the sim needs recalibration. Showing this builds credibility.
+4. **No AI call in the Predict tab.** The sim probability IS the prediction. The AI reason is supplementary context carried over from the AI Board — it's not re-computed.
+5. **The Predict tab is not a betting advisor.** It shows edge plays, not bet sizing. Users decide what to log.
+
+---
+
+### Summary
+
+| Phase | What gets built | Effort |
+|---|---|---|
+| 1 | `impliedProb`, `bookOdds`, `edge` on AI Board candidate objects | Small — data plumbing in `buildAiBoardPayload` |
+| 2 | Predict tab — edge-filtered card list, sorted by edge | Medium — new view, new card layout |
+| 3 | Calibration panel inside Predict tab | Small — group existing `lockedAiBoardSnapshot` data by confidence bucket |
+
+No new backend. No new DB tables. No new API calls. All three phases are frontend-only changes to `prop-scout-v7.jsx`.
+
+---
+
+## CODEX TASK 101 — Predictive Lane Phase 1: Edge Data on AI Board Candidates
+
+### File to modify
+
+`prop-scout-v7.jsx` only.
+
+### Read before starting
+
+Read **TASK 55** in `AGENT_SYSTEM_PROMPT.md` for full architecture context. This task is Phase 1 of the three-phase Predictive Product Lane: add `impliedProb`, `bookOdds`, and `edge` to AI Board candidate objects. No new UI is built here — this is pure data plumbing that Phase 2 (the Predict tab) will consume.
+
+---
+
+### Background
+
+Every AI Board card already has `simConfidence` — the model's probability estimate for that outcome. Phase 1 adds the book's side of the comparison: the vig-stripped implied probability from sportsbook American odds. The difference (`edge = simConfidence/100 − impliedProb`) tells us whether the model has an advantage over the book on that play.
+
+**For player prop markets (K, Outs, HR, Hits):** implied probability comes from `propLine.books[bk].overOdds` or `.underOdds` (best book: DK > FD > CZR > MGM). The lean direction (OVER/UNDER) is derived from `c.score >= 55`.
+
+**For F5 ML game market:** implied probability comes from `effectiveOddsMap[away.name|home.name].homeML` / `.awayML`. The lean direction is `g.lean` ("HOME" or "AWAY").
+
+`mlToImplied` already exists (line ~2500) to convert American odds to raw probability. The only helper that's missing is vig-stripping (normalizing raw over + under to a fair 100%).
+
+---
+
+### Changes — in order
+
+#### 1 — Add `vigStrip` helper (~line 2505, after `mlToImplied`)
+
+```js
+// Vig-stripped probability: removes the overround so both sides sum to 100%
+// Returns the fair probability for the lean side.
+const vigStrip = (leanRaw, oppRaw) => {
+  const total = leanRaw + oppRaw;
+  return total > 0 ? leanRaw / total : leanRaw;
+};
+```
+
+---
+
+#### 2 — Add `propEdgeData` helper (~line 2507, after `vigStrip`)
+
+Takes a `propLine` object (the `_candidate.propLine` field) and a `lean` string ("OVER" or "UNDER"). Returns `{ bookOdds, impliedProb }` — the American odds integer for the lean side and the vig-stripped implied probability.
+
+```js
+function propEdgeData(propLine, lean) {
+  const BOOK_PREF = ["DK", "FD", "CZR", "MGM"];
+  for (const bk of BOOK_PREF) {
+    const entry = propLine?.books?.[bk];
+    if (!entry) continue;
+    const leanOddsStr = lean === "OVER" ? entry.overOdds : entry.underOdds;
+    if (!leanOddsStr) continue;
+    const leanRaw  = mlToImplied(leanOddsStr);
+    const oppOddsStr = lean === "OVER" ? entry.underOdds : entry.overOdds;
+    const impliedProb = oppOddsStr
+      ? vigStrip(leanRaw, mlToImplied(oppOddsStr))
+      : leanRaw;
+    return { bookOdds: parseInt(leanOddsStr, 10), impliedProb };
+  }
+  return { bookOdds: null, impliedProb: null };
+}
+```
+
+---
+
+#### 3 — Update `mapCandidate` in `buildAiBoardPayload` (~line 2436)
+
+After the existing `bookLine` derivation line, add:
+
+```js
+const lean = c.score >= 55 ? "OVER" : "UNDER";
+const { bookOdds, impliedProb } = propEdgeData(c._candidate?.propLine ?? null, lean);
+const edge = (c.simConfidence != null && impliedProb != null)
+  ? Math.round((c.simConfidence / 100 - impliedProb) * 100) / 100
+  : null;
+```
+
+Add these four fields to the returned object (after `simConfidence`):
+
+```js
+lean,
+bookOdds,
+impliedProb,
+edge,
+```
+
+The full returned object becomes:
+```js
+return {
+  id: `${market}:${c.id}:${c.gamePk}`,
+  entityId: c.id,
+  market,
+  playerName: c.name,
+  team: c.team,
+  gameLabel: c.gameLabel,
+  gamePk: c._candidate?.gamePk ?? null,   // add this too — needed by Phase 2 for locking
+  gameTime: c._candidate?.gameTime ?? null, // add this too
+  score: c.score,
+  simConfidence: c.simConfidence,
+  bookLine,
+  lean,
+  bookOdds,
+  impliedProb,
+  edge,
+  stats,
+  _candidate: c,
+};
+```
+
+**Note:** `gamePk` and `gameTime` are not currently on `mapCandidate` output — add them too while here, since Phase 2 needs them for grouping and locking. They're already on `_candidate`.
+
+---
+
+#### 4 — Update `mapGameCandidate` in `buildAiBoardPayload` (~line 2463)
+
+Currently the return has `simConfidence: simF5MLConfidence(...)` computed inline. Extract that into a variable first, then compute edge:
+
+```js
+const mapGameCandidate = (g, market) => {
+  // Compute sim confidence once (reuse for edge calc below)
+  const simConf = simF5MLConfidence(g.homeEra, g.awayEra, g.parkFactor, g.umpireRating, g.lean);
+
+  // F5 ML implied probability from liveOddsMap
+  const f5Key  = `${g.away.name}|${g.home.name}`;
+  const f5Odds = liveOddsMap?.[f5Key];
+  const leanMl = g.lean === "HOME" ? (f5Odds?.homeML ?? null) : (f5Odds?.awayML ?? null);
+  const oppMl  = g.lean === "HOME" ? (f5Odds?.awayML ?? null) : (f5Odds?.homeML ?? null);
+  const leanRaw  = leanMl ? mlToImplied(leanMl) : null;
+  const oppRaw   = oppMl  ? mlToImplied(oppMl)  : null;
+  const f5Implied = (leanRaw != null && oppRaw != null)
+    ? vigStrip(leanRaw, oppRaw)
+    : leanRaw;
+  const f5Edge = (simConf != null && f5Implied != null)
+    ? Math.round((simConf / 100 - f5Implied) * 100) / 100
+    : null;
+
+  return {
+    id:            `${market}:${g.gamePk}`,
+    entityId:      g.gamePk,
+    market,
+    playerName:    null,
+    name:          g.gameLabel,
+    team:          null,
+    gameLabel:     g.gameLabel,
+    gamePk:        g.gamePk,
+    gameTime:      g.gameTime ?? null,
+    score:         g.score,
+    simConfidence: simConf,
+    bookLine:      g.line ?? null,
+    lean:          g.lean,
+    leanAbbr:      g.leanAbbr,
+    leanLabel:     g.leanLabel,
+    bookOdds:      leanMl ? parseInt(leanMl, 10) : null,
+    impliedProb:   f5Implied,
+    edge:          f5Edge,
+    stats: {
+      homeSP:    g.homeSP?.name ?? null,
+      homeEra:   g.homeEra ?? null,
+      awaySP:    g.awaySP?.name ?? null,
+      umpire:    g.factors?.find(f => f.label === "Umpire Tendency")?.value ?? null,
+      topFactor: g.factors?.[0]?.detail ?? null,
+    },
+    factors:    g.factors ?? [],
+    _candidate: g,
+  };
+};
+```
+
+---
+
+### What does NOT change
+
+- The AI Board tab render — new fields are additive, no existing render logic is affected.
+- `getAiBoardGrade`, `aiBoardSettled`, `aiBoardTabHitSummary` — unchanged.
+- The AI Board useEffect, scoring pipeline, and Anthropic API call — unchanged.
+- All other views — unchanged.
+- No backend changes.
+
+---
+
+### New fields on every AI Board candidate after this task
+
+| Field | Type | Description |
+|---|---|---|
+| `lean` | `"OVER" \| "UNDER" \| "HOME" \| "AWAY"` | Model's lean direction |
+| `bookOdds` | `number \| null` | American odds for the lean side at best book |
+| `impliedProb` | `number \| null` | Vig-stripped book probability (0–1) |
+| `edge` | `number \| null` | `simConfidence/100 − impliedProb`, rounded to 2 decimal places |
+| `gamePk` | `number \| null` | Newly added to prop candidates (was already on game candidates) |
+| `gameTime` | `string \| null` | Newly added to prop candidates (was already on game candidates) |
+
+---
+
+### Validation checklist
+
+1. No JS errors on load.
+2. Open browser DevTools console. When AI Board loads, log `window._aiBoardData = aiBoardData` (or find it in React DevTools). Verify a K prop candidate has `lean: "OVER"`, `bookOdds: -110` (or similar), `impliedProb: ~0.52`, `edge: ~0.18` (if simConfidence is ~70).
+3. Verify an F5 ML candidate has `lean: "HOME"` or `"AWAY"`, `bookOdds` matching a team's ML, `impliedProb` between 0.4 and 0.6, `edge` computed correctly.
+4. Verify `impliedProb: null` and `edge: null` on a candidate when no prop line odds are available (e.g., a player with no DK/FD/CZR/MGM entry).
+5. AI Board card display unchanged — no visual regressions.
+6. No regression on any other view.
+
+---
+
+## CODEX TASK 102 — Predictive Lane Phase 2: The Predict Tab
+
+### File to modify
+
+`prop-scout-v7.jsx` only.
+
+### Read before starting
+
+Read **TASK 55** and **CODEX TASK 101** in `AGENT_SYSTEM_PROMPT.md` for the full architecture context. Phase 1 (CODEX TASK 101) already added `edge`, `impliedProb`, `bookOdds`, `lean`, `gamePk`, and `gameTime` to every AI Board candidate. This task builds the Predict tab that surfaces those fields.
+
+---
+
+### What gets built
+
+A new `view === "predict"` tab gated behind `isScoutUser`. It reads from `aiBoardData`, filters to candidates where `edge >= 0.08` (8 percentage points), sorts by edge descending, and displays them in two sections: upcoming games and locked/final games. Each card shows SIM %, BOOK %, and EDGE prominently — edge is the primary signal, not the AI score.
+
+---
+
+### Changes — in order
+
+#### 1 — Add `"predict"` to the board data pre-fetch useEffect (~line 3871)
+
+**Current:**
+```js
+if (view !== "board" && view !== "model" && view !== "ai-board") return;
+```
+**New:**
+```js
+if (view !== "board" && view !== "model" && view !== "ai-board" && view !== "predict") return;
+```
+
+---
+
+#### 2 — Add `"predict"` to the AI Board data useEffect (~line 4133)
+
+**Current:**
+```js
+if (view !== "ai-board" || !currentUser || !isScoutUser) return;
+```
+**New:**
+```js
+if ((view !== "ai-board" && view !== "predict") || !currentUser || !isScoutUser) return;
+```
+
+This ensures `aiBoardData` loads when the user opens Predict directly without having visited AI Board first.
+
+---
+
+#### 3 — Add "Predict" nav button (~line 6122, after the AI Board button)
+
+Inside the `isScoutUser` block, add after the AI Board button:
+
+```jsx
+{isScoutUser && (
+  <button
+    onClick={() => setView("predict")}
+    style={{
+      background: view === "predict" ? "#fbbf24" : "#161827",
+      border: `1px solid ${view === "predict" ? "#fbbf24" : "#1f2437"}`,
+      borderRadius: 8,
+      padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+      fontSize: isNarrowPhone ? 9 : 10,
+      color: view === "predict" ? "#000" : "#9ca3af",
+      fontFamily: "monospace",
+      fontWeight: 700,
+      cursor: "pointer",
+      textTransform: "uppercase",
+    }}
+  >
+    ⚡ Predict
+  </button>
+)}
+```
+
+---
+
+#### 4 — Add the Predict view block (~line 11706, after the AI Board IIFE closing tag)
+
+```jsx
+{/* ══════════════════════════════════════
+    PREDICT VIEW
+══════════════════════════════════════ */}
+{view === "predict" && isScoutUser && (() => {
+  const MIN_EDGE = 0.08;
+
+  const MARKET_META = {
+    k:    { label: "K Prop", color: "#38bdf8" },
+    outs: { label: "Outs",   color: "#a78bfa" },
+    hr:   { label: "HR",     color: "#fb923c" },
+    hits: { label: "Hits",   color: "#34d399" },
+    f5ml: { label: "F5 ML",  color: "#fbbf24" },
+  };
+
+  // Grade function — mirrors getAiBoardGrade in the AI Board IIFE
+  const gradeCandidate = (c) => {
+    const todayResult = liveBoardResults[c.entityId ?? c.id] ?? null;
+    if (c.market === "k" || c.market === "outs") {
+      const hasResolvedResult = !!todayResult && !todayResult.live;
+      const propLineValue = c.bookLine;
+      const boardLean = c.lean;
+      if (!hasResolvedResult || propLineValue == null) return null;
+      return c.market === "k"
+        ? (boardLean === "UNDER" ? todayResult.k < propLineValue : todayResult.k > propLineValue)
+        : (boardLean === "UNDER" ? todayResult.outs < propLineValue : todayResult.outs > propLineValue);
+    }
+    const boardGameStatus = getBoardGameStatus(c.gamePk);
+    const hasResult = todayResult && todayResult.ab > 0;
+    if (c.market === "hr") {
+      if (boardGameStatus !== "FINAL") return null;
+      return hasResult ? todayResult.hr > 0 : false;
+    }
+    if (c.market === "hits") {
+      if (boardGameStatus !== "FINAL") return null;
+      if (!todayResult || typeof todayResult.h !== "number") return null;
+      return todayResult.h > 0;
+    }
+    if (c.market === "f5ml") {
+      const box = liveBoxscores[c.gamePk] ?? liveBoxscores[c.entityId];
+      if (!box?.isFinal) return null;
+      const innings = box.linescore?.innings ?? [];
+      if (innings.length < 5) return null;
+      const f5Away = innings.slice(0, 5).reduce((sum, inn) => sum + (inn?.away ?? 0), 0);
+      const f5Home = innings.slice(0, 5).reduce((sum, inn) => sum + (inn?.home ?? 0), 0);
+      if (f5Away === f5Home) return null;
+      return c.lean === "HOME" ? f5Home > f5Away : f5Away > f5Home;
+    }
+    return null;
+  };
+
+  // Survivorship-bias-free hit counter using locked snapshot
+  const predictSettled = (lockedAiBoardSnapshot ?? aiBoardData ?? [])
+    .filter(c => c.edge != null && c.edge >= MIN_EDGE)
+    .reduce((acc, c) => {
+      const grade = gradeCandidate(c);
+      if (grade === true)  { acc.hits++; acc.graded++; }
+      if (grade === false) { acc.graded++; }
+      return acc;
+    }, { hits: 0, graded: 0 });
+
+  // Filter + sort all edge plays
+  const allEdgePlays = (aiBoardData ?? [])
+    .filter(c => c.edge != null && c.edge >= MIN_EDGE)
+    .sort((a, b) => b.edge - a.edge);
+
+  // Split into upcoming vs locked/final
+  const upcomingPlays = allEdgePlays.filter(c => getBoardGamePhase(c.gamePk) === "upcoming");
+  const lockedPlays   = allEdgePlays.filter(c => getBoardGamePhase(c.gamePk) !== "upcoming");
+
+  const renderEdgeCard = (c, i) => {
+    const meta  = MARKET_META[c.market] ?? { label: c.market, color: "#6b7280" };
+    const grade = gradeCandidate(c);
+    const edgePts = Math.round(c.edge * 100);
+    const edgeColor = edgePts >= 15 ? "#22c55e" : "#fbbf24";
+    const simPct    = c.simConfidence != null ? `${c.simConfidence}%` : "—";
+    const bookPct   = c.impliedProb  != null ? `${Math.round(c.impliedProb * 100)}%` : "—";
+    const resultBorderColor = grade === true ? "#22c55e" : grade === false ? "#ef4444" : null;
+    const cardStyle = resultBorderColor
+      ? { borderLeft: `3px solid ${resultBorderColor}`, borderColor: resultBorderColor, paddingLeft: 10 }
+      : {};
+
+    return (
+      <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px", ...cardStyle }}>
+        {/* Name / market row */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
+          {c.market === "f5ml" ? (
+            <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.gameLabel}</span>
+          ) : (
+            <>
+              <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.playerName ?? c.name}</span>
+              <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
+            </>
+          )}
+          <span style={{ fontSize: 8, fontWeight: 700, color: meta.color, background: `${meta.color}18`, border: `1px solid ${meta.color}40`, borderRadius: 4, padding: "1px 6px", fontFamily: "monospace" }}>{meta.label}</span>
+          {grade === true  && <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>✓ HIT</span>}
+          {grade === false && <span style={{ fontSize: 8, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 4, padding: "1px 6px" }}>✗ MISS</span>}
+        </div>
+
+        {/* Lean + book line */}
+        <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: 6, fontFamily: "monospace" }}>
+          {c.lean} {c.bookLine != null ? c.bookLine : "—"}
+          {c.bookOdds != null && <span style={{ color: "#6b7280", marginLeft: 4 }}>({c.bookOdds > 0 ? "+" : ""}{c.bookOdds})</span>}
+        </div>
+
+        {/* Edge row — the primary signal */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: c.aiReason ? 6 : 0 }}>
+          <div style={{ background: "#141726", border: "1px solid #1f2437", borderRadius: 6, padding: "4px 8px", textAlign: "center", minWidth: 50 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: "#9ca3af", fontFamily: "monospace" }}>{simPct}</div>
+            <div style={{ fontSize: 7, color: "#4b5563", letterSpacing: "0.06em" }}>SIM</div>
+          </div>
+          <div style={{ color: "#4b5563", fontSize: 10, fontWeight: 700 }}>vs</div>
+          <div style={{ background: "#141726", border: "1px solid #1f2437", borderRadius: 6, padding: "4px 8px", textAlign: "center", minWidth: 50 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: "#9ca3af", fontFamily: "monospace" }}>{bookPct}</div>
+            <div style={{ fontSize: 7, color: "#4b5563", letterSpacing: "0.06em" }}>BOOK</div>
+          </div>
+          <div style={{ background: `${edgeColor}14`, border: `1px solid ${edgeColor}40`, borderRadius: 6, padding: "4px 10px", textAlign: "center" }}>
+            <div style={{ fontSize: 12, fontWeight: 900, color: edgeColor, fontFamily: "monospace" }}>+{edgePts}pts</div>
+            <div style={{ fontSize: 7, color: edgeColor, opacity: 0.7, letterSpacing: "0.06em" }}>EDGE</div>
+          </div>
+        </div>
+
+        {/* AI reason */}
+        {c.aiReason && (
+          <div style={{ fontSize: 10, color: "#d1d5db", fontStyle: "italic", lineHeight: 1.4, marginTop: 4 }}>{c.aiReason}</div>
+        )}
+      </Card>
+    );
+  };
+
+  return (
+    <div style={{ padding: "12px 0" }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>⚡ PREDICT</span>
+            {predictSettled.graded > 0 && (
+              <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                {predictSettled.hits}/{predictSettled.graded} hit
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>Edge plays — model probability exceeds book implied · sorted by edge</div>
+        </div>
+      </div>
+
+      {/* Loading state */}
+      {aiBoardLoading && (
+        <div style={{ textAlign: "center", padding: 48, color: "#6b7280", fontSize: 11 }}>
+          <div style={{ fontSize: 24, marginBottom: 8 }}>⚡</div>
+          Loading edge plays…
+        </div>
+      )}
+
+      {/* No AI data yet */}
+      {!aiBoardLoading && !aiBoardData && (
+        <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
+          Preparing candidates… open AI Board first if this persists.
+        </div>
+      )}
+
+      {/* No edge plays */}
+      {!aiBoardLoading && aiBoardData && allEdgePlays.length === 0 && (
+        <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
+          No edge plays yet. Edge plays appear when the model's probability is ≥8pts above the book's implied probability.
+        </div>
+      )}
+
+      {/* Upcoming plays */}
+      {upcomingPlays.length > 0 && (
+        <div style={{ marginBottom: lockedPlays.length > 0 ? 20 : 0 }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.06em", textTransform: "uppercase", padding: "4px 2px 8px" }}>
+            Upcoming · {upcomingPlays.length} play{upcomingPlays.length !== 1 ? "s" : ""}
+          </div>
+          {upcomingPlays.map((c, i) => renderEdgeCard(c, i))}
+        </div>
+      )}
+
+      {/* Locked / in-play / final */}
+      {lockedPlays.length > 0 && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.06em", textTransform: "uppercase", padding: "4px 2px 8px", display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ color: "#a855f7" }}>⊘</span> Locked · in play / final
+          </div>
+          {lockedPlays.map((c, i) => {
+            const phase = getBoardGamePhase(c.gamePk);
+            return (
+              <div key={c.id} style={{ opacity: phase === "final" ? 0.85 : 1 }}>
+                {renderEdgeCard(c, i)}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+})()}
+```
+
+---
+
+### What does NOT change
+
+- The AI Board tab — unchanged, still shows all candidates ranked by AI score.
+- `lockedAiBoardSnapshot`, `aiBoardSettled`, `aiBoardTabHitSummary` inside the AI Board IIFE — all unchanged.
+- No backend changes.
+- No new state variables needed.
+
+---
+
+### Notes
+
+- `getBoardGamePhase` and `getBoardGameStatus` are already defined earlier in the file — use them directly.
+- `liveBoardResults`, `liveBoxscores`, `lockedAiBoardSnapshot`, `aiBoardData`, `aiBoardLoading` are all already in scope.
+- `Card` is the existing card component — use it exactly as the AI Board does.
+- The `gradeCandidate` function inside the Predict IIFE is a duplicate of `getAiBoardGrade` in the AI Board IIFE — this is intentional to avoid refactoring the shared IIFE scope. They are identical in logic.
+
+---
+
+### Validation checklist
+
+1. No JS errors on load.
+2. "⚡ Predict" nav button appears for scout users, hidden for others.
+3. Navigating to Predict triggers `aiBoardData` to load (same as AI Board).
+4. Cards appear sorted by edge descending — highest edge play at the top.
+5. Each card shows SIM %, BOOK %, and EDGE pts correctly.
+6. A play with `edge: 0.20`, `simConfidence: 72`, `impliedProb: 0.52` displays: SIM 72% / BOOK 52% / +20pts.
+7. Plays with `edge < 0.08` do not appear.
+8. Upcoming plays in top section; in-progress/final in locked section below.
+9. Hit counter in header counts correctly from `lockedAiBoardSnapshot`.
+10. AI Board tab unchanged — no visual regression.
+
+---
+
+## CODEX TASK 103 — Predictive Lane Phase 3: Calibration Panel
+
+### File to modify
+
+`prop-scout-v7.jsx` only.
+
+### Read before starting
+
+Read **TASK 55**, **CODEX TASK 101**, and **CODEX TASK 102** in `AGENT_SYSTEM_PROMPT.md` for architecture context. This task adds a calibration panel inside the existing Predict IIFE — no new views, no new state.
+
+---
+
+### What gets built
+
+A "Model Calibration" section at the bottom of the Predict view. It groups every graded play in `lockedAiBoardSnapshot` into four `simConfidence` buckets (55–64%, 65–74%, 75–84%, 85%+) and shows actual hit rate vs. expected for each. Answers the question: when the model says 70% confidence, does it actually hit 70% of the time?
+
+---
+
+### Changes — in order
+
+#### 1 — Add calibration data computation inside the Predict IIFE (~line 11791, after `lockedPlays`, before `renderEdgeCard`)
+
+```js
+const BUCKETS = [
+  { label: "55–64%", min: 55, max: 64, mid: 59.5 },
+  { label: "65–74%", min: 65, max: 74, mid: 69.5 },
+  { label: "75–84%", min: 75, max: 84, mid: 79.5 },
+  { label: "85%+",   min: 85, max: 100, mid: 90   },
+];
+
+const calibrationBuckets = BUCKETS.map(b => {
+  const inBucket = (lockedAiBoardSnapshot ?? []).filter(c =>
+    c.simConfidence != null &&
+    c.simConfidence >= b.min &&
+    c.simConfidence <= b.max
+  );
+  let hits = 0, total = 0;
+  for (const c of inBucket) {
+    const grade = gradeCandidate(c);
+    if (grade === true)  { hits++; total++; }
+    if (grade === false) { total++; }
+  }
+  const actualRate = total > 0 ? hits / total : null;
+  return { ...b, hits, total, actualRate };
+});
+```
+
+---
+
+#### 2 — Add calibration JSX section inside the Predict IIFE's `return (...)` (~line 11906, after the locked plays section, before the closing `</div>`)
+
+```jsx
+{/* Calibration panel */}
+{calibrationBuckets.some(b => b.total > 0) && (
+  <div style={{ marginTop: 28, borderTop: "1px solid #1f2437", paddingTop: 16 }}>
+    <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 12 }}>
+      Model Calibration
+    </div>
+    {calibrationBuckets.map(b => {
+      if (b.total === 0) return null;
+      const expectedPct = Math.round(b.mid);
+      const actualPct   = b.actualRate != null ? Math.round(b.actualRate * 100) : null;
+      const diff        = actualPct != null ? actualPct - expectedPct : null;
+      const barColor    = diff == null ? "#4b5563"
+        : diff >= -5  ? "#22c55e"
+        : diff >= -15 ? "#fbbf24"
+        : "#ef4444";
+      return (
+        <div key={b.label} style={{ marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", fontFamily: "monospace" }}>{b.label}</span>
+            <span style={{ fontSize: 10, fontFamily: "monospace", color: "#6b7280" }}>
+              {b.hits}/{b.total}
+              {actualPct != null && (
+                <span style={{ marginLeft: 6, color: barColor, fontWeight: 700 }}>{actualPct}%</span>
+              )}
+              <span style={{ marginLeft: 4, color: "#4b5563" }}>vs {expectedPct}% exp</span>
+            </span>
+          </div>
+          <div style={{ position: "relative", height: 6, background: "#1f2437", borderRadius: 3 }}>
+            {actualPct != null && (
+              <div style={{ width: `${Math.min(actualPct, 100)}%`, height: "100%", background: barColor, borderRadius: 3, transition: "width 0.3s" }} />
+            )}
+            <div style={{ position: "absolute", top: -2, left: `${Math.min(expectedPct, 100)}%`, width: 2, height: 10, background: "#4b5563", borderRadius: 1, transform: "translateX(-50%)" }} />
+          </div>
+        </div>
+      );
+    })}
+    <div style={{ fontSize: 9, color: "#4b5563", marginTop: 10, fontFamily: "monospace" }}>
+      Based on {calibrationBuckets.reduce((sum, b) => sum + b.total, 0)} graded plays · today&apos;s locked snapshot
+    </div>
+  </div>
+)}
+```
+
+---
+
+### What does NOT change
+
+- Edge card layout, `predictSettled`, `gradeCandidate`, `renderEdgeCard` — all unchanged.
+- No new state variables.
+- No backend changes.
+- AI Board tab — unchanged.
+
+---
+
+### Notes
+
+- `gradeCandidate` is already defined earlier in the same Predict IIFE — call it directly.
+- `lockedAiBoardSnapshot` is already in scope.
+- Bar color logic: green if actual is within 5pts of expected, yellow if 6–15pts below, red if >15pts below.
+- The expected marker (grey vertical tick) sits at the midpoint of the bucket on the progress bar.
+- Panel is hidden entirely when no plays have resolved — `calibrationBuckets.some(b => b.total > 0)`.
+
+---
+
+### Validation checklist
+
+1. No JS errors on load.
+2. Predict tab renders identically when no plays are graded (calibration panel hidden).
+3. After plays resolve, "Model Calibration" section appears at the bottom of Predict.
+4. Each bucket row shows: label | hits/total | actual% (colored) | vs X% exp.
+5. Progress bar fills to actual%, grey tick sits at expected%.
+6. Green bar when actual ≥ expected − 5, yellow when 6–15pts below, red when >15pts below.
+7. Footer shows correct total graded play count.
+8. Buckets with zero graded plays are hidden (return null).
+9. AI Board tab and edge cards unchanged.
+
+---
+
+## CODEX TASK 104 — Batter Gamelog Pre-fetch Cron
+
+### Files to modify
+
+- `backend/jobs/snapshotJobs.js` — add `snapshotBatterGamelogs()` + export
+- `backend/jobs/scheduler.js` — add to cron schedule
+
+### No changes to
+
+- `backend/routes/players.js` — the gamelog route already reads from DB correctly; no change needed
+- `prop-scout-v7.jsx` — no frontend changes
+
+---
+
+### Problem
+
+`/api/players/:id/gamelog?group=hitting` is called once per lineup batter when the Board opens (~270 calls on a full slate). On a cold cache, each call makes 2–3 outbound MLB Stats API requests. This causes a 15–30 second load delay before any Board candidates appear. The pitcher pre-fetch cron (`snapshotPitcherGamelogs`) already solves this for SPs — this task applies the same pattern to batters.
+
+---
+
+### Change 1 — Add `snapshotBatterGamelogs` to `backend/jobs/snapshotJobs.js`
+
+Place immediately after `snapshotPitcherGamelogs` (after line ~534, before `ipStringToOuts`).
+
+```js
+async function snapshotBatterGamelogs(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: snapshotBatterGamelogs  date=${date}`);
+  await ensurePhaseOneTables();
+
+  const TEAM_ABBR_LOCAL = {
+    108: "LAA", 109: "ARI", 110: "BAL", 111: "BOS", 112: "CHC",
+    113: "CIN", 114: "CLE", 115: "COL", 116: "DET", 117: "HOU",
+    118: "KC",  119: "LAD", 120: "WSH", 121: "NYM", 133: "OAK",
+    134: "PIT", 135: "SD",  136: "SEA", 137: "SF",  138: "STL",
+    139: "TB",  140: "TEX", 141: "TOR", 142: "MIN", 143: "PHI",
+    144: "ATL", 145: "CWS", 146: "MIA", 147: "NYY", 158: "MIL",
+  };
+
+  // Get today's games from schedule snapshot
+  const result = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const games = result?.rows?.[0]?.games ?? [];
+
+  if (!games.length) {
+    console.log(`  · snapshotBatterGamelogs: no games found for ${date}`);
+    return;
+  }
+
+  // Collect unique batter IDs from confirmed lineups or active rosters
+  const batterIds = [];
+  const seen = new Set();
+
+  for (const game of games) {
+    try {
+      const { data } = await mlb.get(`/game/${game.gamePk}/boxscore`, {
+        params: { hydrate: "person" },
+      });
+
+      const awayBatters = data?.teams?.away?.battingOrder ?? [];
+      const homeBatters = data?.teams?.home?.battingOrder ?? [];
+      const confirmed = awayBatters.length > 0 && homeBatters.length > 0;
+
+      let ids = [];
+      if (confirmed) {
+        ids = [...awayBatters, ...homeBatters];
+      } else {
+        const awayTeamId = data?.teams?.away?.team?.id;
+        const homeTeamId = data?.teams?.home?.team?.id;
+        if (awayTeamId && homeTeamId) {
+          try {
+            const [awayRes, homeRes] = await Promise.all([
+              mlb.get(`/teams/${awayTeamId}/roster`, {
+                params: { rosterType: "active", season: SEASON, hydrate: "person" },
+              }),
+              mlb.get(`/teams/${homeTeamId}/roster`, {
+                params: { rosterType: "active", season: SEASON, hydrate: "person" },
+              }),
+            ]);
+            const nonPitcher = (roster) =>
+              (roster.data.roster ?? [])
+                .filter(p => p.position?.type !== "Pitcher" && p.status?.code === "A")
+                .map(p => p.person.id);
+            ids = [...nonPitcher(awayRes), ...nonPitcher(homeRes)];
+          } catch (rosterErr) {
+            console.warn(`  ⚠ snapshotBatterGamelogs: roster fallback failed for ${game.gamePk}:`, rosterErr.message);
+          }
+        }
+      }
+
+      for (const id of ids) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          batterIds.push(id);
+        }
+      }
+    } catch (boxErr) {
+      console.warn(`  ⚠ snapshotBatterGamelogs: boxscore failed for ${game.gamePk}:`, boxErr.message);
+    }
+  }
+
+  if (!batterIds.length) {
+    console.log(`  · snapshotBatterGamelogs: no batters found for ${date}`);
+    return;
+  }
+
+  console.log(`  · snapshotBatterGamelogs: fetching ${batterIds.length} batters`);
+
+  let fetched = 0;
+  let skipped = 0;
+
+  for (const batterId of batterIds) {
+    // Idempotent — skip if already snapshotted today
+    try {
+      const existing = await query(
+        `SELECT 1 FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = 'hitting' AND slate_date = $2`,
+        [batterId, date]
+      );
+      if (existing?.rows?.length) {
+        skipped++;
+        continue;
+      }
+    } catch (err) {
+      console.warn(`  ⚠ snapshotBatterGamelogs: DB check failed for ${batterId}:`, err.message);
+    }
+
+    try {
+      let season = SEASON;
+
+      // Gamelog — fall back to prior season if empty
+      const { data: glData } = await mlb.get(`/people/${batterId}/stats`, {
+        params: { stats: "gameLog", group: "hitting", season },
+      });
+      let splits = glData.stats?.[0]?.splits ?? [];
+
+      if (!splits.length) {
+        const { data: prevGl } = await mlb.get(`/people/${batterId}/stats`, {
+          params: { stats: "gameLog", group: "hitting", season: season - 1 },
+        });
+        splits = prevGl.stats?.[0]?.splits ?? [];
+        season -= 1;
+      }
+
+      // Person info + season stats in parallel
+      const [personRes, seasonRes] = await Promise.all([
+        mlb.get(`/people/${batterId}`, { params: { hydrate: "currentTeam" } }),
+        mlb.get(`/people/${batterId}/stats`, {
+          params: { stats: "season", group: "hitting", season: SEASON },
+        }),
+      ]);
+      const person = personRes.data.people?.[0] ?? null;
+      const seasonSplit = seasonRes.data.stats?.[0]?.splits?.[0]?.stat ?? {};
+
+      // Build payload — must match the hitting path in backend/routes/players.js exactly
+      const sorted = [...splits].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+      const gameRows = sorted.slice(0, 10).map(g => ({
+        date:     g.date,
+        opponent: TEAM_ABBR_LOCAL[g.opponent?.id] ?? g.opponent?.name ?? "?",
+        ab:       g.stat?.atBats     ?? 0,
+        h:        g.stat?.hits       ?? 0,
+        hr:       g.stat?.homeRuns   ?? 0,
+        rbi:      g.stat?.rbi        ?? 0,
+        avg:      g.stat?.avg        ?? ".000",
+      }));
+
+      const last7 = sorted.filter(g => (g.stat?.atBats ?? 0) > 0).slice(0, 7);
+      const last7Hits = last7.reduce((sum, g) => sum + (g.stat?.hits ?? 0), 0);
+      const last7Abs  = last7.reduce((sum, g) => sum + (g.stat?.atBats ?? 0), 0);
+      const gp    = Number(seasonSplit?.gamesPlayed) || 0;
+      const tbTot = Number(seasonSplit?.totalBases)  || 0;
+
+      const payload = {
+        group:     "hitting",
+        games:     gameRows,
+        seasonAvg: seasonSplit?.avg ?? ".000",
+        last7Avg:  last7Abs > 0
+          ? `${(last7Hits / last7Abs).toFixed(3).replace(/^0/, "")}`
+          : ".000",
+        avg:    seasonSplit?.avg               ?? ".000",
+        ops:    seasonSplit?.ops               ?? ".000",
+        slg:    seasonSplit?.sluggingPercentage ?? ".000",
+        hr:     seasonSplit?.homeRuns           ?? 0,
+        avgTB:  gp > 0 ? (tbTot / gp).toFixed(1) : "—",
+        hand:   person?.batSide?.code           ?? null,
+        hitRate: gameRows.slice(0, 5).map(g => g.h > 0 ? 1 : 0),
+      };
+
+      await query(
+        `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
+         VALUES ($1, $2, $3, NOW(), $4)
+         ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
+           SET fetched_at = NOW(), data = $4`,
+        [batterId, "hitting", date, JSON.stringify(payload)]
+      );
+
+      fetched++;
+    } catch (err) {
+      console.warn(`  ⚠ snapshotBatterGamelogs: fetch failed for ${batterId}:`, err.message);
+    }
+
+    // 600ms pacing — respectful of MLB API rate limits
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  console.log(`  ✓ snapshotBatterGamelogs  date=${date}  fetched=${fetched}  skipped=${skipped}`);
+}
+```
+
+---
+
+### Change 2 — Export `snapshotBatterGamelogs` in `backend/jobs/snapshotJobs.js`
+
+Add `snapshotBatterGamelogs` to the existing `module.exports` object.
+
+---
+
+### Change 3 — Schedule in `backend/jobs/scheduler.js`
+
+**Update the destructured import** from `./snapshotJobs` to include `snapshotBatterGamelogs`.
+
+**Add cron schedule** after the pitcher gamelog cron:
+```js
+// Pre-fetch batter gamelogs at 10 AM and 2 PM Honolulu (same schedule as pitchers)
+cron.schedule("0 10,14 * * *", () => snapshotBatterGamelogs(), { timezone: "Pacific/Honolulu" });
+```
+
+---
+
+### Notes
+
+- At 10 AM: lineups are not yet posted → uses active roster fallback (~28 non-pitchers/team × ~15 games × 2 teams ≈ up to ~840 batters). Runtime ~8–10 min at 600ms pacing.
+- At 2 PM: lineups are mostly confirmed → ~18 batters/game × 15 games ≈ ~270 batters. Runtime ~3–4 min.
+- Idempotent: a player already snapshotted today is skipped on both runs.
+- Payload shape must match `players.js` hitting path exactly — the route reads the same DB row and serves it as-is.
+
+---
+
+### Validation checklist
+
+1. No server startup errors.
+2. Cron fires at 10 AM and 2 PM Honolulu — `snapshotBatterGamelogs` logged in Railway.
+3. After cron runs, `player_gamelog_snapshots` has hitting rows for today's batters.
+4. Opening Board tab returns `X-Cache: DB_HIT` for batter gamelog calls (check Network tab).
+5. Board populates immediately (no 15–30s cold-load delay) after cron has run.
+6. Pitcher cron unaffected — `snapshotPitcherGamelogs` still runs normally.
+7. No regression on gamelog endpoint for pitchers or batters.

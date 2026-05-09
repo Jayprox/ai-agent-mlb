@@ -85,6 +85,16 @@ async function ensurePhaseOneTables() {
       evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS player_gamelog_snapshots (
+      player_id   INTEGER      NOT NULL,
+      stat_group  TEXT         NOT NULL,
+      slate_date  DATE         NOT NULL,
+      fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+      data        JSONB        NOT NULL,
+      PRIMARY KEY (player_id, stat_group, slate_date)
+    )
+  `);
 }
 
 function formatGameTime(iso) {
@@ -398,6 +408,316 @@ async function pollPlayerProps(date = todayHonolulu()) {
   }
 }
 
+async function snapshotPitcherGamelogs(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: snapshotPitcherGamelogs  date=${date}`);
+  await ensurePhaseOneTables();
+
+  // Get today's probable pitchers from the schedule snapshot
+  const result = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const games = result?.rows?.[0]?.games ?? [];
+
+  const pitcherIds = [
+    ...new Set(
+      games
+        .flatMap(g => [
+          g.probablePitchers?.away?.id,
+          g.probablePitchers?.home?.id,
+        ])
+        .filter(Boolean)
+    ),
+  ];
+
+  if (!pitcherIds.length) {
+    console.log(`  · snapshotPitcherGamelogs: no pitchers found for ${date}`);
+    return;
+  }
+
+  console.log(`  · snapshotPitcherGamelogs: fetching ${pitcherIds.length} pitchers`);
+
+  const TEAM_ABBR_LOCAL = {
+    108: "LAA", 109: "ARI", 110: "BAL", 111: "BOS", 112: "CHC",
+    113: "CIN", 114: "CLE", 115: "COL", 116: "DET", 117: "HOU",
+    118: "KC",  119: "LAD", 120: "WSH", 121: "NYM", 133: "OAK",
+    134: "PIT", 135: "SD",  136: "SEA", 137: "SF",  138: "STL",
+    139: "TB",  140: "TEX", 141: "TOR", 142: "MIN", 143: "PHI",
+    144: "ATL", 145: "CWS", 146: "MIA", 147: "NYY", 158: "MIL",
+  };
+
+  let fetched = 0;
+  let skipped = 0;
+
+  for (const pitcherId of pitcherIds) {
+    // Skip if already snapshotted today
+    try {
+      const existing = await query(
+        `SELECT 1 FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = 'pitching' AND slate_date = $2`,
+        [pitcherId, date]
+      );
+      if (existing?.rows?.length) {
+        skipped++;
+        continue;
+      }
+    } catch (err) {
+      console.warn(`  ⚠ snapshotPitcherGamelogs: DB check failed for ${pitcherId}:`, err.message);
+    }
+
+    try {
+      const season = SEASON;
+      const { data: statsData } = await mlb.get(`/people/${pitcherId}/stats`, {
+        params: { stats: "gameLog", group: "pitching", season },
+      });
+      let splits = statsData.stats?.[0]?.splits ?? [];
+
+      if (!splits.length) {
+        const { data: prevData } = await mlb.get(`/people/${pitcherId}/stats`, {
+          params: { stats: "gameLog", group: "pitching", season: season - 1 },
+        });
+        splits = prevData.stats?.[0]?.splits ?? [];
+      }
+
+      const { data: personData } = await mlb.get(`/people/${pitcherId}/stats`, {
+        params: { stats: "season", group: "pitching", season },
+      });
+      const seasonSplit = personData.stats?.[0]?.splits?.[0]?.stat ?? {};
+
+      const sorted = [...splits].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+      const starts = sorted
+        .filter(g => (g.stat?.gamesStarted ?? 0) > 0)
+        .slice(0, 5);
+      const gameRows = starts.map(g => ({
+        date:     g.date,
+        opponent: TEAM_ABBR_LOCAL[g.opponent?.id] ?? g.opponent?.name ?? "?",
+        ip:       g.stat?.inningsPitched ?? "0.0",
+        k:        g.stat?.strikeOuts ?? 0,
+        er:       g.stat?.earnedRuns ?? 0,
+        pc:       g.stat?.numberOfPitches ?? null,
+        era:      g.stat?.era ?? "0.00",
+        result:   (g.stat?.wins ?? 0) > 0 ? "W" : (g.stat?.losses ?? 0) > 0 ? "L" : "ND",
+      }));
+
+      const totalOuts = gameRows.reduce((sum, g) => sum + ipStringToOuts(g.ip), 0);
+      const avgIPOuts  = gameRows.length > 0 ? totalOuts / gameRows.length : 0;
+      const avgIPWhole  = Math.floor(avgIPOuts / 3);
+      const avgIPThirds = Math.round(avgIPOuts % 3);
+      const avgIP = gameRows.length > 0 ? `${avgIPWhole}.${avgIPThirds}` : "—";
+
+      const payload = {
+        group: "pitching",
+        games: gameRows,
+        avgIP,
+        seasonEra: seasonSplit?.era ?? "0.00",
+      };
+
+      await query(
+        `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
+         VALUES ($1, $2, $3, NOW(), $4)
+         ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
+           SET fetched_at = NOW(), data = $4`,
+        [pitcherId, "pitching", date, JSON.stringify(payload)]
+      );
+
+      fetched++;
+    } catch (err) {
+      console.warn(`  ⚠ snapshotPitcherGamelogs: fetch failed for ${pitcherId}:`, err.message);
+    }
+
+    // 600ms spacing — respectful of MLB API rate limits
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  console.log(`  ✓ snapshotPitcherGamelogs  date=${date}  fetched=${fetched}  skipped=${skipped}`);
+}
+
+async function snapshotBatterGamelogs(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: snapshotBatterGamelogs  date=${date}`);
+  await ensurePhaseOneTables();
+
+  const TEAM_ABBR_LOCAL = {
+    108: "LAA", 109: "ARI", 110: "BAL", 111: "BOS", 112: "CHC",
+    113: "CIN", 114: "CLE", 115: "COL", 116: "DET", 117: "HOU",
+    118: "KC",  119: "LAD", 120: "WSH", 121: "NYM", 133: "OAK",
+    134: "PIT", 135: "SD",  136: "SEA", 137: "SF",  138: "STL",
+    139: "TB",  140: "TEX", 141: "TOR", 142: "MIN", 143: "PHI",
+    144: "ATL", 145: "CWS", 146: "MIA", 147: "NYY", 158: "MIL",
+  };
+
+  // Get today's games from schedule snapshot
+  const result = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const games = result?.rows?.[0]?.games ?? [];
+
+  if (!games.length) {
+    console.log(`  · snapshotBatterGamelogs: no games found for ${date}`);
+    return;
+  }
+
+  // Collect unique batter IDs from confirmed lineups or active rosters
+  const batterIds = [];
+  const seen = new Set();
+
+  for (const game of games) {
+    try {
+      const { data } = await mlb.get(`/game/${game.gamePk}/boxscore`, {
+        params: { hydrate: "person" },
+      });
+
+      const awayBatters = data?.teams?.away?.battingOrder ?? [];
+      const homeBatters = data?.teams?.home?.battingOrder ?? [];
+      const confirmed = awayBatters.length > 0 && homeBatters.length > 0;
+
+      let ids = [];
+      if (confirmed) {
+        ids = [...awayBatters, ...homeBatters];
+      } else {
+        const awayTeamId = data?.teams?.away?.team?.id;
+        const homeTeamId = data?.teams?.home?.team?.id;
+        if (awayTeamId && homeTeamId) {
+          try {
+            const [awayRes, homeRes] = await Promise.all([
+              mlb.get(`/teams/${awayTeamId}/roster`, {
+                params: { rosterType: "active", season: SEASON, hydrate: "person" },
+              }),
+              mlb.get(`/teams/${homeTeamId}/roster`, {
+                params: { rosterType: "active", season: SEASON, hydrate: "person" },
+              }),
+            ]);
+            const nonPitcher = (roster) =>
+              (roster.data.roster ?? [])
+                .filter(p => p.position?.type !== "Pitcher" && p.status?.code === "A")
+                .map(p => p.person.id);
+            ids = [...nonPitcher(awayRes), ...nonPitcher(homeRes)];
+          } catch (rosterErr) {
+            console.warn(`  ⚠ snapshotBatterGamelogs: roster fallback failed for ${game.gamePk}:`, rosterErr.message);
+          }
+        }
+      }
+
+      for (const id of ids) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          batterIds.push(id);
+        }
+      }
+    } catch (boxErr) {
+      console.warn(`  ⚠ snapshotBatterGamelogs: boxscore failed for ${game.gamePk}:`, boxErr.message);
+    }
+  }
+
+  if (!batterIds.length) {
+    console.log(`  · snapshotBatterGamelogs: no batters found for ${date}`);
+    return;
+  }
+
+  console.log(`  · snapshotBatterGamelogs: fetching ${batterIds.length} batters`);
+
+  let fetched = 0;
+  let skipped = 0;
+
+  for (const batterId of batterIds) {
+    // Idempotent — skip if already snapshotted today
+    try {
+      const existing = await query(
+        `SELECT 1 FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = 'hitting' AND slate_date = $2`,
+        [batterId, date]
+      );
+      if (existing?.rows?.length) {
+        skipped++;
+        continue;
+      }
+    } catch (err) {
+      console.warn(`  ⚠ snapshotBatterGamelogs: DB check failed for ${batterId}:`, err.message);
+    }
+
+    try {
+      let season = SEASON;
+
+      // Gamelog — fall back to prior season if empty
+      const { data: glData } = await mlb.get(`/people/${batterId}/stats`, {
+        params: { stats: "gameLog", group: "hitting", season },
+      });
+      let splits = glData.stats?.[0]?.splits ?? [];
+
+      if (!splits.length) {
+        const { data: prevGl } = await mlb.get(`/people/${batterId}/stats`, {
+          params: { stats: "gameLog", group: "hitting", season: season - 1 },
+        });
+        splits = prevGl.stats?.[0]?.splits ?? [];
+        season -= 1;
+      }
+
+      // Person info + season stats in parallel
+      const [personRes, seasonRes] = await Promise.all([
+        mlb.get(`/people/${batterId}`, { params: { hydrate: "currentTeam" } }),
+        mlb.get(`/people/${batterId}/stats`, {
+          params: { stats: "season", group: "hitting", season: SEASON },
+        }),
+      ]);
+      const person = personRes.data.people?.[0] ?? null;
+      const seasonSplit = seasonRes.data.stats?.[0]?.splits?.[0]?.stat ?? {};
+
+      // Build payload — must match the hitting path in backend/routes/players.js exactly
+      const sorted = [...splits].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+      const gameRows = sorted.slice(0, 10).map(g => ({
+        date:     g.date,
+        opponent: TEAM_ABBR_LOCAL[g.opponent?.id] ?? g.opponent?.name ?? "?",
+        ab:       g.stat?.atBats   ?? 0,
+        h:        g.stat?.hits     ?? 0,
+        hr:       g.stat?.homeRuns ?? 0,
+        rbi:      g.stat?.rbi      ?? 0,
+        avg:      g.stat?.avg      ?? ".000",
+      }));
+
+      const last7 = sorted.filter(g => (g.stat?.atBats ?? 0) > 0).slice(0, 7);
+      const last7Hits = last7.reduce((sum, g) => sum + (g.stat?.hits ?? 0), 0);
+      const last7Abs  = last7.reduce((sum, g) => sum + (g.stat?.atBats ?? 0), 0);
+      const gp    = Number(seasonSplit?.gamesPlayed) || 0;
+      const tbTot = Number(seasonSplit?.totalBases)  || 0;
+
+      const payload = {
+        group:     "hitting",
+        games:     gameRows,
+        seasonAvg: seasonSplit?.avg ?? ".000",
+        last7Avg:  last7Abs > 0
+          ? `${(last7Hits / last7Abs).toFixed(3).replace(/^0/, "")}`
+          : ".000",
+        avg:    seasonSplit?.avg                ?? ".000",
+        ops:    seasonSplit?.ops                ?? ".000",
+        slg:    seasonSplit?.sluggingPercentage  ?? ".000",
+        hr:     seasonSplit?.homeRuns            ?? 0,
+        avgTB:  gp > 0 ? (tbTot / gp).toFixed(1) : "—",
+        hand:   person?.batSide?.code            ?? null,
+        hitRate: gameRows.slice(0, 5).map(g => g.h > 0 ? 1 : 0),
+      };
+
+      await query(
+        `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
+         VALUES ($1, $2, $3, NOW(), $4)
+         ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
+           SET fetched_at = NOW(), data = $4`,
+        [batterId, "hitting", date, JSON.stringify(payload)]
+      );
+
+      fetched++;
+    } catch (err) {
+      console.warn(`  ⚠ snapshotBatterGamelogs: fetch failed for ${batterId}:`, err.message);
+    }
+
+    // 600ms pacing — respectful of MLB API rate limits
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  console.log(`  ✓ snapshotBatterGamelogs  date=${date}  fetched=${fetched}  skipped=${skipped}`);
+}
+
 function ipStringToOuts(ipValue) {
   if (ipValue == null) return 0;
   const [wholeStr, fracStr = "0"] = String(ipValue).split(".");
@@ -575,6 +895,8 @@ module.exports = {
   pollSchedule,
   pollInjuries,
   pollPlayerProps,
+  snapshotPitcherGamelogs,
+  snapshotBatterGamelogs,
   runScoutEvaluation,
   todayHonolulu,
 };

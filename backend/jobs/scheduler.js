@@ -2,7 +2,7 @@ const cron = require("node-cron");
 const { query, isConnected } = require("../services/db");
 const {
   snapshotSlate, snapshotOdds, snapshotBullpen,
-  snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, runScoutEvaluation, todayHonolulu,
+  snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, snapshotPitcherGamelogs, snapshotBatterGamelogs, runScoutEvaluation, todayHonolulu,
 } = require("./snapshotJobs");
 const { gradePendingPicks } = require("./gradePicksJob");
 const { resolveLabCalibration } = require("./resolveLabCalibrationJob");
@@ -65,6 +65,11 @@ function startScheduler() {
     const gamePks = await getTodayGamePks();
     for (const pk of gamePks) await snapshotUmpires(pk);
   }, { timezone: "Pacific/Honolulu" });
+  // Pre-fetch pitcher gamelogs at 10 AM and 2 PM Honolulu
+  // Keeps SP recent-form data warm before users open game cards
+  cron.schedule("0 10,14 * * *", () => snapshotPitcherGamelogs(), { timezone: "Pacific/Honolulu" });
+  // Pre-fetch batter gamelogs at 10 AM and 2 PM Honolulu
+  cron.schedule("0 10,14 * * *", () => snapshotBatterGamelogs(), { timezone: "Pacific/Honolulu" });
 
   cron.schedule("0 9 * * *", async () => {
     try {

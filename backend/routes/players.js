@@ -2,6 +2,7 @@ const express = require("express");
 const router  = express.Router();
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
+const db = require("../services/db");
 
 const SEASON = new Date().getFullYear();
 const GAMELOG_TTL_MS = 6 * 60 * 60 * 1000;
@@ -18,6 +19,10 @@ const TEAM_ABBR = {
   139: "TB",  140: "TEX", 141: "TOR", 142: "MIN", 143: "PHI",
   144: "ATL", 145: "CWS", 146: "MIA", 147: "NYY", 158: "MIL",
 };
+
+function todayHonolulu() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+}
 
 const seasonStatsFor = async (playerId, group, season) => {
   const [personRes, statsRes] = await Promise.all([
@@ -141,13 +146,36 @@ router.get("/:playerId/gamelog", async (req, res) => {
   const { playerId } = req.params;
   const group = req.query.group === "pitching" ? "pitching" : "hitting";
   const cacheKey = `gamelog:${playerId}:${group}`;
+  const today = todayHonolulu();
 
+  // 1. In-memory cache (fastest — same-request dedup within one process lifetime)
   const cached = cache.get(cacheKey);
   if (cached) {
     res.setHeader("X-Cache", "HIT");
     return res.json(cached);
   }
 
+  // 2. DB snapshot for today (survives dyno restarts)
+  if (db.isConnected()) {
+    try {
+      const dbResult = await db.query(
+        `SELECT data FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = $2 AND slate_date = $3`,
+        [parseInt(playerId, 10), group, today]
+      );
+      if (dbResult?.rows?.length) {
+        const result = dbResult.rows[0].data;
+        cache.set(cacheKey, result, GAMELOG_TTL_MS);
+        res.setHeader("X-Cache", "DB_HIT");
+        return res.json(result);
+      }
+    } catch (dbErr) {
+      console.warn(`gamelog DB read failed for ${playerId}:`, dbErr.message);
+      // fall through to MLB API
+    }
+  }
+
+  // 3. MLB API fetch — write through to DB and in-memory cache
   try {
     let season = SEASON;
     let splits = await gamelogStatsFor(playerId, group, season);
@@ -223,6 +251,17 @@ router.get("/:playerId/gamelog", async (req, res) => {
             hitRate: games.slice(0, 5).map(g => g.h > 0 ? 1 : 0),
           };
         })();
+
+    // Write through to DB (best-effort — never block the response)
+    if (db.isConnected()) {
+      db.query(
+        `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
+         VALUES ($1, $2, $3, NOW(), $4)
+         ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
+           SET fetched_at = NOW(), data = $4`,
+        [parseInt(playerId, 10), group, today, JSON.stringify(result)]
+      ).catch(err => console.warn(`gamelog DB write failed for ${playerId}:`, err.message));
+    }
 
     cache.set(cacheKey, result, GAMELOG_TTL_MS);
     res.setHeader("X-Cache", "MISS");

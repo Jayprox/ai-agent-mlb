@@ -5807,3 +5807,542 @@ New helpers: `sampleStdNormal()`, `sampleCorrelated(rho)`. `sampleNormal` signat
 - Underlying `handleSoftRefresh` logic remains in code for now; this was a UI declutter pass only
 
 *Updated 2026-05-08 — Session 93 complete · top-nav refresh control removed*
+
+---
+
+## 🗒 Session 94 — Backlog Brainstorm: AI Board F5 Moneyline
+
+**Status:** Brainstorm only — no implementation started
+
+**Direction captured:**
+- Explore expanding `AI Board` into `F5 Moneyline` first
+- `F5 Run Line` can be evaluated later as a follow-up if ML feels useful
+- Recommendation is to start with `F5 ML` because it is cleaner than `F5 RL`:
+  - stronger SP-driven signal
+  - less bullpen noise
+  - easier validation
+- This should pair naturally with the Monte Carlo direction:
+  - structured F5 candidates generated first
+  - algorithm / sim context passed into AI
+  - AI used as a re-ranker + explanation layer
+- Keep this explicitly separate from any future true predictive-model lane
+
+*Updated 2026-05-08 — Session 94 added · AI Board F5 ML brainstorm logged*
+
+---
+
+## 🗒 Session 98 — Backlog Brainstorm: Sim Models Beyond Monte Carlo
+
+**Status:** Brainstorm only — no implementation started
+
+**Direction captured:**
+- Future predictive / AI Board sim work should not assume Monte Carlo is the only option
+- Monte Carlo is the outer simulation wrapper; the underlying market model can vary by stat type
+- Suggested mapping captured for later review:
+  - `F5 ML / F5 RL / Totals` → Poisson first, then Negative Binomial or inning-state/Markov sim
+  - `Ks` → Poisson count model + Bayesian shrinkage
+  - `Outs` → Normal / bootstrap / shrinkage-based outing model
+  - `Hits` → Binomial by PA
+  - `HR` → Bernoulli / rare-event Poisson
+  - `NRFI / YRFI` → Bernoulli or first-inning Poisson
+- If the predictive lane expands later, revisit the best fit per market instead of defaulting everything to Monte Carlo only
+
+*Updated 2026-05-09 — Session 98 added · broader sim-model brainstorm logged*
+
+---
+
+## 🗒 Session 85 — CW: Board Option C specced + backlog items
+
+**CODEX TASK 95 approved.** All 4 sim functions verified: Bayesian prior blending (normal-normal conjugate for K/Outs, Beta shrinkage for HR, platoon shrinkage for Hits) + correlated inputs (Cholesky sampleCorrelated helper, park↔ump for K ρ=0.3, park↔wind for HR ρ=0.45, stochastic park for Hits).
+
+**Backlog items added:**
+- Task #49: Add K and Outs cards to AI Board
+- Task #50: DB-backed player gamelog snapshots (interim fix: GAMELOG_TTL_MS bumped 30min → 6h in `backend/routes/players.js`)
+- Task #51: Lock odds to pre-game snapshot once game goes live
+- Task #52: Fix AI Board survivorship bias in hit tracking
+- Task #53: Board Option C — rolling lock + per-game cap
+
+**CODEX TASK 96 specced:** Board Option C — rolling lock + per-game cap for HR/Hits/K/Outs tabs.
+
+Key changes:
+- `lockedBoardCandidates` state (localStorage-persisted, keyed by Honolulu date)
+- `getBoardGamePhase(gamePk)` helper → "upcoming" | "live" | "final"
+- `computeBatterBoard` modified: per-game soft cap of 5 (was global top-20)
+- New useEffect: locks candidates at first pitch, fires on `liveSlate` change
+- `hitSummary` / `tabHitSummary` rewritten to count from locked candidates only
+- Board render split: live section (upcoming, grouped by game + time) + locked section (in-play/final with LIVE/FINAL status badge)
+
+*Updated 2026-05-08 — Session 85 complete · CODEX TASK 96 specced*
+
+---
+
+## 🗒 Session 95 — CW: Codex sessions 86–94 reviewed + Tasks 54/55 added + CODEX TASK 97 specced
+
+**Sessions 86–91 and 93 reviewed — all completed fixes, no action needed:**
+- Session 86: AI Board Hits badge fix (result-shape issue in getAiBoardGrade)
+- Session 87: AI Board max-update-depth loop fix (aiBoardData dep removed)
+- Session 88: AI Board empty-state clarification (UI only)
+- Session 89: AI Board partial-market retry fix (aiBoardPayloadSig ref)
+- Session 90: AI Board prefetch parity fix (ai-board view now triggers upstream fetches)
+- Session 91: AI Board result-key fix (entityId → liveBoardResults lookup)
+- Session 93: Top-nav soft refresh button removed (UI declutter)
+
+**Sessions 92 and 94 were brainstorms — added to backlog:**
+- Task #54: AI Board F5 Moneyline market
+- Task #55: Separate Predictive Product Lane (architecture direction — AI Board stays AI-assisted ranking, not predictive)
+
+**CODEX TASK 97 specced:** AI Board F5 Moneyline market (`prop-scout-v7.jsx` only).
+
+Key changes:
+- `buildAiBoardPayload` gets 2 new params (`liveNrfiData`, `liveOddsMap`) + F5 ML candidates via `computeGameBoard("f5ml", ...)` top 5
+- New `mapGameCandidate` helper (no playerName/simConfidence, lean + leanAbbr + factors in stats)
+- `MARKET_META` gets `f5ml: { label: "F5 ML", color: "#fbbf24" }`
+- "F5 ML" tab added to AI Board filter row
+- `getAiBoardGrade` gets f5ml branch: checks `liveBoxscores` innings 1–5, compares lean to f5 winner
+- Card render detects `c.market === "f5ml"` and shows game matchup + lean instead of player name + team
+- SIM badge hidden automatically (simConfidence null for game markets)
+
+*Updated 2026-05-08 — Session 95 complete · CODEX TASK 97 specced*
+
+---
+
+## 🗒 Session 96 — CW: CODEX TASK 97 sim amendment + AI Board sim architectural rule
+
+**Architectural rule established:** Every AI Board market must supply a `simConfidence` value. The fallback scorer (`algo * 0.6 + sim * 0.4`) degrades to algo-only without it. All current markets (K, Outs, HR, Hits) already have Monte Carlo sims. F5 ML was missing one — fixed in this amendment. Any future market added to the AI Board must include an appropriate sim.
+
+**CODEX TASK 97 amendment appended to AGENT_SYSTEM_PROMPT.md:**
+- New `simF5MLConfidence(homeEra, awayEra, parkFactor, umpireRating, lean, n=500)` function — samples F5 run scoring for each team per iteration using ERA-derived means, correlated park/ump adjustments (ρ=0.35), std=1.5. Near-ties skipped. Returns % of resolved sims where lean wins.
+- `computeGameBoard` f5ml branch now adds `homeEra`, `awayEra`, `parkFactor`, `umpireRating` to the pushed candidate object
+- `mapGameCandidate` now calls `simF5MLConfidence(...)` instead of `simConfidence: null`
+- SIM badge will now render on F5 ML cards exactly like K/Outs/HR/Hits
+
+*Updated 2026-05-08 — Session 96 complete · CODEX TASK 97 sim amendment*
+
+---
+
+## 🗒 Session 97 — CW: CODEX TASK 97 prompt written
+
+**Deliverable:** `codex-task-97-prompt.md` — copy-paste prompt for Codex to implement AI Board F5 ML market.
+
+**Prompt covers 9 ordered changes to `prop-scout-v7.jsx`:**
+1. `simF5MLConfidence` function — ERA-scaled F5 run scoring Monte Carlo, correlated park/ump (ρ=0.35), std=1.5, N=500
+2. `computeGameBoard` f5ml push — add `homeEra`, `awayEra`, `parkFactor`, `umpireRating` to pushed candidate
+3. `buildAiBoardPayload` — new params `liveNrfiData`/`liveOddsMap`, F5 ML candidates slice(0,5), `mapGameCandidate` helper with `simConfidence: simF5MLConfidence(...)`
+4. Call site — pass two new args
+5. `MARKET_META` — add `f5ml: { label: "F5 ML", color: "#fbbf24" }`
+6. `aiBoardTabHitSummary` — add `"f5ml"` to market array
+7. `getAiBoardGrade` — f5ml branch: check liveBoxscores innings 1–5, compare lean vs f5 winner
+8. Market filter tab row — add "F5 ML" tab
+9. Card render — game-level layout for f5ml (gameLabel + lean + odds), SP matchup sub-line, SIM badge renders automatically
+
+**Amendment fully incorporated:** `simConfidence: null` overridden with `simF5MLConfidence(...)` call. SIM badge will appear on F5 ML cards.
+
+*Updated 2026-05-09 — Session 97 complete · CODEX TASK 97 prompt written*
+
+---
+
+## 🗒 Session 99 — Codex: AI Board F5 Moneyline + simF5MLConfidence
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Added `simF5MLConfidence(...)` after the existing sim helper block
+- Updated `computeGameBoard("f5ml")` to include:
+  - `homeEra`
+  - `awayEra`
+  - `parkFactor`
+  - `umpireRating`
+- Expanded `buildAiBoardPayload(...)` with:
+  - new `liveNrfiData` / `liveOddsMap` params
+  - top-5 `f5ml` candidates
+  - `mapGameCandidate(...)` using `simF5MLConfidence(...)`
+- Updated the AI Board fetch call site to pass the two new arguments
+- Added `f5ml` to:
+  - `MARKET_META`
+  - AI Board filter tabs
+  - AI Board hit-summary market array
+  - `getAiBoardGrade(...)` using first-5 innings from final boxscores
+- Added game-level AI Board card rendering for F5 ML:
+  - matchup title
+  - lean + odds chip
+  - SP matchup sub-line
+  - SIM badge now renders because `simConfidence` is non-null
+
+*Updated 2026-05-09 — Session 99 complete · AI Board F5 ML implemented*
+
+---
+
+## 🗒 Session 98 — CW: CODEX TASK 97 review + approved
+
+**All 9 spec changes verified in `prop-scout-v7.jsx`:**
+
+1. ✅ `simF5MLConfidence` at line 2028 — exact spec match (ERA-scaled means, correlated park/ump ρ=0.35, std=1.5, N=500, near-tie skip at <0.4 diff)
+2. ✅ `computeGameBoard` f5ml push (line 2858) — `homeEra`, `awayEra`, `parkFactor`, `umpireRating` added
+3. ✅ `buildAiBoardPayload` signature (line 2415) — `liveNrfiData`, `liveOddsMap` added; f5mlCandidates via `computeGameBoard("f5ml", ...).slice(0,5)`; `mapGameCandidate` helper with `simConfidence: simF5MLConfidence(...)` at line 2466
+4. ✅ Call site (line 4037) — passes `liveNrfiData, liveOddsMap`
+5. ✅ `MARKET_META` (line 11192) — `f5ml: { label: "F5 ML", color: "#fbbf24" }`
+6. ✅ `aiBoardTabHitSummary` (line 11240) — includes `"f5ml"`
+7. ✅ `getAiBoardGrade` f5ml branch (lines 11217–11227) — checks `liveBoxscores` innings 1–5, compares lean vs f5 winner, null on tie/incomplete
+8. ✅ Filter tab row (line 11276) — "F5 ML" tab added
+9. ✅ Card render (lines 11375–11413) — game matchup layout for f5ml; SP sub-line; SIM badge auto-renders (simConfidence non-null)
+
+**Task #54 closed.** CODEX TASK 97 approved.
+
+*Updated 2026-05-09 — Session 98 complete · CODEX TASK 97 approved*
+
+---
+
+## 🗒 Session 99 — CW: CODEX TASK 96 prompt written
+
+**Deliverable:** `codex-task-96-prompt.md` — copy-paste prompt for Codex to implement Board Option C (rolling lock + per-game cap).
+
+**Prompt covers 7 ordered changes to `prop-scout-v7.jsx`:**
+1. `lockedBoardCandidates` state — localStorage-backed, keyed by Honolulu date, restores on load
+2. `getBoardGamePhase(gamePk)` helper — returns "upcoming" | "live" | "final" from liveSlate game status
+3. `computeBatterBoard` return — per-game cap of 5 (was global top-20 slice); no change to `computePitcherBoard`
+4. Lock useEffect — fires on `liveSlate` change; idempotent; locks each gamePk once at first pitch/warmup
+5. `hitSummary` / `tabHitSummary` rewrite — counts from `lockedCandidatesForType()` instead of live board; misses can never fall off
+6. Board render split — live section (upcoming, grouped by game + ET time) + locked section (in-play/final with LIVE/FINAL badge); card internals unchanged
+7. Status bar counts — `loadedBatters` from `liveBoardCandidates.length`, `lockedCount` from locked groups
+
+*Updated 2026-05-09 — Session 99 complete · CODEX TASK 96 prompt written*
+
+---
+
+## 🗒 Session 100 — CW: CODEX TASK 96 review + approved
+
+**All 7 spec changes verified in `prop-scout-v7.jsx`:**
+
+1. ✅ `lockedBoardCandidates` state (line 3607) — localStorage restore, Honolulu date key, exact spec match
+2. ✅ `getBoardGamePhase(gamePk)` helper (line 3999) — "upcoming" | "live" | "final" from liveSlate status
+3. ✅ `computeBatterBoard` per-game cap (lines 2410–2418) — byGame grouping, slice(0,5) per game, re-sort
+4. ✅ Lock useEffect (lines 5097–5123) — fires on liveSlate/view, idempotent, localStorage save
+5. ✅ `lockedCandidatesForType` + `hitSummary` + `tabHitSummary` (lines 10547–10568) — counts from locked candidates only
+6. ✅ Board render split (lines 11272–11330) — live section + locked section with LIVE/FINAL badges
+7. ✅ Status bar counts (lines 10516–10517, 10744–10745) — `loadedBatters` + `lockedCount` displayed
+
+**Bonus:** Cursor refactored the card render into a `renderBoardCandidateCard(item, index)` helper (line 10926), called from both live and locked sections — cleaner than duplicating JSX, no spec deviation.
+
+**Task #53 closed.** CODEX TASK 96 approved.
+
+*Updated 2026-05-09 — Session 100 complete · CODEX TASK 96 approved*
+
+---
+
+## 🗒 Session 101 — CW: CODEX TASK 98 specced + prompt written
+
+**Task:** Fix AI Board survivorship bias in hit tracking (Task #52).
+
+**Root cause:** `aiBoardSettled` and `aiBoardTabHitSummary` read from `aiBoardData` (the live candidate list). When the payload changes — lineup updates, stats refreshing, or a soft-refresh — `aiBoardData` is replaced. Candidates who missed and got dropped from the new payload are silently removed from the hit counter. Same root cause as the Board survivorship bias (Task 96), but for the AI Board view.
+
+**Fix:** Lock the scored candidates on first population each day into `lockedAiBoardSnapshot` (localStorage-backed, Honolulu date keyed). Count results against the snapshot. Display cards keep using live `aiBoardData`.
+
+**CODEX TASK 98 spec appended to AGENT_SYSTEM_PROMPT.md.**
+**Prompt written at `codex-task-98-prompt.md`.**
+
+5 changes to `prop-scout-v7.jsx`:
+1. `lockedAiBoardSnapshot` state — localStorage restore, null init (not empty array)
+2. Snapshot lock in `.then()` branch — fires once on first score of the day
+3. Snapshot lock in `.catch()` branch — same logic for fallback scoring
+4. `aiBoardSettled` reads from `lockedAiBoardSnapshot ?? aiBoardData ?? []`
+5. `aiBoardTabHitSummary` reads from `lockedAiBoardSnapshot ?? aiBoardData ?? []`
+
+Soft-refresh does NOT reset the snapshot — counter stays stable while board refetches.
+
+*Updated 2026-05-09 — Session 101 complete · CODEX TASK 98 specced*
+
+---
+
+## 🗒 Session 102 — CW: CODEX TASK 98 review + approved
+
+**All 5 changes verified in `prop-scout-v7.jsx`:**
+
+1. ✅ `lockedAiBoardSnapshot` state (line 3536) — localStorage restore, Honolulu date key, null init
+2. ✅ Snapshot lock in `.then()` branch (lines 4094–4099) — `prev !== null` guard, fires once
+3. ✅ Snapshot lock in `.catch()` branch (lines 4113–4118) — identical lock logic for fallback path
+4. ✅ `aiBoardSettled` (line 11404) — reads `lockedAiBoardSnapshot ?? aiBoardData ?? []`
+5. ✅ `aiBoardTabHitSummary` (line 11415) — reads `lockedAiBoardSnapshot ?? aiBoardData ?? []`
+
+**Soft-refresh check:** `setAiBoardData(null)` at line 3968 does NOT touch `lockedAiBoardSnapshot` — snapshot persists across refreshes as intended.
+
+**Task #52 closed.** CODEX TASK 98 approved.
+
+*Updated 2026-05-09 — Session 102 complete · CODEX TASK 98 approved*
+
+---
+
+## 🗒 Session 103 — CW: CODEX TASK 99 specced + prompt written
+
+**Task:** Lock odds to pre-game snapshot once game goes live (Task #51).
+
+**Root cause:** `liveOddsMap` auto-refreshes every 20 minutes. Once a game starts, sportsbooks push live in-game lines — ML, totals, and spreads shift in ways irrelevant to pre-game research. Since no live betting is supported, the user wants to see first-pitch odds frozen for all in-progress/final games.
+
+**Fix:**
+- `lockedOddsMap` state `{ [gamePk]: oddsObject }` — localStorage-backed, Honolulu date keyed
+- Lock useEffect — fires on `liveSlate`/`liveOddsMap` change; idempotent; snapshots odds for each game at first transition to In Progress/Warmup/Final
+- `effectiveOddsMap` useMemo — base is `liveOddsMap`, locked entries override for non-upcoming games
+- 8 call-site replacements: SlateCard prop, `getGameOdds` body, `computeGameBoard` ×4, `buildAiBoardPayload`, board dep array
+
+**Soft-refresh:** `liveOddsMap` resets to `{}` but `lockedOddsMap` is untouched — locked game odds persist.
+
+**CODEX TASK 99 spec appended to AGENT_SYSTEM_PROMPT.md.**
+**Prompt written at `codex-task-99-prompt.md`.**
+
+*Updated 2026-05-09 — Session 103 complete · CODEX TASK 99 specced*
+
+---
+
+## 🗒 Session 104 — CW: CODEX TASK 99 review + approved
+
+**All changes verified in `prop-scout-v7.jsx`:**
+
+1. ✅ `lockedOddsMap` state (line 3569) — localStorage restore, Honolulu date key, `{}` init
+2. ✅ `effectiveOddsMap` useMemo (line 3646) — base `liveOddsMap`, locked entries override for non-upcoming games; correct deps `[liveOddsMap, lockedOddsMap, liveSlate]`
+3. ✅ Lock useEffect (lines 4407–4431) — fires on `[liveSlate, liveOddsMap]`; idempotent guard; skips if no odds loaded yet; localStorage save
+4. ✅ `buildAiBoardPayload` call site (line 4086) — `effectiveOddsMap` passed
+5. ✅ `getGameOdds` body (line 4841) — `effectiveOddsMap[key]`
+6. ✅ Board `computeGameBoard` call (line 5142) — `effectiveOddsMap`
+7. ✅ Board dep array (line 5155) — `effectiveOddsMap`
+8. ✅ Board render IIFE `computeGameBoard` (line 10570) — `effectiveOddsMap`
+9. ✅ All 6 `gameHitSummary` calls (lines 10720–10725) — `effectiveOddsMap`
+10. ✅ `SlateCard` prop (line 6405) — `liveOddsMap={effectiveOddsMap}`
+
+**Soft-refresh check:** `setLiveOddsMap({})` at line 3978 confirmed — `lockedOddsMap` untouched.
+
+**Task #51 closed.** CODEX TASK 99 approved.
+
+*Updated 2026-05-09 — Session 104 complete · CODEX TASK 99 approved*
+
+---
+
+## 🗒 Session 105 — Spec: CODEX TASK 100 (DB-backed Gamelog Snapshots)
+
+### Root cause
+
+Every player card open triggers a live MLB Stats API call for `/people/:id/stats?stats=gameLog`. With 20–30 players per slate, this is dozens of live outbound calls per session. The interim 6h in-memory TTL helps within one process lifetime but is wiped on every Railway dyno restart. On busy days, this causes rate-limit pressure and cold-response latency.
+
+### Fix
+
+**Three-layer cache for `/api/players/:playerId/gamelog`:**
+- L1: In-memory (`cache.get/set`) — fastest, 6h TTL, process-scoped
+- L2: `player_gamelog_snapshots` DB — survives restarts; keyed `(player_id, stat_group, slate_date)` with Honolulu date; auto-expires at day boundary
+- L3: MLB API — only reached on true cold miss; write-through to L2 on fetch
+
+**Pitcher pre-fetch cron:** `snapshotPitcherGamelogs()` runs at 10 AM and 2 PM Honolulu — reads today's probable pitchers from `schedule_snapshots`, fetches each gamelog, upserts to DB. Skips already-snapshotted pitchers (idempotent). 600ms spacing between API calls.
+
+### Files changed (4)
+
+| File | Change |
+|---|---|
+| `backend/migrations/004_gamelog_snapshots.sql` | **New file** — `player_gamelog_snapshots` DDL |
+| `backend/routes/players.js` | Gamelog route: DB read-through + write-through; added `db` import + `todayHonolulu` helper |
+| `backend/jobs/snapshotJobs.js` | Added `snapshotPitcherGamelogs()` function; table CREATE in `ensurePhaseOneTables()` |
+| `backend/jobs/scheduler.js` | Import + cron at `0 10,14 * * *` Honolulu |
+
+### Response contract
+
+The shape of `/api/players/:playerId/gamelog` is **unchanged** — this is a pure infrastructure change. The `X-Cache` header now reports `HIT` (L1), `DB_HIT` (L2), or `MISS` (L3).
+
+### Backlog
+
+- Task #50 (DB-backed gamelog snapshots) → closed as CODEX TASK 100
+
+**CODEX TASK 100 spec appended to `AGENT_SYSTEM_PROMPT.md`.**
+**Prompt written at `codex-task-100-prompt.md`.**
+**Migration file created at `backend/migrations/004_gamelog_snapshots.sql`.**
+
+*Updated 2026-05-09 — Session 105 complete · CODEX TASK 100 specced*
+
+---
+
+## 🗒 Session 106 — Architecture Spec: Separate Predictive Product Lane (Task #55)
+
+**Status:** Architecture direction complete — no implementation started yet.
+
+### The core problem
+
+The AI Board surfaces great candidates, but the user has to mentally compare `simConfidence` (68%) against the book's implied probability (55%) themselves to know if there's an edge. The Predictive Product Lane solves this by showing only plays where the model's probability beats the book, with the edge explicitly displayed.
+
+### Three product tiers (clarified)
+
+| Tier | Tab | Signal |
+|---|---|---|
+| Algorithmic | Board (HR/Hits/K/Outs/Games) | Rule-based scoring, no probabilities |
+| AI-ranked | AI Board | Algo + sim → AI re-ranker → ranked list |
+| **Predictive** | **Predict (new)** | Edge = simConfidence - book implied prob; filter to positive-edge only |
+
+### What's already built
+
+Everything needed is in place: `simConfidence` on every AI Board card, `livePlayerProps` with American odds, `effectiveOddsMap` for game markets, `lab_outcomes` DB table already tracking `lean_prob`/`lean_edge`/`has_edge`, `lockedAiBoardSnapshot` for bias-free history, `getAiBoardGrade` for resolution. The only missing piece is connecting `simConfidence` and `impliedProb` on the same card object.
+
+### Three implementation phases (all frontend-only, no new backend)
+
+**Phase 1** — Add `impliedProb`, `bookOdds`, `edge` to AI Board candidate objects in `buildAiBoardPayload`. For prop markets: look up American odds from `livePlayerProps`. For F5 ML: compute from `effectiveOddsMap`. Edge = `(simConfidence / 100) - vigStrippedImpliedProb`.
+
+**Phase 2** — New "Predict" tab (`view === "predict"`). Filter AI Board candidates to `edge >= 0.08`. Sort by edge descending. Card shows: player/game, market, SIM %, BOOK %, EDGE pts, book line, AI reason. Hit/miss badges on settled games. Locked section below upcoming games.
+
+**Phase 3** — Calibration panel inside Predict tab. Group resolved plays from `lockedAiBoardSnapshot` by `simConfidence` bucket (55–64%, 65–74%, 75–84%, 85%+). Show predicted % vs. actual hit rate over N plays. No new backend required.
+
+### Spec location
+
+Full architecture spec appended to `AGENT_SYSTEM_PROMPT.md` under **TASK 55**.
+
+*Updated 2026-05-09 — Session 106 complete · Task #55 architecture spec written*
+
+---
+
+## 🗒 Session 107 — Spec: CODEX TASK 101 (Predictive Lane Phase 1 — Edge Data)
+
+**Predictive Lane Phase 1** — pure data plumbing in `buildAiBoardPayload`. No new UI.
+
+### What's added to every AI Board candidate
+
+| Field | Description |
+|---|---|
+| `lean` | "OVER"/"UNDER" for props; "HOME"/"AWAY" for F5 ML |
+| `bookOdds` | American odds integer at best book (DK > FD > CZR > MGM) for the lean side |
+| `impliedProb` | Vig-stripped book probability (0–1) |
+| `edge` | `simConfidence/100 − impliedProb` — positive = model has an advantage |
+| `gamePk` | Newly added to prop candidates (was already on game candidates) |
+| `gameTime` | Newly added to prop candidates (was already on game candidates) |
+
+### New helpers added
+
+- `vigStrip(leanRaw, oppRaw)` — normalizes raw probabilities to remove vig: `leanRaw / (leanRaw + oppRaw)`
+- `propEdgeData(propLine, lean)` — looks up best book's `overOdds`/`underOdds` from `propLine.books`, returns `{ bookOdds, impliedProb }`
+
+### For F5 ML candidates
+
+Edge computed from `liveOddsMap[away.name|home.name].homeML` or `.awayML`. `simF5MLConfidence` extracted into a variable (was inline) so it's computed once for both `simConfidence` and `edge`.
+
+**CODEX TASK 101 spec appended to `AGENT_SYSTEM_PROMPT.md`.**
+**Prompt written at `codex-task-101-prompt.md`.**
+
+*Updated 2026-05-09 — Session 107 complete · CODEX TASK 101 specced (Predictive Lane Phase 1)*
+
+---
+
+## 🗒 Session 108 — CW: CODEX TASK 101 review + approved (with correction)
+
+**Initial submission had a spec error:** `mapCandidate` used `c._candidate?.propLine`, `c._candidate?.gamePk`, `c._candidate?.gameTime` — but `c` is the raw candidate from `computePitcherBoard`/`computeBatterBoard`, which has these fields directly. The `_candidate` property is set on the *output* of `mapCandidate`, not the input. The `?.` operator silenced the error but `propEdgeData` was always receiving `null`, so `edge` was always `null` for prop candidates.
+
+**Fix applied (3 lines in `mapCandidate`):**
+- `c._candidate?.propLine ?? null` → `c.propLine ?? null`
+- `c._candidate?.gamePk ?? null` → `c.gamePk ?? null`
+- `c._candidate?.gameTime ?? null` → `c.gameTime ?? null`
+
+**All changes verified:**
+
+1. ✅ `vigStrip` const (line 2537) — `leanRaw / (leanRaw + oppRaw)`
+2. ✅ `propEdgeData(propLine, lean)` function (line 2542) — DK > FD > CZR > MGM priority; vig-strips when both sides available
+3. ✅ `mapCandidate` — `lean` derived from score, `propEdgeData(c.propLine, lean)` called correctly, `edge` computed, `gamePk`/`gameTime` added
+4. ✅ `mapGameCandidate` — `simConf` extracted from inline call; F5 edge from `liveOddsMap[away.name|home.name]`; all four fields added
+
+**CODEX TASK 101 approved.** Phase 1 complete — edge data now lives on every AI Board candidate. Ready for Phase 2 (Predict tab).
+
+*Updated 2026-05-09 — Session 108 complete · CODEX TASK 101 approved*
+
+---
+
+## 🗒 Session 109 — CW: CODEX TASK 102 specced (Predictive Lane Phase 2 — Predict tab)
+
+**CODEX TASK 101 fully approved** at the start of this session.
+
+### CODEX TASK 102 — Predict Tab
+
+Phase 2 of the Predictive Lane. 4 changes to `prop-scout-v7.jsx`, no backend changes.
+
+**Changes:**
+1. Add `"predict"` to board data pre-fetch useEffect condition (so schedule/lineups load when Predict is active)
+2. Add `"predict"` to AI Board data useEffect condition (so `aiBoardData` populates when Predict is opened directly)
+3. Add `"⚡ Predict"` nav button — yellow active state, `isScoutUser` gated, monospace uppercase
+4. Add full `{view === "predict" && isScoutUser && (() => { ... })()}` view block:
+   - `MIN_EDGE = 0.08` threshold
+   - `MARKET_META` label/color lookup per market
+   - `gradeCandidate(c)` — intentional duplicate of `getAiBoardGrade` in AI Board IIFE (avoids shared-scope refactor)
+   - `predictSettled` — hit counter from `lockedAiBoardSnapshot` (survivorship-bias-free)
+   - `allEdgePlays` — filter `aiBoardData` to `edge >= 0.08`, sort by edge descending
+   - `upcomingPlays` / `lockedPlays` split via `getBoardGamePhase`
+   - `renderEdgeCard` — card layout: name/market row, lean + book line, SIM/BOOK/EDGE tile row, AI reason
+   - Edge tile color: `≥15pts → #22c55e (green)`, `<15pts → #fbbf24 (yellow)`
+   - HIT/MISS badges when `gradeCandidate` resolves; colored left border on graded cards
+   - Three empty states: loading, no data, no edge plays
+
+**CODEX TASK 102 spec appended to `AGENT_SYSTEM_PROMPT.md`.**
+**Prompt written at `codex-task-102-prompt.md`.**
+
+*Updated 2026-05-09 — Session 109 complete · CODEX TASK 102 specced (Predictive Lane Phase 2)*
+
+---
+
+## 🗒 Session 110 — CW: CODEX TASK 102 review + approved; CODEX TASK 103 specced (Calibration Panel)
+
+**CODEX TASK 102 approved** — all 4 changes verified clean:
+1. ✅ `"predict"` added to board data pre-fetch useEffect
+2. ✅ `"predict"` added to AI Board data useEffect
+3. ✅ `"⚡ Predict"` nav button — `isScoutUser` gated, yellow active state
+4. ✅ Predict IIFE — MIN_EDGE=0.08, gradeCandidate, predictSettled, edge card layout, upcoming/locked split, three empty states
+
+Minor deviation: Cursor dropped unused `i` index param from `renderEdgeCard` calls — cleaner, no issue.
+
+**Phase 2 complete.** Predictive Lane now has a fully functional Predict tab.
+
+---
+
+### CODEX TASK 103 — Calibration Panel
+
+2 changes to `prop-scout-v7.jsx`, inside the existing Predict IIFE. No new state, no backend changes.
+
+**Change 1 — `calibrationBuckets` data computation** (after `lockedPlays`, before `renderEdgeCard`):
+- `BUCKETS`: four ranges — 55–64%, 65–74%, 75–84%, 85%+ with midpoints 59.5 / 69.5 / 79.5 / 90
+- Each bucket: filter `lockedAiBoardSnapshot` by `simConfidence` range, run `gradeCandidate` on each, count hits/total, compute `actualRate`
+
+**Change 2 — Calibration JSX section** (inside `return (...)`, after locked plays, before closing `</div>`):
+- Hidden when no graded plays (`calibrationBuckets.some(b => b.total > 0)`)
+- Per-bucket row: label | hits/total | actual% (colored) | vs X% exp
+- Progress bar: fills to actual%, grey tick at expected%
+- Bar color: green (≥ expected−5), yellow (6–15pts below), red (>15pts below)
+- Footer: total graded play count
+
+**CODEX TASK 103 spec appended to `AGENT_SYSTEM_PROMPT.md`.**
+**Prompt written at `codex-task-103-prompt.md`.**
+
+*Updated 2026-05-09 — Session 110 complete · CODEX TASK 103 specced (Calibration Panel)*
+
+---
+
+## 🗒 Session 111 — Bug: Board not loading + CODEX TASK 104 specced (Batter Gamelog Pre-fetch)
+
+### Bug diagnosed
+
+**Symptom:** Board tabs showed "Loading player stats — check back shortly" with "0/270 live" for 15–30 seconds on first open each day.
+
+**Root cause:** Board pre-fetch fires one `/api/players/:id/gamelog?group=hitting` call per lineup batter (~270 on a full slate). On a cold cache (no in-memory, no DB), each call hits the MLB Stats API for 2–3 outbound requests. Under that load the board is blank until the fetches resolve.
+
+**Not a code bug** — board eventually loaded after ~30s. The `.catch(() => {})` on each fetch silently drops any that fail, so a truly broken backend would look identical.
+
+---
+
+### CODEX TASK 104 — Batter Gamelog Pre-fetch Cron
+
+2 backend files, no frontend changes.
+
+**Change 1 — `snapshotBatterGamelogs(date)` in `snapshotJobs.js`** (after `snapshotPitcherGamelogs`):
+- Reads gamePks from `schedule_snapshots`
+- For each game, calls `/game/${gamePk}/boxscore?hydrate=person`
+  - If `battingOrder` populated → use confirmed lineup IDs
+  - Otherwise → fetch active roster from `/teams/${teamId}/roster` (non-pitchers only)
+- Deduplicates across games with a `Set`
+- For each unique batter: skip if already in DB today (idempotent); otherwise fetch gamelog + person + season stats from MLB API; build exact same payload shape as `players.js` hitting path; upsert to `player_gamelog_snapshots`
+- 600ms pacing between batters
+
+**Change 2 — export** `snapshotBatterGamelogs` in `module.exports`
+
+**Change 3 — scheduler.js:** import + cron at `0 10,14 * * *` Honolulu (same as pitchers)
+
+**Timing note:** 10 AM run uses roster fallback (~840 batters, ~8–10 min). 2 PM run uses confirmed lineups (~270 batters, ~3–4 min). Second run skips already-snapshotted players so it only fetches new/late-arriving lineup entries.
+
+**CODEX TASK 104 spec appended to `AGENT_SYSTEM_PROMPT.md`.**
+**Prompt written at `codex-task-104-prompt.md`.**
+
+*Updated 2026-05-09 — Session 111 complete · CODEX TASK 104 specced (Batter Gamelog Pre-fetch)*
