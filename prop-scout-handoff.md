@@ -6346,3 +6346,163 @@ Minor deviation: Cursor dropped unused `i` index param from `renderEdgeCard` cal
 **Prompt written at `codex-task-104-prompt.md`.**
 
 *Updated 2026-05-09 — Session 111 complete · CODEX TASK 104 specced (Batter Gamelog Pre-fetch)*
+
+---
+
+## 🗒 Session 112 — CW: CODEX TASK 104 approved + Full backlog audit
+
+### CODEX TASK 104 approved
+
+Cursor implementation verified clean:
+- ✅ `snapshotBatterGamelogs(date)` added to `snapshotJobs.js` after `snapshotPitcherGamelogs`
+- ✅ Exported in `module.exports`
+- ✅ Imported and scheduled in `scheduler.js` — `cron.schedule("0 10,14 * * *", ..., { timezone: "Pacific/Honolulu" })`
+- ✅ User confirmed board loads instantly after cron run — no more 15–30s cold-load delay
+
+---
+
+### Full backlog audit — codebase has outrun the docs
+
+A systematic audit of the actual codebase against the handoff backlog items found that **every "open" item listed in the prior session was already fully implemented**. The docs were stale, not the code.
+
+#### Confirmed implemented (docs now updated):
+
+**Backlog Task 35 — Opposing Team K% in K Scoring Model ✅**
+- `kBoardScore` uses `oppTeamStats?.kPct` with four tiers: `≥24 → +4`, `≥21 → +2`, `≤19 → -2`, `≤17 → -4`
+- `computePitcherBoard` resolves `liveTeamStats?.[facingTeam]` and passes it in
+- `liveTeamStats` state populated via `/api/team-stats/:id` calls in a dedicated useEffect
+- `backend/routes/teamStats.js` route exists
+- Signal text (`"Opp K% 26% (high-K lineup)"`) displayed on board card
+- More refined than original spec (4 tiers vs 2)
+- `AGENT_SYSTEM_PROMPT.md` entry marked `✅ COMPLETED`
+
+**Backlog Task 38 — Pitch Count + Workload Tracking for Outs Model ✅**
+- `outsBoardScore` penalizes `≥100 pitches within 4 days → -6` and `85–99 pitches → -3`
+- Slightly more aggressive than original spec (`-6/-3` vs `-4/-2`) but functionally complete
+- Signal text (`"114p last start (3d rest)"`) displayed on board card
+- `AGENT_SYSTEM_PROMPT.md` entry marked `✅ COMPLETED`
+
+**Active Roster Before Confirmed Lineups ✅**
+- `backend/routes/lineups.js` returns `source: "roster"` when no confirmed batting order is found
+- Frontend checks `isRosterFallback = liveLineups[gamePkKey]?.source === "roster"`
+- Lineup header renders `"LAD Roster (Lineup Pending)"` with a `ROSTER` badge on each player row
+- Board tabs (HR/Hits) remain populated all day using roster hitters before official lineups post
+
+**F5 Moneyline ✅**
+- `simF5MLConfidence()` scoring function fully implemented
+- `computeGameBoard("f5ml", ...)` live and included in `buildAiBoardPayload`
+- Full **Lab tab** with `f5ml` as default sub-tab — card scoring, AI Board integration, pick logging (`LAB_F5ML`), grading (`computeLabF5MlGrade`)
+- Also has a **Models tab** with same `f5ml` sub-tab for model comparison
+
+**Hybrid AI Summary Text ✅**
+- `backend/routes/cardSummary.js` uses Haiku (`claude-haiku-4-5-20251001`) with GPT-4o-mini fallback
+- Frontend: `hydrateCardSummaries` batch-posts to `/api/card-summary`, stores results in `aiCardSummaries` state
+- `getCardSummaryText(request)` called on Board cards; result rendered as `aiReason` italic line under each card
+- Fires automatically when Board tab opens; de-duped via `aiSummaryInFlight` ref
+
+**Lab Calibration DB Migration ✅**
+- `backend/services/labCalibration.js` is fully dual-path:
+  - When DB is connected → reads/writes `lab_outcomes` PostgreSQL table
+  - When DB is not connected → falls back to `lab-outcomes.json`
+- `lab-outcomes.json` still exists as a safety net but is no longer the primary store in production
+
+---
+
+#### Genuinely open (not yet implemented):
+
+**Global Track Record — all tabs**
+- No recommendation history table in DB
+- No cross-tab hit rate tracking beyond the existing Lab tab
+- Documented as a future architecture direction in the handoff notes
+- Requires product decision on what counts: every surfaced card, top cards only, or user-logged picks only
+- Depends on Lab Calibration DB (now done) as a prerequisite
+- Still needs a full spec before implementation
+
+---
+
+### State of the backlog
+
+The original long-form backlog (Tasks 1–60+) is **fully exhausted**. Everything that had an implementation spec has been built. The remaining open work is either:
+1. **New features** yet to be specced (Global Track Record, any new ideas)
+2. **Incremental improvements** to existing systems
+
+*Updated 2026-05-09 — Session 112 complete · Backlog audit*
+
+---
+
+## 🗒 Session 113 — CW: BACKLOG TASK 61 added (Remove Picks Tab)
+
+User identified the Picks tab as no longer needed. Lab has its own DB-backed track record (`lab_outcomes`); Model Picks surfaces today's summary inline. The tab should be removed.
+
+### Scope audit
+
+`logPick` is called from 8 places outside the Picks tab (Lab, Model Picks, NRFI), so `propLog` state and `logPick` must stay. The removal is limited to Picks-specific infrastructure.
+
+### What gets removed (BACKLOG TASK 61 spec in `AGENT_SYSTEM_PROMPT.md`)
+
+- Picks nav button (purple, `#a78bfa` active)
+- Stale picks banner on Slate view ("⏰ N picks need grading")
+- `picksFilter` state
+- `gradedGames` / `histGradedGames` refs
+- `hydratePicksFromServer` callback + its call in the view-change effect
+- Today-slate auto-grading useEffect (iterates `liveBoxscores`, calls `computeGrade` + `markResult`)
+- Historical catch-up grading useEffect (fetches old boxscores on `view === "picks"`)
+- `getPickStatus` / `isPickUnsettled` functions
+- `computeGrade` function (only called by the two grading effects)
+- `markResult` function (only called by grading effects + Picks view)
+- `view === "picks"` IIFE (~600 lines)
+
+### What stays
+
+- `propLog` state, `logPick` — used by Lab, Model Picks, NRFI
+- `todayModelLogs` / `l7SettledModelLogs` / `l7WinRate` — rendered in Model tab header
+- Lab logged-state checks — `propLog.some(...)` on Lab cards
+- `backend/routes/picks.js` — no backend changes
+
+*Updated 2026-05-09 — Session 113 complete · BACKLOG TASK 61 added (Remove Picks Tab)*
+
+---
+
+## 🗒 Session 114 — Bug fix: picks.js 502 crash + CODEX TASK 105 specced (Batch Gamelog)
+
+### Bug fix — `picks.js` crashing server with 502
+
+**Symptom:** All API routes returning 502 Bad Gateway — entire Railway server down.
+
+**Root cause:** `backend/routes/picks.js` queried `SELECT ... status ...` from the `picks` DB table. The `status` column was never created in the DB schema. On first request to `GET /api/picks`, the unhandled promise rejection from `pg` crashed the Express process.
+
+**Fix (applied directly to `backend/routes/picks.js`):**
+- Removed `status` from the `SELECT` column list (GET route)
+- Removed `status` from the `INSERT` column list and values array (POST route)
+- Simplified PATCH to only update `result` — `status` updates dropped since column doesn't exist
+- The `snapshot` JSONB column already stores the full pick object including any status value
+
+No migration needed. This is a stable interim fix until BACKLOG TASK 61 (Remove Picks Tab) ships and the frontend stops calling `/api/picks` entirely.
+
+---
+
+### CODEX TASK 105 — Batch Gamelog Endpoint
+
+**Root cause of Board slowness:** Even with the DB-backed gamelog cache, the Board pre-fetch fires one HTTP request per batter (~270 on a full slate). The browser caps concurrent connections at 6 per domain → 270 ÷ 6 = 45 sequential batches → 4–15 second delay even on a warm DB.
+
+**2 files, clean scope:**
+
+**`backend/routes/players.js`** — new `POST /api/players/gamelogs/batch` route (placed before the existing `/:playerId/gamelog` handler):
+- Accepts `{ playerIds: number[], group: "hitting"|"pitching" }`
+- L1: checks in-memory cache for each ID (same `gamelog:${id}:${group}` key as individual route)
+- L2: one bulk DB query — `WHERE player_id = ANY($1) AND stat_group = $2 AND slate_date = $3`
+- L3: parallel MLB API fallback for remaining misses (8-concurrency cap via chunked `Promise.all`)
+- Write-through to DB and L1 for API hits — same logic as individual route
+- Returns `{ results: { [playerId]: data }, misses: [] }`
+
+**`prop-scout-v7.jsx`** — Board pre-fetch batter loop replaced:
+- Collect all unique batter IDs not already in `liveHittingLog`
+- One `apiMutate("/api/players/gamelogs/batch", "POST", { playerIds, group: "hitting" })`
+- Merge `data.results` into `liveHittingLog` in a single `setLiveHittingLog` call
+- 270 HTTP round trips → 1
+
+Individual `GET /api/players/:playerId/gamelog` unchanged — still used by lineup drawer and per-batter expand.
+
+**Prompt file:** `codex-task-105-prompt.md`
+
+*Updated 2026-05-09 — Session 114 complete · picks.js hotfix + CODEX TASK 105 specced*

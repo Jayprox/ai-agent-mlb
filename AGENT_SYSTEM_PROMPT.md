@@ -4146,7 +4146,7 @@ Codex added three pitcher-level Statcast aggregate metrics to the arsenal pipeli
 
 ---
 
-## BACKLOG TASK 35 — Opposing Team K% in K Scoring Model
+## ✅ BACKLOG TASK 35 — Opposing Team K% in K Scoring Model — COMPLETED
 
 **Priority: Medium | LOE: Medium**
 
@@ -4167,7 +4167,7 @@ Cache per teamId per day (same TTL as schedule snapshot). Can be fetched alongsi
 
 ---
 
-## BACKLOG TASK 38 — Pitch Count + Workload Tracking for Outs Model
+## ✅ BACKLOG TASK 38 — Pitch Count + Workload Tracking for Outs Model — COMPLETED
 
 **Priority: Medium | LOE: Low-Medium**
 
@@ -18310,3 +18310,92 @@ cron.schedule("0 10,14 * * *", () => snapshotBatterGamelogs(), { timezone: "Paci
 5. Board populates immediately (no 15–30s cold-load delay) after cron has run.
 6. Pitcher cron unaffected — `snapshotPitcherGamelogs` still runs normally.
 7. No regression on gamelog endpoint for pitchers or batters.
+
+---
+
+## BACKLOG TASK 61 — Remove Picks Tab
+
+**Priority: Medium | LOE: Medium | File: `prop-scout-v7.jsx` only**
+
+The Picks tab is a standalone log of manually saved picks. It is no longer needed — the Lab tab has its own DB-backed track record (`lab_outcomes`), and Model Picks surfaces today's hit summary inline. Remove the Picks tab and all Picks-specific infrastructure that has no purpose outside of it.
+
+### What to REMOVE
+
+Search by name — do not rely on line numbers.
+
+1. **Nav button** — the `<button onClick={() => setView("picks")}>` in the nav bar (purple active color `#a78bfa`)
+
+2. **Stale picks banner** — the IIFE block inside the Slate view that checks `propLog.filter(p => !p.result && p.timestamp && ...)` and renders an "⏰ N picks need grading" banner that `setView("picks")` on click. Remove the entire `{(() => { const stale = propLog.filter(...); ... })()}` block.
+
+3. **`picksFilter` state** — `const [picksFilter, setPicksFilter] = useState("all")`
+
+4. **`gradedGames` ref** — `const gradedGames = useRef(new Set())`
+
+5. **`histGradedGames` ref** — `const histGradedGames = useRef(new Set())`
+
+6. **`hydratePicksFromServer` callback** — the entire `useCallback(async () => { ... })` definition, plus the line in the view-change `useEffect` that calls `if (view === "picks") hydratePicksFromServer()`
+
+7. **Today-slate auto-grading `useEffect`** — the effect that iterates `liveBoxscores`, calls `computeGrade`, and calls `markResult`. Identifiable by the comment: `// Fires when a live boxscore update arrives for a game that has pending picks`
+
+8. **Historical catch-up grading `useEffect`** — the effect that fires when `view === "picks"`, finds picks with `gamePk` not in today's slate, fetches old boxscores, and grades them. Identifiable by the comment: `// Fires when the user opens the Picks tab. Finds pending picks whose gamePk`
+
+9. **`getPickStatus` function** — `const getPickStatus = (pick) => ...`
+
+10. **`isPickUnsettled` function** — `const isPickUnsettled = (pick) => getPickStatus(pick) !== "settled"`
+
+11. **`computeGrade` function** — `const computeGrade = (pick, box) => ...` (only called by the two grading effects being removed)
+
+12. **`markResult` function** — `const markResult = (id, result) => ...` (only called inside the grading effects and the Picks view being removed)
+
+13. **`view === "picks"` IIFE** — the entire `{view === "picks" && (() => { ... })()}` block (~600 lines). Identifiable by the `renderPickStatusBadge` helper defined at its top and the `picksFilter` filter buttons near the bottom.
+
+### What to KEEP (do NOT remove)
+
+- `propLog` state and `setPropLog` — still used by Lab (logged state on Lab cards), Model Picks (today's model log summary), and NRFI logging
+- `logPick` function — still called from Lab, Model Picks, and NRFI game view
+- `getPickLoggedAt`, `isModelLog` — used in Model tab hit summary
+- `todayModelLogs`, `l7SettledModelLogs`, `modelPending`, `l7WinRate`, etc. — rendered in Model tab header
+- All `propLog.some(p => ...)` logged-state checks inside Lab tab cards
+- `backend/routes/picks.js` — no backend changes needed
+
+### What does NOT change
+
+- All other tabs — no visual regression
+- Lab tab track record — fully independent (`lab_outcomes` DB)
+- Model Picks tab — logged-state indicators and today's summary stats stay
+
+### Validation checklist
+
+1. `npm run build` passes — no TS/JSX errors
+2. "Picks" nav button is gone
+3. Stale picks banner no longer appears on Slate view
+4. Navigating to any other tab works normally — no JS errors
+5. Lab tab: logging a Lab pick still works; logged state (disabled button) still shows
+6. Model Picks tab: today's model pick summary still shows (W-L-pending record)
+7. No references to `view === "picks"`, `gradedGames`, `histGradedGames`, `picksFilter`, `hydratePicksFromServer`, `computeGrade`, `markResult`, `getPickStatus`, `isPickUnsettled` remain in the file
+
+---
+
+## CODEX TASK 105 — Batch Gamelog Endpoint (Board Load Performance)
+
+**Files:** `backend/routes/players.js`, `prop-scout-v7.jsx`
+**Backend changes:** Add `POST /api/players/gamelogs/batch` route
+**Frontend changes:** Replace Board pre-fetch batter loop with one batch call
+
+### Problem
+
+Opening the Board tab fires one HTTP request per lineup batter (~270 on a full slate) to `/api/players/:id/gamelog?group=hitting`. The browser caps concurrent connections at 6 per domain, queuing those 270 requests in batches of 6 — a 4–15 second delay even with a warm DB cache.
+
+### Solution
+
+`POST /api/players/gamelogs/batch` — accepts `{ playerIds: number[], group: "hitting"|"pitching" }`, runs the same 3-layer cache logic (L1 in-memory → L2 single bulk DB query → L3 parallel MLB API with 8-concurrency cap), returns `{ results: { [playerId]: data }, misses: [] }`.
+
+Frontend Board pre-fetch: collect all missing batter IDs → one `apiMutate` POST → merge all results into `liveHittingLog` in one `setLiveHittingLog` call. 270 HTTP round trips → 1.
+
+### What does NOT change
+
+- `GET /api/players/:playerId/gamelog` — unchanged, still used by game-view lineup drawer
+- No new DB tables or schema changes
+- K/Outs pitcher gamelog fetches — unaffected (small count, per-pitcher GETs are fine)
+
+**Prompt file:** `codex-task-105-prompt.md`

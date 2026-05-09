@@ -37,14 +37,13 @@ router.use(requireAuth);
 router.get("/", async (req, res) => {
   if (isConnected()) {
     const result = await query(
-      "SELECT id, game_pk, status, result, prop_type, created_at, snapshot FROM picks WHERE user_id = $1 ORDER BY created_at DESC",
+      "SELECT id, game_pk, result, prop_type, created_at, snapshot FROM picks WHERE user_id = $1 ORDER BY created_at DESC",
       [req.userId]
     );
     return res.json({
       picks: (result?.rows ?? []).map((row) => ({
         id: row.id,
         gamePk: row.game_pk,
-        status: row.status,
         result: row.result,
         propType: row.prop_type,
         createdAt: row.created_at,
@@ -68,13 +67,12 @@ router.post("/", async (req, res) => {
     if (existing?.rows?.[0]) return res.json(entry);
 
     await query(
-      `INSERT INTO picks (id, user_id, game_pk, status, result, prop_type, snapshot)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+      `INSERT INTO picks (id, user_id, game_pk, result, prop_type, snapshot)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
       [
         entry.id,
         req.userId,
         entry.gamePk ?? null,
-        entry.status ?? "pending",
         entry.result ?? null,
         entry.propType ?? null,
         JSON.stringify(snapshot),
@@ -99,11 +97,8 @@ router.post("/", async (req, res) => {
 });
 
 router.patch("/:id", async (req, res) => {
-  const allowed = ["status", "result"];
   const updates = {};
-  allowed.forEach((k) => {
-    if (req.body[k] !== undefined) updates[k] = req.body[k];
-  });
+  if (req.body.result !== undefined) updates.result = req.body.result;
 
   if (isConnected()) {
     const existing = await query("SELECT user_id FROM picks WHERE id = $1", [req.params.id]);
@@ -111,19 +106,8 @@ router.patch("/:id", async (req, res) => {
     if (!row) return res.status(404).json({ error: "Pick not found" });
     if (row.user_id !== req.userId) return res.status(403).json({ error: "Forbidden" });
 
-    const setClauses = [];
-    const params = [];
-    if (updates.status !== undefined) {
-      params.push(updates.status);
-      setClauses.push(`status = $${params.length}`);
-    }
-    if (updates.result !== undefined) {
-      params.push(updates.result);
-      setClauses.push(`result = $${params.length}`);
-    }
-    if (!setClauses.length) return res.status(400).json({ error: "Nothing to update" });
-    params.push(req.params.id);
-    await query(`UPDATE picks SET ${setClauses.join(", ")} WHERE id = $${params.length}`, params);
+    if (updates.result === undefined) return res.status(400).json({ error: "Nothing to update" });
+    await query(`UPDATE picks SET result = $1 WHERE id = $2`, [updates.result, req.params.id]);
 
     return res.json({ ok: true, ...updates });
   }

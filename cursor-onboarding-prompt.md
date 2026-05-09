@@ -18,8 +18,8 @@ The app is deployed on Railway. The frontend is a single-page React app (no rout
 |---|---|
 | `AGENT_SYSTEM_PROMPT.md` | The spec bible. All CODEX TASK specs live here. Read the relevant task spec before implementing. |
 | `prop-scout-handoff.md` | Full session history — what was built, what changed, and why. Read the last 5–10 sessions for context. |
-| `codex-task-96-prompt.md` | **Current task** — ready to implement (see below). |
-| `codex-task-97-prompt.md` | Previous task — already implemented and approved. For reference only. |
+| `codex-task-104-prompt.md` | Most recently completed task. For reference only. |
+| `codex-task-103-prompt.md` | Previous task — Calibration Panel. For reference only. |
 
 ---
 
@@ -31,27 +31,25 @@ Every task has a **CODEX TASK N** section in `AGENT_SYSTEM_PROMPT.md`. The spec 
 
 ## Current task queue
 
-### 🔴 IMMEDIATE — CODEX TASK 104 (Batter Gamelog Pre-fetch Cron)
+### ✅ No immediate task — backlog cleared
 
-**File:** `prop-scout-v7.jsx` only.
+A full backlog audit (Session 112) confirmed that every previously documented open item has been implemented. The codebase includes:
 
-**Spec:** Read `codex-task-104-prompt.md` for the full implementation brief.
-
-**What it does:** Adds `snapshotBatterGamelogs()` to the cron job so all lineup batters are pre-fetched to DB at 10 AM and 2 PM Honolulu — the same pattern as `snapshotPitcherGamelogs`. Eliminates the 15–30s cold-load delay on the Board tab.
-
-**Summary of changes (2 backend files, no frontend):**
-1. `snapshotJobs.js` — add `snapshotBatterGamelogs()` function + add to `module.exports`
-2. `scheduler.js` — import + cron at `0 10,14 * * *` Honolulu
-
----
+- **Predictive Lane** (Phases 1–3): edge scoring on AI Board candidates, Predict tab with MIN_EDGE=0.08 filter, Calibration Panel bucketing simConfidence vs actual hit rate
+- **Batter Gamelog Pre-fetch Cron** (CODEX TASK 104): `snapshotBatterGamelogs` fires at 10 AM + 2 PM Honolulu, warming the DB before board opens
+- **Active Roster Fallback**: lineups route returns `source: "roster"` pre-lineup; board/HR/Hits tabs show roster hitters with `ROSTER` badge
+- **F5 Moneyline**: full Lab + Models tabs with `f5ml` scoring, AI Board integration, pick logging, and grading
+- **Hybrid AI Card Summaries**: `backend/routes/cardSummary.js` (Haiku + GPT-4o-mini fallback); board cards hydrate `aiReason` text on load
+- **Lab Calibration DB Migration**: `labCalibration.js` uses `lab_outcomes` PostgreSQL table with JSON file fallback
 
 ### 🟡 BACKLOG — Needs spec before implementing
 
-These are tracked but not yet ready for code. Do not implement these yet.
-
-| Task | Description |
+| Feature | Notes |
 |---|---|
-| (Predictive Lane complete — Phases 1–3 done) | Next feature TBD |
+| **CODEX TASK 105 — Batch Gamelog Endpoint** | 🔴 DO THIS FIRST. Spec + prompt at `codex-task-105-prompt.md`. 270 HTTP requests → 1. Fixes Board load delay users reported. |
+| **BACKLOG TASK 61 — Remove Picks Tab** | Spec ready in `AGENT_SYSTEM_PROMPT.md`. Frontend-only (~600-line view block + supporting infrastructure). Read the full spec before starting. |
+| Global Track Record | App-wide hit rate tracking across Board/Picks/Lab. Needs product decision + full spec. Prerequisite (Lab DB) is done. |
+| (Any new features) | Bring to Cowork session for spec before implementing |
 
 ---
 
@@ -65,6 +63,6 @@ These are tracked but not yet ready for code. Do not implement these yet.
 
 ---
 
-## After completing Task 104
+## After completing any task
 
-Reply with "Task 104 complete" and a brief summary of what was changed.
+Reply with "Task [N] complete" and a brief summary of what was changed.
