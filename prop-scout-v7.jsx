@@ -525,22 +525,40 @@ const buildBoardSummaryRequest = (c, type) => {
     lean: c?.leanAbbr ?? c?.lean ?? "",
     positives,
     caution,
-    matchup: c?.matchup ?? null,
+    matchup:      c?.matchup ?? null,
+    signals:      Array.isArray(c?.signals) ? c.signals.slice(0, 4) : [],
+    name:         c?.name ?? null,
+    hand:         c?.hand ?? null,
+    facingTeam:   c?.facingTeam ?? null,
+    avgK3:        c?.avgK3 ?? null,
+    avgIP:        c?.avgIP ?? null,
+    era:          c?.era ?? null,
+    whip:         c?.whip ?? null,
+    oppKPct:      c?.oppKPct ?? null,
+    umpire:       c?.umpire ?? null,
+    umpireRating: c?.umpireRating ?? null,
+    bookLine:     c?.bookLine ?? null,
+    windFav:      c?.windFav ?? null,
+    order:        c?.order ?? null,
+    score:        c?.score ?? null,
   };
 };
 
 const buildModelSummaryRequest = (p) => {
-  const positives = (p?.signals ?? [])
-    .filter(Boolean)
-    .filter(signal => !SUMMARY_NEGATIVE_RE.test(String(signal)))
-    .slice(0, 2);
-  const caution = (p?.signals ?? []).find(signal => SUMMARY_NEGATIVE_RE.test(String(signal))) ?? null;
+  const allSignals = (p?.signals ?? []).filter(Boolean);
+  const positives  = allSignals.filter(s => !SUMMARY_NEGATIVE_RE.test(String(s))).slice(0, 2);
+  const caution    = allSignals.find(s => SUMMARY_NEGATIVE_RE.test(String(s))) ?? null;
   return {
     id: `model:${p?.gamePk}:${p?.label}:${p?.confidence ?? "na"}`,
     market: `${p?.propType ?? "Model"} Picks`,
     lean: p?.lean ?? "",
     positives,
     caution,
+    signals:    allSignals.slice(0, 4),
+    name:       p?.player ?? p?.playerName ?? null,
+    hand:       p?.hand ?? null,
+    facingTeam: p?.opponent ?? p?.facingTeam ?? null,
+    score:      p?.confidence ?? null,
   };
 };
 
@@ -1587,7 +1605,7 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
               </div>
             )}
           </div>
-          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{game.time} · {game.stadium}</div>
+          <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{formatLocalTime(game.gameTime) ?? game.time} · {game.stadium}</div>
           {(awaySpLast || homeSpLast) && (
             <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3, flexWrap: "wrap" }}>
               <span style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace", letterSpacing: "0.05em" }}>SP</span>
@@ -2202,8 +2220,8 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
   const candidates = [];
   (liveSlate ?? []).forEach(game => {
     [
-      { p: game.pitcher,     facingTeam: game.away?.abbr, isHome: true  },
-      { p: game.awayPitcher, facingTeam: game.home?.abbr, isHome: false },
+      { p: game.probablePitchers?.home, facingTeam: game.away?.abbr, isHome: true  },
+      { p: game.probablePitchers?.away, facingTeam: game.home?.abbr, isHome: false },
     ].forEach(({ p, facingTeam, isHome }) => {
       if (!p?.id) return;
       const pStats  = livePitcherStats[p.id];
@@ -3554,20 +3572,15 @@ export default function App() {
   const [prefSaveMsg,      setPrefSaveMsg]      = useState("");
 
   const [selectedId, setSelectedId] = useState(1);
-  const [view, setView] = useState("slate"); // "slate" | "game" | "picks" | "model" | "board" | "scout" | "chat" | "settings"
+  const [view, setView] = useState("slate"); // "slate" | "game" | "model" | "board" | "scout" | "chat" | "settings"
   const [showHelp, setShowHelp] = useState(false);
   const [whyModal, setWhyModal] = useState(null); // { c, type: boardTab, rank }
-  const [picksFilter, setPicksFilter] = useState("all"); // "all" | "pending" | "hit" | "miss"
-  const [showTrends, setShowTrends] = useState(true);   // collapse/expand Trends card in Picks view
   const [collapsedMarkets, setCollapsedMarkets] = useState({
     pitcher_strikeouts: true,
     batter_home_runs: true,
     batter_total_bases: true,
     batter_hits: true,
   });
-  const [liveDigest, setLiveDigest] = useState(null);   // { period, total, hits, misses, pct, bestHit, worstMiss, byType }
-  const [digestLoading, setDigestLoading] = useState(false);
-  const [showDigest, setShowDigest] = useState(true);   // collapse/expand 7-day digest card
   const [chatHistory, setChatHistory] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
@@ -3596,24 +3609,6 @@ export default function App() {
   const [aiBoardLoading, setAiBoardLoading] = useState(false);
   const [aiBoardTab, setAiBoardTab] = useState("all");
   const [showLabTrackRecord, setShowLabTrackRecord] = useState(true);
-  // Prop result tracker — persisted to localStorage
-  const [propLog, setPropLog] = useState(() => {
-    try {
-      const PICKS_VERSION = "2";
-      const storedVersion = localStorage.getItem("propscout_log_version");
-      if (storedVersion !== PICKS_VERSION) {
-        localStorage.removeItem("propscout_log");
-        localStorage.setItem("propscout_log_version", PICKS_VERSION);
-        return [];
-      }
-      return JSON.parse(localStorage.getItem("propscout_log") || "[]");
-    } catch {
-      return [];
-    }
-  });
-  const [syncStatus, setSyncStatus] = useState(null); // null | "syncing" | "done" | "error"
-  const [syncMessage, setSyncMessage] = useState("");
-  const [picksServerReachable, setPicksServerReachable] = useState(false);
   const [tab, setTab] = useState("overview");
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
   const [liveWeather, setLiveWeather] = useState({});
@@ -3655,6 +3650,7 @@ export default function App() {
   const [liveBullpen,  setLiveBullpen]  = useState({});     // gamePk    → { away, home } bullpen object
   const [liveNrfiData, setLiveNrfiData] = useState({});     // gamePk    → { awayFirst, homeFirst, lean, confidence }
   const [liveScores,   setLiveScores]   = useState({});     // gamePk    → { inning, halfInning, awayScore, homeScore, outs }
+  const liveScoresRef = useRef({});                          // always-current mirror, avoids dep-array re-fires
   const [liveInjuries, setLiveInjuries] = useState([]);
   const [gameNotes,    setGameNotes]    = useState({});     // gamePk → note string
   const [liveTrends,   setLiveTrends]   = useState({});     // gamePk → summary string | "loading" | null
@@ -3687,8 +3683,6 @@ export default function App() {
   const [liveBoxscores, setLiveBoxscores] = useState({});    // gamePk → boxscore object | null
   const [boxSide,       setBoxSide]       = useState("away");// batting + pitching toggle: "away" | "home"
   const boxscoreFetched = useRef(new Set());                  // gamePks whose final boxscore is cached
-  const gradedGames     = useRef(new Set());                  // idempotency: gamePks already auto-graded
-  const histGradedGames = useRef(new Set());                  // gamePks already processed by the historical catch-up grader
   const [liveBoardResults, setLiveBoardResults] = useState({}); // playerId → { h, hr, ab, live }
   const boardBoxFetched = useRef(new Set());                  // gamePks already fetched for Board results
   const chatBottomRef = useRef(null);
@@ -3740,30 +3734,6 @@ export default function App() {
       .catch(err => console.error("Schedule fetch failed:", err))
       .finally(() => setSlateLoading(false));
   }, [slateDate]);
-
-  // Hydrate pick log from backend — fires once authToken is available, then again each time
-  // the Picks tab is opened so overnight nightly-graded results always appear.
-  // Uses apiFetch (sends Bearer token) — bare fetch() was silently returning 401.
-  const hydratePicksFromServer = useCallback(async () => {
-    if (!authToken) return;
-    try {
-      const data = await apiFetch("/api/picks");
-      if (!data?.picks?.length) { setPicksServerReachable(true); return; }
-      setPicksServerReachable(true);
-      setPropLog(data.picks);
-      localStorage.setItem("propscout_log", JSON.stringify(data.picks));
-    } catch (_) {
-      setPicksServerReachable(false);
-    }
-  }, [authToken]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // On auth token available (covers initial mount + login)
-  useEffect(() => { hydratePicksFromServer(); }, [hydratePicksFromServer]);
-
-  // Re-hydrate when user opens Picks tab — surfaces nightly-graded results without a full reload
-  useEffect(() => {
-    if (view === "picks") hydratePicksFromServer();
-  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch recent IL / DL placements for lineup flags
   useEffect(() => {
@@ -3870,15 +3840,23 @@ export default function App() {
   useEffect(() => {
     if (view !== "board" && view !== "model" && view !== "ai-board" && view !== "predict") return;
 
-    // ── Batter data (HR + Hits tabs) ──────────────────────────────────────────
+    // ── Batter data (HR + Hits tabs) — single batch call ─────────────────────
+    const missingBatterIds = [];
     Object.values(liveLineups).forEach(lu => {
       [...(lu.away ?? []), ...(lu.home ?? [])].forEach(b => {
-        if (!b?.id || liveHittingLog[b.id]) return;
-        apiFetch(`/api/players/${b.id}/gamelog?group=hitting`)
-          .then(data => setLiveHittingLog(prev => ({ ...prev, [b.id]: data })))
-          .catch(() => {});
+        if (b?.id && !liveHittingLog[b.id]) missingBatterIds.push(b.id);
       });
     });
+    if (missingBatterIds.length) {
+      apiMutate("/api/players/gamelogs/batch", "POST", {
+        playerIds: [...new Set(missingBatterIds)],
+        group: "hitting",
+      })
+        .then(data => {
+          if (data?.results) setLiveHittingLog(prev => ({ ...prev, ...data.results }));
+        })
+        .catch(() => {});
+    }
 
     // ── Pitcher data (K + Outs tabs) ──────────────────────────────────────────
     // liveSlate items use raw schedule format: probablePitchers.home / .away
@@ -4031,6 +4009,7 @@ export default function App() {
     setLiveOddsMap({});
     setLivePredMarkets(null);
     setLiveNrfiData({});
+    liveScoresRef.current = {};
     setLiveScores({});
     setLiveInjuries([]);
     setLiveBoardResults({});
@@ -4057,8 +4036,6 @@ export default function App() {
     setCurrentUser(null);
     setPreferredBook(null);
     setPropsBookFilter("ALL");
-    setPropLog([]);
-    setLiveDigest(null);
     setChatHistory([]);
     setChatInput("");
     setChatLoading(false);
@@ -4068,11 +4045,6 @@ export default function App() {
   };
 
   const toggleMarket = (mKey) => setCollapsedMarkets(prev => ({ ...prev, [mKey]: !prev[mKey] }));
-  const getPickStatus = (pick) => {
-    if (pick?.result === "hit" || pick?.result === "miss") return "settled";
-    return pick?.status ?? "pending";
-  };
-  const isPickUnsettled = (pick) => getPickStatus(pick) !== "settled";
   const getBoardGamePhase = (gamePk) => {
     const game = (liveSlate ?? []).find(g => String(g.gamePk) === String(gamePk));
     const s = game?.status ?? "";
@@ -4080,29 +4052,6 @@ export default function App() {
     if (s === "In Progress" || s === "Warmup") return "live";
     return "upcoming";
   };
-
-  // Fetch 7-day digest when Picks view opens (lazy — only if not already loaded)
-  useEffect(() => {
-    if (view !== "picks" || liveDigest !== null || digestLoading) return;
-    setDigestLoading(true);
-    apiFetch("/api/digest")
-      .then(d => setLiveDigest(d))
-      .catch(() => {})
-      .finally(() => setDigestLoading(false));
-  }, [view]);
-
-  useEffect(() => {
-    if (view !== "picks" || !currentUser) return;
-    if (!propLog.some(isPickUnsettled)) return;
-    apiFetch("/api/picks")
-      .then((data) => {
-        const picks = data?.picks ?? [];
-        setPropLog(picks);
-        localStorage.setItem("propscout_log", JSON.stringify(picks));
-        setPicksServerReachable(true);
-      })
-      .catch(() => setPicksServerReachable(false));
-  }, [view, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if ((view !== "lab" && view !== "models") || (view === "lab" ? labSubTab : modelsSubTab) !== "f5ml" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
@@ -4161,6 +4110,37 @@ export default function App() {
         }));
         scored.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
         setAiBoardData(scored);
+
+        // Seed Tier 1 summaries from aiReason (already generated by Haiku during scoring)
+        setAiCardSummaries(prev => {
+          const updates = {};
+          scored.forEach(c => {
+            if (c.aiReason && !prev[c.id]) updates[c.id] = c.aiReason;
+          });
+          return Object.keys(updates).length ? { ...prev, ...updates } : prev;
+        });
+
+        // Trigger Tier 2 (GPT-4o) for high-confidence cards (aiScore ≥ 75)
+        const highConfidence = scored.filter(c => (c.aiScore ?? 0) >= 75);
+        if (highConfidence.length) {
+          const premiumRequests = highConfidence.map(c =>
+            buildBoardSummaryRequest(
+              {
+                ...c,
+                score: c.aiScore,
+                signals: Array.isArray(c.signals) ? c.signals : [],
+                avgK3: c.avgK3 ?? c.stats?.avgK3 ?? null,
+                avgIP: c.avgIP ?? c.stats?.avgIP ?? null,
+                era: c.era ?? c.stats?.era ?? null,
+                whip: c.whip ?? c.stats?.whip ?? null,
+                oppKPct: c.oppKPct ?? c.stats?.oppKPct ?? null,
+              },
+              c.market
+            )
+          );
+          hydrateCardSummaries(premiumRequests, { premium: true });
+        }
+
         setLockedAiBoardSnapshot(prev => {
           if (prev !== null) return prev; // already locked — don't overwrite
           const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
@@ -4414,12 +4394,6 @@ export default function App() {
           .then(data => setLiveLineups(prev => ({ ...prev, [sg.gamePk]: data })))
           .catch(() => {});
       }
-      // Weather — fetchWeather handles domes internally (no API call, returns roof:true immediately)
-      if (!liveWeather[sg.gamePk]) {
-        fetchWeather(sg.gamePk, sg.stadium, sg.time, SLATE[0].weather)
-          .then(data => setLiveWeather(prev => ({ ...prev, [sg.gamePk]: data })))
-          .catch(() => {});
-      }
       // NRFI first-inning tendencies
       if (!liveNrfiData[sg.gamePk]) {
         apiFetch(`/api/nrfi/${sg.gamePk}`)
@@ -4427,7 +4401,91 @@ export default function App() {
           .catch(() => {});
       }
     });
-  }, [liveSlate]);
+
+    // Weather batch — one call for all games missing weather (live mode only)
+    if (IS_SANDBOX) {
+      liveSlate.forEach(sg => {
+        if (!liveWeather[sg.gamePk]) {
+          fetchWeather(sg.gamePk, sg.stadium, sg.time, SLATE[0].weather)
+            .then(data => setLiveWeather(prev => ({ ...prev, [sg.gamePk]: data })))
+            .catch(() => {});
+        }
+      });
+    } else {
+      const weatherNeeded = liveSlate.filter(sg => {
+        if (liveWeather[sg.gamePk]) return false; // already fetched
+        const stadium = STADIUMS[sg.stadium];
+        if (!stadium || stadium.roof) {
+          // Dome — set immediately, no fetch needed
+          setLiveWeather(prev => ({
+            ...prev,
+            [sg.gamePk]: { condition: "Dome", wind: "N/A", humidity: "N/A", rainChance: "N/A", roof: true, hrFavorable: false, live: false },
+          }));
+          return false;
+        }
+        return true;
+      });
+
+      if (weatherNeeded.length > 0) {
+        const parseHour = (timeStr, tz) => {
+          try {
+            const now     = new Date();
+            const dateStr = now.toLocaleDateString("en-CA", { timeZone: tz });
+            const clean   = timeStr.replace(/ [A-Z]{2,3}$/, "");
+            const d       = new Date(`${dateStr} ${clean}`);
+            return isNaN(d) ? now : d;
+          } catch { return new Date(); }
+        };
+
+        const payload = weatherNeeded.map(sg => {
+          const stadium = STADIUMS[sg.stadium];
+          return {
+            gamePk: sg.gamePk,
+            lat:    stadium.lat,
+            lon:    stadium.lon,
+            tz:     stadium.tz,
+            hour:   parseHour(sg.time, stadium.tz).getHours(),
+            key:    sg.stadium,
+          };
+        });
+
+        fetch(`${API_BASE}/api/weather/batch`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify(payload),
+        })
+          .then(r => r.ok ? r.json() : Promise.reject(r.status))
+          .then(batchResult => {
+            const updates = {};
+            weatherNeeded.forEach(sg => {
+              const w = batchResult[sg.gamePk];
+              if (!w) return;
+              const stadium = STADIUMS[sg.stadium];
+              updates[sg.gamePk] = {
+                temp:        w.temp,
+                condition:   WMO_CODES[w.weathercode] ?? "Unknown",
+                wind:        windDescription(w.winddirection, w.windspeed, stadium.orientation),
+                humidity:    `${Math.round(w.relativehumidity)}%`,
+                rainChance:  `${w.precipitation_probability}%`,
+                roof:        false,
+                hrFavorable: isHrFavorable(w.winddirection, w.windspeed, stadium.orientation, w.temp),
+                live:        true,
+                fetchedAt:   w.fetchedAt,
+              };
+            });
+            setLiveWeather(prev => ({ ...prev, ...updates }));
+          })
+          .catch(() => {
+            // Fallback — set non-live placeholder so cards don't stay blank
+            const fallbacks = {};
+            weatherNeeded.forEach(sg => {
+              fallbacks[sg.gamePk] = { condition: "Unavailable", wind: "N/A", humidity: "N/A", rainChance: "N/A", roof: false, hrFavorable: false, live: false };
+            });
+            setLiveWeather(prev => ({ ...prev, ...fallbacks }));
+          });
+      }
+    }
+  }, [liveSlate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll unconfirmed lineups every 3 minutes so Model Picks update automatically
   // when lineups are posted closer to game time — no manual refresh needed.
@@ -4493,9 +4551,12 @@ export default function App() {
         const inProgress = status === "In Progress" || status === "Warmup";
         const finished   = status === "Final" || status === "Game Over";
         // Poll in-progress every 60s; fetch final once (skip if already cached)
-        if (!inProgress && !(finished && !liveScores[sg.gamePk])) return;
+        if (!inProgress && !(finished && !liveScoresRef.current[sg.gamePk])) return;
         apiFetch(`/api/linescore/${sg.gamePk}`)
-          .then(data => setLiveScores(prev => ({ ...prev, [sg.gamePk]: data })))
+          .then(data => {
+            liveScoresRef.current = { ...liveScoresRef.current, [sg.gamePk]: data };
+            setLiveScores(prev => ({ ...prev, [sg.gamePk]: data }));
+          })
           .catch(() => {});
       });
     };
@@ -4532,118 +4593,13 @@ export default function App() {
     return () => clearInterval(bsInterval);
   }, [view, selectedId, tab, liveSlate]);
 
-  // Auto-grade pending picks when a game goes final
-  useEffect(() => {
-    if (IS_STATS_SANDBOX || !liveSlate?.length) return;
-
-    liveSlate.forEach(sg => {
-      const { gamePk } = sg;
-      // Primary signal: slate status (set on page load)
-      // Fallback: linescore has been polled and currentInning is null + runs scored
-      // (covers games that finish while the app is open without a page reload)
-      const ls = liveScores[gamePk];
-      const linescoreFinished = ls && ls.inning === null && (ls.awayScore > 0 || ls.homeScore > 0);
-      const isFinalGame = sg.status === "Final" || sg.status === "Game Over" || linescoreFinished;
-      if (!isFinalGame) return;
-      if (gradedGames.current.has(gamePk)) return;
-
-      // eslint-disable-next-line eqeqeq — gamePk may be string (localStorage) or number
-      const pendingPicks = propLog.filter(p => p.gamePk == gamePk && isPickUnsettled(p));
-      if (!pendingPicks.length) return;
-
-      const box = liveBoxscores[gamePk];
-      if (!box?.isFinal) {
-        // Fetch boxscore so the next effect run can grade
-        if (!boxscoreFetched.current.has(gamePk)) {
-          apiFetch(`/api/boxscore/${gamePk}`)
-            .then(data => {
-              if (!data?.isFinal) return;
-              setLiveBoxscores(prev => ({ ...prev, [gamePk]: data }));
-              boxscoreFetched.current.add(gamePk);
-            })
-            .catch(() => {});
-        }
-        return;
-      }
-
-      let anyGraded = false;
-      pendingPicks.forEach(pick => {
-        const grade = computeGrade(pick, box);
-        if (grade !== null) {
-          markResult(pick.id, grade);
-          anyGraded = true;
-        }
-      });
-      if (anyGraded) gradedGames.current.add(gamePk);
-    });
-  }, [liveSlate, liveScores, liveBoxscores, propLog]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Historical pick catch-up: grade pending picks from prior days ─────────
-  // Fires when the user opens the Picks tab. Finds pending picks whose gamePk
-  // is not in today's liveSlate (i.e. from a previous day), fetches their
-  // final boxscores, and grades them with computeGrade.
-  useEffect(() => {
-    if (IS_STATS_SANDBOX || view !== "picks") return;
-
-    const todayGamePks = new Set((liveSlate ?? []).map(g => String(g.gamePk)));
-
-    const historicalPending = propLog.filter(p =>
-      isPickUnsettled(p) &&
-      p.gamePk != null &&
-      !todayGamePks.has(String(p.gamePk))
-    );
-    if (!historicalPending.length) return;
-
-    const byGame = {};
-    historicalPending.forEach(p => {
-      const key = String(p.gamePk);
-      if (!byGame[key]) byGame[key] = [];
-      byGame[key].push(p);
-    });
-
-    Object.entries(byGame).forEach(([gamePkStr, picks]) => {
-      if (histGradedGames.current.has(gamePkStr)) return;
-      histGradedGames.current.add(gamePkStr);
-
-      const cached = liveBoxscores[gamePkStr];
-      if (cached?.isFinal) {
-        let anyGraded = false;
-        picks.forEach(pick => {
-          const grade = computeGrade(pick, cached);
-          if (grade !== null) { markResult(pick.id, grade); anyGraded = true; }
-        });
-        if (!anyGraded) histGradedGames.current.delete(gamePkStr);
-        return;
-      }
-
-      apiFetch(`/api/boxscore/${gamePkStr}`)
-        .then(data => {
-          if (!data?.isFinal) {
-            histGradedGames.current.delete(gamePkStr);
-            return;
-          }
-          setLiveBoxscores(prev => ({ ...prev, [gamePkStr]: data }));
-          boxscoreFetched.current.add(gamePkStr);
-          let anyGraded = false;
-          picks.forEach(pick => {
-            const grade = computeGrade(pick, data);
-            if (grade !== null) { markResult(pick.id, grade); anyGraded = true; }
-          });
-          if (!anyGraded) histGradedGames.current.delete(gamePkStr);
-        })
-        .catch(() => {
-          histGradedGames.current.delete(gamePkStr);
-        });
-    });
-  }, [view, propLog]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // Fetch boxscores for live/final games on the Board + Model views to show today's results
   useEffect(() => {
     if (IS_STATS_SANDBOX || (view !== "board" && view !== "model") || !liveSlate) return;
     liveSlate.forEach(g => {
       const status = g.status ?? "";
       const isLive  = status === "In Progress" || status === "Warmup";
-      const ls = liveScores[g.gamePk];
+      const ls = liveScoresRef.current[g.gamePk];
       const linescoreFinished = ls && ls.inning === null && ((ls.awayScore ?? 0) > 0 || (ls.homeScore ?? 0) > 0);
       const isFinal = status === "Final" || status === "Game Over" || linescoreFinished;
       if (!isLive && !isFinal) return;
@@ -4667,7 +4623,7 @@ export default function App() {
         })
         .catch(() => {});
     });
-  }, [view, liveSlate, liveScores]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, liveSlate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch lineups, umpire, + pitcher stats when a live game card opens
   useEffect(() => {
@@ -5042,7 +4998,7 @@ export default function App() {
           .catch(() => {});
       }
     });
-  }, [view, selectedId, game.lineups]);
+  }, [view, selectedId, !!liveLineups[selectedId]?.confirmed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Prop Engine ─────────────────────────────────────────────────────────────
   // Kept at module scope to avoid production minifier TDZ collisions in App().
@@ -5153,38 +5109,49 @@ export default function App() {
   const mediumPicks = topSlatePicks.filter(p => p.tier === "MEDIUM");
   const specPicks   = topSlatePicks.filter(p => p.tier === "SPEC");
 
-  const hydrateCardSummaries = useCallback(async (requests) => {
+  const hydrateCardSummaries = useCallback(async (requests, { premium = false } = {}) => {
+    const premiumKey = (id) => premium ? `premium:${id}` : id;
     const pending = (requests ?? []).filter(req =>
       req?.id &&
-      !aiCardSummaries[req.id] &&
-      !aiSummaryInFlight.current.has(req.id)
+      !aiCardSummaries[premiumKey(req.id)] &&
+      !aiSummaryInFlight.current.has(premiumKey(req.id))
     );
     if (!pending.length) return;
 
-    pending.forEach(req => aiSummaryInFlight.current.add(req.id));
+    pending.forEach(req => aiSummaryInFlight.current.add(premiumKey(req.id)));
     try {
       const data = await apiMutate("/api/card-summary", "POST", {
-        cards: pending.map(({ id, market, lean, positives, caution, matchup }) => ({ id, market, lean, positives, caution, matchup: matchup ?? null })),
+        premium,
+        cards: pending.map(({ id, market, lean, positives, caution, matchup, signals, name, hand, facingTeam, avgK3, avgIP, era, whip, oppKPct, umpire, umpireRating, bookLine, windFav, order }) => ({
+          id, market, lean, positives, caution, matchup: matchup ?? null,
+          signals: signals ?? [], name: name ?? null, hand: hand ?? null,
+          facingTeam: facingTeam ?? null, avgK3: avgK3 ?? null, avgIP: avgIP ?? null,
+          era: era ?? null, whip: whip ?? null, oppKPct: oppKPct ?? null,
+          umpire: umpire ?? null, umpireRating: umpireRating ?? null,
+          bookLine: bookLine ?? null, windFav: windFav ?? null, order: order ?? null,
+        })),
       });
       setAiCardSummaries(prev => ({
         ...prev,
         ...Object.fromEntries(
-          pending.map(req => [req.id, data?.summaries?.[req.id] ?? fallbackCardSummary(req)])
+          pending.map(req => [premiumKey(req.id), data?.summaries?.[req.id] ?? fallbackCardSummary(req)])
         ),
       }));
     } catch {
       setAiCardSummaries(prev => ({
         ...prev,
-        ...Object.fromEntries(pending.map(req => [req.id, fallbackCardSummary(req)])),
+        ...Object.fromEntries(pending.map(req => [premiumKey(req.id), fallbackCardSummary(req)])),
       }));
     } finally {
-      pending.forEach(req => aiSummaryInFlight.current.delete(req.id));
+      pending.forEach(req => aiSummaryInFlight.current.delete(premiumKey(req.id)));
     }
   }, [aiCardSummaries]);
 
   const getCardSummaryText = useCallback((request) => {
     if (!request?.id) return null;
-    return aiCardSummaries[request.id] ?? fallbackCardSummary(request);
+    return aiCardSummaries[`premium:${request.id}`]
+      ?? aiCardSummaries[request.id]
+      ?? fallbackCardSummary(request);
   }, [aiCardSummaries]);
 
   useEffect(() => {
@@ -5205,6 +5172,8 @@ export default function App() {
       .map(c => buildBoardSummaryRequest(c, isGameBoard ? gameSubTab : boardTab));
 
     hydrateCardSummaries(requests);
+    const premiumRequests = requests.filter(r => (r.score ?? 0) >= 75);
+    if (premiumRequests.length) hydrateCardSummaries(premiumRequests, { premium: true });
   }, [view, boardTab, gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires, liveLineups, livePlayerProps, liveHittingLog, liveStatSplits, liveGameLog, liveTeamStats, hydrateCardSummaries]);
 
   // Lock board candidates when a game goes live — prevents survivorship bias in result tracking.
@@ -5229,24 +5198,33 @@ export default function App() {
                 .filter(c => String(c.gamePk) === String(game.gamePk)),
       };
 
+      // Only lock if we actually have candidates — if lineup data isn't ready yet,
+      // skip and let the effect retry when liveLineups updates.
+      const hasContent = newEntry.hits.length > 0 || newEntry.hr.length > 0
+                      || newEntry.k.length > 0    || newEntry.outs.length > 0;
+      if (!hasContent) return;
+
       setLockedBoardCandidates(prev => {
         const updated = { ...prev, [game.gamePk]: newEntry };
         localStorage.setItem("board_locked_snapshot", JSON.stringify({ date: today, candidates: updated }));
         return updated;
       });
     });
-  }, [liveSlate, view]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [liveSlate, view, liveLineups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (view !== "model" || !topSlatePicks.length) return;
-    hydrateCardSummaries(topSlatePicks.slice(0, 12).map(buildModelSummaryRequest));
+    const modelRequests = topSlatePicks.slice(0, 12).map(buildModelSummaryRequest);
+    hydrateCardSummaries(modelRequests);
+    const premiumModel = modelRequests.filter(r => (r.score ?? 0) >= 75);
+    if (premiumModel.length) hydrateCardSummaries(premiumModel, { premium: true });
   }, [view, topSlatePicks, hydrateCardSummaries]);
 
   const QUICK_CHIPS = [
-    "Best plays today",
-    "Top K props",
-    "Biggest line moves",
-    "NRFI leans",
+    "Build me a 3-leg parlay",
+    "Best K props tonight",
+    "Best hits props tonight",
+    "Top plays across all markets",
     "Any injury alerts?",
   ];
 
@@ -5265,8 +5243,37 @@ export default function App() {
 
     const historyPayload = newHistory.slice(-10).map((entry) => ({ role: entry.role, content: entry.content }));
 
+    // Build board context from AI Board data — top 6 per market, ranked by aiScore
+    const boardCandidates = (() => {
+      const source = aiBoardData ?? [];
+      if (!source.length) return [];
+      const markets = ["k", "outs", "hits", "hr", "f5ml"];
+      return markets.flatMap(mkt =>
+        source
+          .filter(c => c.market === mkt)
+          .sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0))
+          .slice(0, 6)
+          .map(c => ({
+            market:    c.market,
+            name:      c.name ?? c.playerName ?? null,
+            team:      c.team ?? null,
+            gameLabel: c.gameLabel ?? null,
+            gamePk:    c.gamePk ?? null,
+            aiScore:   c.aiScore ?? null,
+            aiReason:  c.aiReason ?? null,
+            bookLine:  c.bookLine ?? null,
+            lean:      c.lean ?? null,
+            stats:     c.stats ?? {},
+          }))
+      );
+    })();
+
     try {
-      const data = await apiMutate("/api/chat", "POST", { message, history: historyPayload.slice(0, -1) });
+      const data = await apiMutate("/api/chat", "POST", {
+        message,
+        history: historyPayload.slice(0, -1),
+        boardCandidates: boardCandidates.length ? boardCandidates : undefined,
+      });
       const assistantMsg = {
         role: "assistant",
         content: data.response,
@@ -5358,69 +5365,7 @@ export default function App() {
     }
   }
 
-  // ── Pick tracker helpers ──────────────────────────────────────────────────
-  const logPick = (prop) => {
-    const entryDate = prop.date ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    const alreadyLogged = propLog.some(p =>
-      String(p.gamePk) === String(prop.gamePk ?? selectedId) &&
-      p.label === prop.label &&
-      p.date === entryDate
-    );
-    if (alreadyLogged) return;
-
-    const isBatterProp = prop.propType === "Hits" || prop.propType === "TB" || prop.propType === "HR" || prop.propType === "RBI";
-    const entry = {
-      id:          `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      timestamp:   new Date().toISOString(),
-      date:        entryDate,
-      game:        prop.game ?? `${game.away.abbr} @ ${game.home.abbr}`,
-      gamePk:      prop.gamePk ?? selectedId,
-      label:       prop.label,
-      lean:        prop.lean,
-      confidence:  prop.confidence,
-      // Enriched schema (Trends Full)
-      propType:    prop.propType   ?? null,
-      homeTeam:    prop.homeTeam ?? game.home?.abbr ?? null,
-      awayTeam:    prop.awayTeam ?? game.away?.abbr ?? null,
-      pitcherId:   prop.pitcherId   ?? prop.id ?? pitcher?.id ?? null,
-      pitcherName: prop.pitcherName ?? prop.fullName ?? prop.name ?? pitcher?.name ?? null,
-      pitcherLastName: prop.pitcherLastName ?? null,
-      pitcherSide: prop.pitcherSide ?? null,
-      playerId:    isBatterProp ? (prop.playerId ?? prop.id ?? activeBatter?.id ?? null) : null,
-      playerName:  isBatterProp ? (prop.playerName ?? prop.fullName ?? prop.name ?? activeBatter?.name ?? null) : null,
-      leanSide:    prop.leanSide ?? null,
-      bookLine:    prop.bookLine ?? null,
-      status:      "pending",
-      gameTime:    (() => {
-        const sg = (liveSlate ?? []).find(g => String(g.gamePk) === String(prop.gamePk ?? selectedId));
-        return sg?.gameTime ?? sg?.time ?? null;
-      })(),
-      score:         prop.score         ?? null,
-      simConfidence: prop.simConfidence ?? null,
-      aiScore:       prop.aiScore       ?? null,
-      aiReason:      prop.aiReason      ?? null,
-      suggestedLine: prop.suggestedLine ?? null,
-      bookLines: {
-        DK:  prop.propLine?.books?.DK?.line  ?? prop.bookLine ?? null,
-        FD:  prop.propLine?.books?.FD?.line  ?? null,
-        CZR: prop.propLine?.books?.CZR?.line ?? null,
-        MGM: prop.propLine?.books?.MGM?.line ?? null,
-      },
-      result:      null,
-    };
-    setPropLog(prev => {
-      const updated = [entry, ...prev];
-      localStorage.setItem("propscout_log", JSON.stringify(updated));
-      return updated;
-    });
-    // Background sync — fire-and-forget, UI never blocks on this
-    apiMutate("/api/picks", "POST", entry).catch(() => {});
-    // Invalidate digest so next Picks view open gets fresh data
-    apiMutate("/api/digest/refresh", "POST").catch(() => {});
-    setLiveDigest(null);
-  };
-  // ── Auto-grade a pick from final boxscore data ───────────────────────────
-  // Returns "hit" | "miss" | null (null = can't determine from available data)
+  // ── Lab card boxscore grading (display only) ───────────────────────────────
   const computeLabF5MlGrade = (pick, box) => {
     if (!box?.isFinal) return null;
     const innings = box.linescore?.innings ?? [];
@@ -5465,260 +5410,12 @@ export default function App() {
     if (actualTotal === pick.bookTotal) return null;
     return (pick.leanSide === "OVER" ? actualTotal > pick.bookTotal : actualTotal < pick.bookTotal) ? "hit" : "miss";
   };
-  const computeGrade = (pick, box) => {
-    if (!box?.isFinal) return null;
-    if (pick.propType === "LAB_F5ML") return computeLabF5MlGrade(pick, box);
-    if (pick.propType === "LAB_FGML") return computeLabFgMlGrade(pick, box);
-    if (pick.propType === "LAB_KPROP") return computeLabKPropGrade(pick, box);
-    if (pick.propType === "LAB_TOTALS") return computeLabTotalsGrade(pick, box);
-    const label = (pick.label ?? "").toUpperCase();
-    const lean  = (pick.lean  ?? "").toUpperCase();
-    const innings   = box.linescore?.innings ?? [];
-    const awayRuns  = box.linescore?.away?.runs ?? 0;
-    const homeRuns  = box.linescore?.home?.runs ?? 0;
-    const totalRuns = awayRuns + homeRuns;
-    const allBatters = [...(box.batting?.away ?? []), ...(box.batting?.home ?? [])];
-    const findBatter = () => {
-      const norm = (s) => String(s ?? "").toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
-      const storedId = pick.playerId != null ? String(pick.playerId) : null;
-      if (storedId) {
-        const byId = allBatters.find(b => String(b.id) === storedId);
-        if (byId) return byId;
-      }
-      const storedName = norm(pick.playerName);
-      if (storedName) {
-        const byName = allBatters.find(b =>
-          norm(b.name).includes(storedName) ||
-          storedName.includes(norm(b.name).split(" ").pop())
-        );
-        if (byName) return byName;
-      }
-      const labelName = norm(label
-        .replace(/\bTOTAL BASES\b.*$/, "")
-        .replace(/\bHITS\b.*$/, "")
-        .replace(/\bRBI\b.*$/, "")
-        .replace(/\bHR\b.*$/, "")
-        .trim());
-      const lastName = labelName.split(" ")[0];
-      return allBatters.find(b => norm(b.name).includes(lastName)) ?? null;
-    };
-    const normName = (s) => String(s ?? "").toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
-    const findPitcher = () => {
-      const allPitchers = [...(box.pitching?.away ?? []), ...(box.pitching?.home ?? [])];
-      const storedName = normName(pick.pitcherName);
-      if (storedName) {
-        const byStored = allPitchers.find(p => {
-          const pname = normName(p.name);
-          const plast = pname.split(" ").pop();
-          return pname.includes(storedName) || storedName.includes(plast);
-        });
-        if (byStored) return byStored;
-      }
-
-      const labelName = normName(label
-        .replace(/\bSTRIKEOUTS?\b.*$/, "")
-        .replace(/\bK'S\b.*$/, "")
-        .replace(/\bK O\/U\b.*$/, "")
-        .replace(/\bOUTS\b.*$/, "")
-        .trim());
-      if (labelName) {
-        const byLabel = allPitchers.find(p => {
-          const pname = normName(p.name);
-          const plast = pname.split(" ").pop();
-          return pname.includes(labelName) || labelName.includes(pname) || labelName.includes(plast);
-        });
-        if (byLabel) return byLabel;
-      }
-
-      return null;
-    };
-
-    // NRFI — no runs scored in 1st inning
-    // label may have game appended: "NRFI" or "NRFI · TEX @ SEA"
-    if (label.startsWith("NRFI")) {
-      const first   = innings[0];
-      const scored  = first ? ((first.away ?? 0) + (first.home ?? 0)) > 0 : false;
-      return scored ? "miss" : "hit";
-    }
-
-    // YRFI — at least one run in 1st inning
-    if (label.startsWith("YRFI")) {
-      const first   = innings[0];
-      const scored  = first ? ((first.away ?? 0) + (first.home ?? 0)) > 0 : false;
-      return scored ? "hit" : "miss";
-    }
-
-    // Game Total (OVER / UNDER)
-    if (label.includes("GAME TOTAL") || (label.includes("TOTAL") && (label.includes("OVER") || label.includes("UNDER") || label.includes("O/U")))) {
-      const m = label.match(/(\d+\.?\d*)/);
-      if (!m) return null;
-      const line = parseFloat(m[1]);
-      if (lean === "OVER")  return totalRuns > line  ? "hit" : "miss";
-      if (lean === "UNDER") return totalRuns < line  ? "hit" : "miss";
-      return null;
-    }
-
-    // Run Line (margin-based)
-    if (label.includes("RUN LINE") || label.includes("RL -") || label.includes("RL +")) {
-      const margin = awayRuns - homeRuns;
-      if (label.includes("AWAY")) {
-        // Away RL -1.5: away wins by 2+ = hit for OVER lean
-        return lean === "OVER"
-          ? (margin >= 2  ? "hit" : "miss")
-          : (margin < 2   ? "hit" : "miss");
-      }
-      if (label.includes("HOME")) {
-        // Home RL +1.5: home wins or loses by <2 = hit for OVER lean
-        return lean === "OVER"
-          ? (homeRuns - awayRuns >= 2 ? "hit" : "miss")
-          : (homeRuns - awayRuns < 2  ? "hit" : "miss");
-      }
-      return null;
-    }
-
-    // Moneyline — side to win outright
-    if (label.includes("MONEYLINE") || /\bML\b/.test(label)) {
-      if (lean === "HOME") return homeRuns > awayRuns ? "hit" : "miss";
-      if (lean === "AWAY") return awayRuns > homeRuns ? "hit" : "miss";
-      return null;
-    }
-
-    // Pitcher Strikeouts — "Wheeler K's O/U 7.5" or "Pitcher Strikeouts O/U"
-    if (label.includes("K'S") || label.includes("STRIKEOUT") || (label.includes(" K ") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
-      const m = label.match(/(\d+\.?\d*)/);
-      if (!m) return null;
-      const line = parseFloat(m[1]);
-      const pitcher = findPitcher();
-      if (!pitcher) return null;
-      if (lean === "OVER")  return (pitcher.k ?? 0) > line  ? "hit" : "miss";
-      if (lean === "UNDER") return (pitcher.k ?? 0) < line  ? "hit" : "miss";
-      return null;
-    }
-
-    // Pitcher Outs recorded
-    if (label.includes("OUTS") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER"))) {
-      const m = label.match(/(\d+\.?\d*)/);
-      if (!m) return null;
-      const line = parseFloat(m[1]);
-      const pitcher = findPitcher();
-      if (!pitcher) return null;
-      const outs = parseIpToOuts(pitcher.ip);
-      if (lean === "OVER")  return outs > line  ? "hit" : "miss";
-      if (lean === "UNDER") return outs < line  ? "hit" : "miss";
-      return null;
-    }
-
-    // Batter Hits
-    if (pick.propType === "Hits" || (label.includes("HITS") && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
-      const m = label.match(/(\d+\.?\d*)/);
-      if (!m) return null;
-      const line = parseFloat(m[1]);
-      const batter = findBatter();
-      if (!batter) return null;
-      if (lean === "OVER")  return (batter.h ?? 0) > line ? "hit" : "miss";
-      if (lean === "UNDER") return (batter.h ?? 0) < line ? "hit" : "miss";
-      return null;
-    }
-
-    // Batter Total Bases
-    if (pick.propType === "TB" || label.includes("TOTAL BASES") || (/\bTB\b/.test(label) && (label.includes("O/U") || label.includes("OVER") || label.includes("UNDER")))) {
-      const m = label.match(/(\d+\.?\d*)/);
-      if (!m) return null;
-      const line = parseFloat(m[1]);
-      const batter = findBatter();
-      if (!batter || batter.tb === undefined) return null;
-      if (lean === "OVER")  return (batter.tb ?? 0) > line ? "hit" : "miss";
-      if (lean === "UNDER") return (batter.tb ?? 0) < line ? "hit" : "miss";
-      return null;
-    }
-
-    // Batter Home Runs
-    if (pick.propType === "HR" || label.includes(" HR ")) {
-      const m = label.match(/(\d+\.?\d*)/);
-      if (!m) return null;
-      const line = parseFloat(m[1]);
-      const batter = findBatter();
-      if (!batter) return null;
-      if (lean === "OVER" || lean === "YES")  return (batter.hr ?? 0) > line ? "hit" : "miss";
-      if (lean === "UNDER" || lean === "NO")  return (batter.hr ?? 0) < line ? "hit" : "miss";
-      return null;
-    }
-
-    // Batter RBI
-    if (pick.propType === "RBI" || label.includes("RBI")) {
-      const m = label.match(/(\d+\.?\d*)/);
-      if (!m) return null;
-      const line = parseFloat(m[1]);
-      const batter = findBatter();
-      if (!batter) return null;
-      if (lean === "OVER")  return (batter.rbi ?? 0) > line ? "hit" : "miss";
-      if (lean === "UNDER") return (batter.rbi ?? 0) < line ? "hit" : "miss";
-      return null;
-    }
-
-    return null; // prop type not gradeable from boxscore alone
-  };
-
-  const markResult = (id, result) => {
-    const nextStatus = result == null ? "pending" : "settled";
-    setPropLog(prev => {
-      const updated = prev.map(p => p.id === id ? { ...p, result, status: nextStatus } : p);
-      localStorage.setItem("propscout_log", JSON.stringify(updated));
-      return updated;
-    });
-    apiMutate(`/api/picks/${id}`, "PATCH", { result, status: nextStatus }).catch(() => {});
-    // Invalidate digest — result change affects 7-day stats
-    apiMutate("/api/digest/refresh", "POST").catch(() => {});
-    setLiveDigest(null);
-  };
-  const deletePick = (id) => {
-    setPropLog(prev => {
-      const updated = prev.filter(p => p.id !== id);
-      localStorage.setItem("propscout_log", JSON.stringify(updated));
-      return updated;
-    });
-    apiMutate(`/api/picks/${id}`, "DELETE").catch(() => {});
-  };
-  const isLogged = (prop) => propLog.some(p => p.gamePk === selectedId && p.label === prop.label);
 
   const saveNote = (key, text) => {
     setNoteSaveState("saving");
     apiMutate(`/api/notes/${key}`, "POST", { note: text })
       .then(() => { setNoteSaveState("saved"); setTimeout(() => setNoteSaveState(null), 2000); })
       .catch(() => setNoteSaveState(null));
-  };
-
-  const syncPicksToServer = async () => {
-    setSyncStatus("syncing");
-    setSyncMessage(`Syncing… 0/${propLog.length}`);
-
-    try {
-      const data = await apiFetch("/api/picks");
-      setPicksServerReachable(true);
-      const existingIds = new Set((data?.picks ?? []).map(p => p.id));
-      const missing = propLog.filter(p => !existingIds.has(p.id));
-      let completed = propLog.length - missing.length;
-
-      if (missing.length === 0) {
-        setSyncStatus("done");
-        setSyncMessage("✓ Synced");
-        return;
-      }
-
-      setSyncMessage(`Syncing… ${completed}/${propLog.length}`);
-      for (const pick of missing) {
-        await apiMutate("/api/picks", "POST", pick);
-        completed += 1;
-        setSyncMessage(`Syncing… ${completed}/${propLog.length}`);
-      }
-
-      setSyncStatus("done");
-      setSyncMessage("✓ Synced");
-    } catch (_err) {
-      setPicksServerReachable(false);
-      setSyncStatus("error");
-      setSyncMessage("✗ Failed");
-    }
   };
 
   const getBookLine = (pick) => {
@@ -5805,8 +5502,6 @@ export default function App() {
             if (diff <= 1.0)   return { status: "MARKET_NEARBY",     label: "Alt Line",          color: "#f59e0b", icon: "~", diff, bookCount };
             return                    { status: "MARKET_MISMATCH",   label: "Projection Mismatch",  color: "#ef4444", icon: "⚠", diff, bookCount };
           })();
-          const overPick = { label: `${p.fullName} ${p.propType === "K" ? "Strikeouts" : "Outs"} OVER ${bookLine?.line ?? p.modelLine}`, lean: "OVER", positive: true, confidence: p.confidence, propType: p.propType, gamePk: p.gamePk };
-          const logged = propLog.some(pl => pl.gamePk === p.gamePk && pl.label === overPick.label);
           const result = liveBoardResults[p.pitcherId ?? p.playerId ?? p.id] ?? null;
           const isResolved = !!result && !result.live;
           const modelHit = isResolved && (
@@ -5815,7 +5510,6 @@ export default function App() {
               : (p.lean === "UNDER" ? result.outs < p.modelLine : result.outs > p.modelLine)
           );
           const modelSummaryRequest = buildModelSummaryRequest(p);
-          const modelSummary = getCardSummaryText(modelSummaryRequest);
           const gameStatus = (() => {
             const g = (activeSlate ?? []).find(game => (game.gamePk ?? game.id) === p.gamePk);
             const status = g?.status ?? "";
@@ -5935,11 +5629,19 @@ export default function App() {
                 )}
               </div>
 
-              {modelSummary && (
-                <div style={{ marginBottom: 6, fontSize: 10, color: "#d1d5db", lineHeight: 1.5, fontStyle: "italic" }}>
-                  {modelSummary}
-                </div>
-              )}
+              {(() => {
+                const summaryText = getCardSummaryText(modelSummaryRequest);
+                const isPremium = !!aiCardSummaries[`premium:${modelSummaryRequest?.id}`];
+                if (!summaryText) return null;
+                return (
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 4, marginBottom: 6 }}>
+                    {isPremium && (
+                      <span style={{ fontSize: 8, color: "#a78bfa", fontFamily: "monospace", fontWeight: 800, flexShrink: 0, marginTop: 1 }}>✦</span>
+                    )}
+                    <div style={{ fontSize: 10, color: "#d1d5db", lineHeight: 1.5, fontStyle: "italic" }}>{summaryText}</div>
+                  </div>
+                );
+              })()}
 
               {p.signals?.length > 0 && (
                 <div style={{ marginBottom: 6 }}>
@@ -5948,13 +5650,6 @@ export default function App() {
                   ))}
                 </div>
               )}
-
-              <button
-                onClick={() => !logged && logPick(overPick)}
-                style={{ width: "100%", fontSize: 10, fontWeight: 700, background: logged ? "rgba(34,197,94,0.12)" : "rgba(255,255,255,0.04)", border: `1px solid ${logged ? "rgba(34,197,94,0.3)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "6px", cursor: logged ? "default" : "pointer", color: logged ? "#22c55e" : "#6b7280" }}
-              >
-                {logged ? "✓ Logged" : `+ Log OVER ${bookLine?.line ?? p.modelLine}`}
-              </button>
             </div>
           );
         })}
@@ -5962,33 +5657,6 @@ export default function App() {
     );
   };
 
-  const getPickLoggedAt = (pick) => pick?.loggedAt ?? pick?.timestamp ?? "";
-  const getPickOutcome = (pick) => {
-    if (pick?.outcome) return pick.outcome;
-    if (pick?.result === "hit") return "won";
-    if (pick?.result === "miss") return "lost";
-    return "pending";
-  };
-  const isModelLog = (pick) => pick?.propType === "K" || pick?.propType === "Outs";
-  const todayStr = new Date().toLocaleDateString("en-CA");
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const todayModelLogs = propLog.filter(p => isModelLog(p) && getPickLoggedAt(p).startsWith(todayStr));
-  const todaySettledModelLogs = todayModelLogs.filter(p => {
-    const outcome = getPickOutcome(p);
-    return outcome === "won" || outcome === "lost";
-  });
-  const modelWins = todaySettledModelLogs.filter(p => getPickOutcome(p) === "won").length;
-  const modelLosses = todaySettledModelLogs.filter(p => getPickOutcome(p) === "lost").length;
-  const modelPending = todayModelLogs.filter(p => getPickOutcome(p) === "pending").length;
-  const l7SettledModelLogs = propLog.filter(p => {
-    if (!isModelLog(p)) return false;
-    const datePart = getPickLoggedAt(p).slice(0, 10);
-    const outcome = getPickOutcome(p);
-    return datePart >= sevenDaysAgo && (outcome === "won" || outcome === "lost");
-  });
-  const l7WinRate = l7SettledModelLogs.length
-    ? Math.round((l7SettledModelLogs.filter(p => getPickOutcome(p) === "won").length / l7SettledModelLogs.length) * 100)
-    : null;
   const modelBoardResolved = topSlatePicks
     .map((p) => {
       const result = liveBoardResults[p.pitcherId ?? p.playerId ?? p.id];
@@ -6092,10 +5760,6 @@ export default function App() {
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, width: isNarrowPhone ? "100%" : "auto" }}>
             <button onClick={() => setView("slate")} style={{ background: view === "slate" ? "#22c55e" : "#161827", border: `1px solid ${view === "slate" ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "slate" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Slate</button>
             <button onClick={() => setView("game")}  style={{ background: view === "game"  ? "#22c55e" : "#161827", border: `1px solid ${view === "game"  ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "game"  ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Game</button>
-            <button onClick={() => setView("picks")} style={{ position: "relative", background: view === "picks" ? "#a78bfa" : "#161827", border: `1px solid ${view === "picks" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "picks" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
-              Picks
-              {propLog.length > 0 && <span style={{ position: "absolute", top: -5, right: -5, background: "#a78bfa", color: "#000", fontSize: 8, fontWeight: 800, borderRadius: "50%", width: 14, height: 14, display: "flex", alignItems: "center", justifyContent: "center" }}>{propLog.length > 99 ? "99" : propLog.length}</span>}
-            </button>
             <button onClick={() => setView("model")} style={{ background: view === "model" ? "#fbbf24" : "#161827", border: `1px solid ${view === "model" ? "#fbbf24" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "model" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>🎯 Model</button>
             {isChatUser && (
               <button onClick={() => setView("chat")} style={{ background: view === "chat" ? "#a78bfa" : "#161827", border: `1px solid ${view === "chat" ? "#a78bfa" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "chat" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>💬 Chat</button>
@@ -6145,22 +5809,6 @@ export default function App() {
         {/* ════════════════════════════════════
             SLATE VIEW
         ════════════════════════════════════ */}
-        {/* ── Yesterday's picks reminder banner ─────────────────────────────── */}
-        {(() => {
-          const now = Date.now();
-          const stale = propLog.filter(p => !p.result && p.timestamp && (now - p.timestamp) > 12 * 60 * 60 * 1000);
-          if (stale.length === 0) return null;
-          return (
-            <div onClick={() => setView("picks")} style={{ display: "flex", alignItems: "center", gap: 10, background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.3)", borderLeft: "3px solid #fbbf24", borderRadius: 10, padding: "10px 12px", marginBottom: 12, cursor: "pointer" }}>
-              <span style={{ fontSize: 16, flexShrink: 0 }}>⏰</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#fbbf24" }}>{stale.length} pick{stale.length > 1 ? "s" : ""} need{stale.length === 1 ? "s" : ""} grading</div>
-                <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 1 }}>Tap to grade yesterday's picks →</div>
-              </div>
-            </div>
-          );
-        })()}
-
         {view === "slate" && (<>
           {/* ── Compact Model Picks summary ── */}
           {topSlatePicks.length > 0 && (
@@ -6498,27 +6146,6 @@ export default function App() {
               )}
               <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>{topSlatePicks.length} picks</span>
             </div>
-          </div>
-
-          <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "8px 12px", marginBottom: 12 }}>
-            {todayModelLogs.length === 0 ? (
-              <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace" }}>No picks logged today</div>
-            ) : (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 10, fontFamily: "monospace", alignItems: "center" }}>
-                <span style={{ color: "#6b7280" }}>Today:</span>
-                <span style={{ color: "#f9fafb", fontWeight: 800 }}>{modelWins}-{modelLosses}-{modelPending}</span>
-                {l7WinRate !== null && (
-                  <>
-                    <span style={{ color: "#4b5563" }}>|</span>
-                    <span style={{ color: "#6b7280" }}>L7:</span>
-                    <span style={{ color: "#f9fafb", fontWeight: 800 }}>{l7WinRate}%</span>
-                  </>
-                )}
-                <span style={{ color: "#4b5563" }}>|</span>
-                <span style={{ color: "#6b7280" }}>Pending:</span>
-                <span style={{ color: "#f9fafb", fontWeight: 800 }}>{modelPending}</span>
-              </div>
-            )}
           </div>
 
           {topSlatePicks.length > 0 ? (
@@ -6951,14 +6578,6 @@ export default function App() {
               {activeLabData?.games?.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {isLabTotals ? activeLabData.games.map((g) => {
-                    const labPickLabel = `${g.away?.abbr ?? "?"}@${g.home?.abbr ?? "?"} Total ${g.model?.lean ?? "—"} ${g.model?.bookTotal ?? "—"}`;
-                    const labPickDate = activeLabData?.date ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
-                    const labPickLogged = propLog.some(p =>
-                      String(p.gamePk) === String(g.gamePk) &&
-                      p.label === labPickLabel &&
-                      p.propType === "LAB_TOTALS" &&
-                      p.date === labPickDate
-                    );
                     const labBox = liveBoxscores[String(g.gamePk)];
                     const labGrade = computeLabTotalsGrade({
                       leanSide: g.model?.lean,
@@ -7030,38 +6649,6 @@ export default function App() {
                               <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
                               <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>{edgeLabel}</div>
                             </div>
-                            <button
-                              onClick={() => !labPickLogged && logPick({
-                                gamePk: g.gamePk,
-                                game: `${g.away?.abbr} @ ${g.home?.abbr}`,
-                                label: labPickLabel,
-                                lean: g.model?.lean ?? "—",
-                                confidence: Math.round((g.model?.leanProb ?? 0) * 100),
-                                propType: "LAB_TOTALS",
-                                date: labPickDate,
-                                leanSide: g.model?.lean ?? null,
-                                bookTotal: g.model?.bookTotal ?? null,
-                                homeTeam: g.home?.abbr ?? null,
-                                awayTeam: g.away?.abbr ?? null,
-                              })}
-                              title={labPickLogged ? "Already logged" : "Log this Lab pick"}
-                              disabled={labPickLogged}
-                              style={{
-                                fontSize: 11,
-                                fontWeight: 700,
-                                background: labPickLogged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
-                                border: `1px solid ${labPickLogged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
-                                borderRadius: 8,
-                                padding: "6px 10px",
-                                cursor: labPickLogged ? "default" : "pointer",
-                                color: labPickLogged ? "#22c55e" : "#9ca3af",
-                                fontFamily: "monospace",
-                                minWidth: 110,
-                                textAlign: "center",
-                              }}
-                            >
-                              {labPickLogged ? "✓ Logged" : "＋ Log"}
-                            </button>
                           </div>
                         </div>
                       </Card>
@@ -7073,14 +6660,6 @@ export default function App() {
                     ]
                       .filter(({ kProp }) => kProp != null)
                       .map(({ side, pitcher, kProp, oppTeam }) => {
-                        const labPickLabel = `${pitcher?.name ?? "Unknown"} K ${kProp?.lean ?? "—"} ${kProp?.bookLine ?? "—"}`;
-                        const labPickDate = activeLabData?.date ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
-                        const labPickLogged = propLog.some(p =>
-                          String(p.gamePk) === String(g.gamePk) &&
-                          p.label === labPickLabel &&
-                          p.propType === "LAB_KPROP" &&
-                          p.date === labPickDate
-                        );
                         const labBox = liveBoxscores[String(g.gamePk)];
                         const labGrade = computeLabKPropGrade({
                           leanSide: kProp?.lean,
@@ -7155,41 +6734,6 @@ export default function App() {
                                   <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
                                   <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>{edgeLabel}</div>
                                 </div>
-                                <button
-                                  onClick={() => !labPickLogged && logPick({
-                                    gamePk: g.gamePk,
-                                    game: `${g.away?.abbr} @ ${g.home?.abbr}`,
-                                    label: labPickLabel,
-                                    lean: kProp?.lean ?? "—",
-                                    confidence: Math.round((kProp?.leanProb ?? 0) * 100),
-                                    propType: "LAB_KPROP",
-                                    date: labPickDate,
-                                    pitcherName: pitcher?.name ?? null,
-                                    pitcherLastName: String(pitcher?.name ?? "").split(" ").pop(),
-                                    pitcherSide: side,
-                                    leanSide: kProp?.lean ?? null,
-                                    bookLine: kProp?.bookLine ?? null,
-                                    homeTeam: g.home?.abbr ?? null,
-                                    awayTeam: g.away?.abbr ?? null,
-                                  })}
-                                  title={labPickLogged ? "Already logged" : "Log this Lab pick"}
-                                  disabled={labPickLogged}
-                                  style={{
-                                    fontSize: 11,
-                                    fontWeight: 700,
-                                    background: labPickLogged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
-                                    border: `1px solid ${labPickLogged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
-                                    borderRadius: 8,
-                                    padding: "6px 10px",
-                                    cursor: labPickLogged ? "default" : "pointer",
-                                    color: labPickLogged ? "#22c55e" : "#9ca3af",
-                                    fontFamily: "monospace",
-                                    minWidth: 110,
-                                    textAlign: "center",
-                                  }}
-                                >
-                                  {labPickLogged ? "✓ Logged" : "＋ Log"}
-                                </button>
                               </div>
                             </div>
                           </Card>
@@ -7199,15 +6743,6 @@ export default function App() {
                   }) : activeLabData.games.map((g) => {
                     const leanIsHome = g.model?.leanSide === "home";
                     const leanTeam = leanIsHome ? g.home : g.away;
-                    const labPickLabel = `${leanTeam?.abbr ?? "?"} ${isLabF5 ? "F5 ML" : "FG ML"}`;
-                    const labPickType = isLabF5 ? "LAB_F5ML" : "LAB_FGML";
-                    const labPickDate = activeLabData?.date ?? new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
-                    const labPickLogged = propLog.some(p =>
-                      String(p.gamePk) === String(g.gamePk) &&
-                      p.label === labPickLabel &&
-                      p.propType === labPickType &&
-                      p.date === labPickDate
-                    );
                     const bookLine = isLabF5
                       ? (leanIsHome ? g.odds?.f5HomeML : g.odds?.f5AwayML)
                       : (leanIsHome ? g.odds?.homeML : g.odds?.awayML);
@@ -7320,36 +6855,6 @@ export default function App() {
                               <div style={{ fontSize: 16, fontWeight: 900, color: "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{modelProbPct}</div>
                               <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", marginTop: 3 }}>Book {bookProbPct} · {bookLine ?? "—"}</div>
                             </div>
-                            <button
-                              onClick={() => !labPickLogged && logPick({
-                                gamePk: g.gamePk,
-                                game: `${g.away?.abbr} @ ${g.home?.abbr}`,
-                                label: labPickLabel,
-                                lean: g.model?.leanSide?.toUpperCase() ?? "—",
-                                confidence: Math.round(((g.model?.leanSide === "home" ? g.model?.homeProb : g.model?.awayProb) ?? 0) * 100),
-                                propType: labPickType,
-                                date: labPickDate,
-                                homeTeam: g.home?.abbr ?? null,
-                                awayTeam: g.away?.abbr ?? null,
-                              })}
-                              title={labPickLogged ? "Already logged" : "Log this Lab pick"}
-                              disabled={labPickLogged}
-                              style={{
-                                fontSize: 11,
-                                fontWeight: 700,
-                                background: labPickLogged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)",
-                                border: `1px solid ${labPickLogged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`,
-                                borderRadius: 8,
-                                padding: "6px 10px",
-                                cursor: labPickLogged ? "default" : "pointer",
-                                color: labPickLogged ? "#22c55e" : "#9ca3af",
-                                fontFamily: "monospace",
-                                minWidth: 110,
-                                textAlign: "center",
-                              }}
-                            >
-                              {labPickLogged ? "✓ Logged" : "＋ Log"}
-                            </button>
                             <div style={{ fontSize: 11, fontWeight: 800, color: edgeColor, fontFamily: "monospace" }}>{edgeLabel}</div>
                             <div style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace", textAlign: "right" }}>
                               {g.away?.abbr} {awayProbPct} / {g.home?.abbr} {homeProbPct}
@@ -7735,7 +7240,7 @@ export default function App() {
               </div>
               <div style={{ textAlign: "center", padding: "0 8px" }}>
                 <div style={{ fontSize: 11, color: "#374151", fontWeight: 700 }}>@</div>
-                <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>{game.time}</div>
+                <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>{formatLocalTime(game.gameTime) ?? game.time}</div>
               </div>
               <div style={{ textAlign: "center", flex: 1 }}>
                 <div style={{ fontSize: 24, fontWeight: 800, color: "#f9fafb" }}>{game.home.abbr}</div>
@@ -8230,27 +7735,9 @@ export default function App() {
             {/* ── First Inning Tendencies ── */}
             <SLabel>First Inning Tendencies</SLabel>
             <Card>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <LeanBadge label={`${nrfi.lean} ${nrfi.confidence}%`} positive={nrfi.lean === "NRFI"} />
-                  {nrfi.live && <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>}
-                </div>
-                {(() => {
-                  const nrfiLogged = propLog.some(p => p.gamePk === selectedId && p.propType === "NRFI");
-                  return (
-                    <button
-                      onClick={() => !nrfiLogged && logPick({
-                        label:      `NRFI · ${game.away.abbr} @ ${game.home.abbr}`,
-                        lean:       nrfi.lean,
-                        confidence: nrfi.confidence,
-                        propType:   "NRFI",
-                      })}
-                      title={nrfiLogged ? "Already logged" : "Log this pick"}
-                      style={{ background: nrfiLogged ? "rgba(34,197,94,0.12)" : "rgba(167,139,250,0.1)", border: `1px solid ${nrfiLogged ? "rgba(34,197,94,0.3)" : "rgba(167,139,250,0.3)"}`, borderRadius: 6, padding: "3px 8px", fontSize: 11, color: nrfiLogged ? "#22c55e" : "#a78bfa", cursor: nrfiLogged ? "default" : "pointer", fontWeight: 700, lineHeight: 1 }}>
-                      {nrfiLogged ? "✓" : "＋"}
-                    </button>
-                  );
-                })()}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <LeanBadge label={`${nrfi.lean} ${nrfi.confidence}%`} positive={nrfi.lean === "NRFI"} />
+                {nrfi.live && <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4, padding: "2px 6px" }}>LIVE</span>}
               </div>
               {(nrfi.awayFirst?.avgRuns !== undefined || nrfi.liveTendency) && (
                 <div style={{ fontSize: 10, color: "#9ca3af", background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.15)", borderRadius: 6, padding: "6px 10px", marginBottom: 10, lineHeight: 1.5 }}>
@@ -9255,7 +8742,6 @@ export default function App() {
 
                 return merged.map((entry, i) => {
                   const p = entry.kind === "ai" ? entry.ai : entry.algo;
-                  const logged = isLogged(p);
                   const inParlay = parlayLabels.includes(p.label);
                   const parlayFull = parlayLabels.length >= 3 && !inParlay;
                   const bothAgree = entry.kind === "dual" && entry.algo.lean === entry.ai.lean;
@@ -9282,12 +8768,6 @@ export default function App() {
                             onClick={() => { if (parlayFull) return; setParlayLabels(prev => inParlay ? prev.filter(l => l !== p.label) : [...prev, p.label]); }}
                             title={parlayFull ? "Max 3 legs" : inParlay ? "Remove from parlay" : "Add to parlay"}
                             style={{ fontSize: 10, fontWeight: 700, background: inParlay ? "rgba(251,191,36,0.15)" : "rgba(255,255,255,0.04)", border: `1px solid ${inParlay ? "rgba(251,191,36,0.5)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 6px", cursor: parlayFull ? "default" : "pointer", color: inParlay ? "#fbbf24" : "#4b5563", opacity: parlayFull ? 0.35 : 1, lineHeight: 1 }}>🔗</button>
-                          <button
-                            onClick={() => !logged && logPick(p)}
-                            title={logged ? "Already logged" : "Log this pick"}
-                            style={{ fontSize: 13, background: logged ? "rgba(34,197,94,0.15)" : "rgba(255,255,255,0.05)", border: `1px solid ${logged ? "rgba(34,197,94,0.4)" : "rgba(255,255,255,0.08)"}`, borderRadius: 6, padding: "3px 7px", cursor: logged ? "default" : "pointer", color: logged ? "#22c55e" : "#6b7280", transition: "all 0.15s", lineHeight: 1 }}>
-                            {logged ? "✓" : "＋"}
-                          </button>
                         </div>
                       </div>
 
@@ -9479,13 +8959,6 @@ export default function App() {
                                 const rowKey         = `${mKey}:${p.player}`;
                                 const isExpanded     = expandedPropRow === rowKey;
                                 const scratchedRow   = lineupScratchNames.has(normalizeScratchName(p.player));
-                                const lastName       = p.player.split(" ").slice(-1)[0];
-                                const overLabel      = `${lastName} OVER ${p.line} ${badge}`;
-                                const underLabel     = `${lastName} UNDER ${p.line} ${badge}`;
-                                const overPick       = { label: overLabel,  lean: "OVER",  positive: true,  confidence: null, propType: badge };
-                                const underPick      = { label: underLabel, lean: "UNDER", positive: false, confidence: null, propType: badge };
-                                const overLogged     = isLogged(overPick);
-                                const underLogged    = isLogged(underPick);
 
                                 // Line discrepancy detection
                                 const availLines     = allActiveBooks.map(bk => books[bk]?.line).filter(Boolean);
@@ -9627,20 +9100,6 @@ export default function App() {
                                             Current confirmed lineup removed this batter. Confidence is reduced and this prop may no longer be actionable.
                                           </div>
                                         )}
-
-                                        {/* Log buttons */}
-                                        <div style={{ display: "flex", gap: 6 }}>
-                                          <button
-                                            onClick={() => !overLogged && logPick(overPick)}
-                                            style={{ flex: 1, fontSize: 10, fontWeight: 700, background: overLogged ? "rgba(34,197,94,0.15)" : "rgba(34,197,94,0.08)", border: `1px solid ${overLogged ? "rgba(34,197,94,0.5)" : "rgba(34,197,94,0.2)"}`, borderRadius: 8, padding: "7px", cursor: overLogged ? "default" : "pointer", color: overLogged ? "#22c55e" : "#6b7280", lineHeight: 1 }}>
-                                            {overLogged ? "✓ OVER logged" : `OVER ${p.line} ${badge}  ${fmtO(p.overOdds)}`}
-                                          </button>
-                                          <button
-                                            onClick={() => !underLogged && logPick(underPick)}
-                                            style={{ flex: 1, fontSize: 10, fontWeight: 700, background: underLogged ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.08)", border: `1px solid ${underLogged ? "rgba(239,68,68,0.5)" : "rgba(239,68,68,0.2)"}`, borderRadius: 8, padding: "7px", cursor: underLogged ? "default" : "pointer", color: underLogged ? "#ef4444" : "#6b7280", lineHeight: 1 }}>
-                                            {underLogged ? "✓ UNDER logged" : `UNDER ${p.line} ${badge}  ${fmtO(p.underOdds)}`}
-                                          </button>
-                                        </div>
                                       </div>
                                     )}
                                   </div>
@@ -9919,680 +9378,6 @@ export default function App() {
           {/* ── END BOXSCORE TAB ─────────────────────────────── */}
 
         </>)}
-
-        {/* ════════════════════════════════════
-            PICKS VIEW
-        ════════════════════════════════════ */}
-        {view === "picks" && (() => {
-          const renderPickStatusBadge = (pick) => {
-            const status = getPickStatus(pick);
-            if (pick.result === "hit") {
-              return (
-                <span style={{ fontSize: 9, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>✓ HIT</span>
-              );
-            }
-            if (pick.result === "miss") {
-              return (
-                <span style={{ fontSize: 9, fontWeight: 800, color: "#ef4444", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>✗ MISS</span>
-              );
-            }
-            if (status === "live") {
-              return (
-                <span style={{ fontSize: 9, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>● LIVE</span>
-              );
-            }
-            return (
-              <span style={{ fontSize: 9, fontWeight: 800, color: "#fbbf24", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.35)", borderRadius: 6, padding: "3px 8px", fontFamily: "monospace" }}>PENDING</span>
-            );
-          };
-
-          const hits    = propLog.filter(p => p.result === "hit").length;
-          const misses  = propLog.filter(p => p.result === "miss").length;
-          const pending = propLog.filter(isPickUnsettled).length;
-          const graded  = hits + misses;
-          const pct     = graded > 0 ? Math.round((hits / graded) * 100) : null;
-
-          const filtered = propLog.filter(p =>
-            picksFilter === "all"     ? true :
-            picksFilter === "pending" ? isPickUnsettled(p) :
-            picksFilter === "hit"     ? p.result === "hit" :
-            picksFilter === "miss"    ? p.result === "miss" : true
-          );
-          const labPicks = filtered
-            .filter(p => ["LAB_F5ML", "LAB_FGML", "LAB_KPROP", "LAB_TOTALS"].includes(p.propType))
-            .sort((a, b) => new Date(b.timestamp ?? 0).getTime() - new Date(a.timestamp ?? 0).getTime());
-          const standardFiltered = filtered.filter(p => !["LAB_F5ML", "LAB_FGML", "LAB_KPROP", "LAB_TOTALS"].includes(p.propType));
-          const hasAnyLabPicks = propLog.some(p => ["LAB_F5ML", "LAB_FGML", "LAB_KPROP", "LAB_TOTALS"].includes(p.propType));
-
-          return (<>
-            {/* Stats bar */}
-            <Card style={{ marginBottom: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>My Pick Log</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  {propLog.length > 0 && picksServerReachable && (
-                    <button
-                      onClick={syncPicksToServer}
-                      disabled={syncStatus === "syncing"}
-                      style={{
-                        background: syncStatus === "syncing" ? "#161827" : "rgba(56,189,248,0.12)",
-                        border: `1px solid ${syncStatus === "error" ? "rgba(239,68,68,0.35)" : "rgba(56,189,248,0.35)"}`,
-                        borderRadius: 999,
-                        padding: "4px 9px",
-                        fontSize: 10,
-                        fontWeight: 800,
-                        color: syncStatus === "error" ? "#ef4444" : "#38bdf8",
-                        cursor: syncStatus === "syncing" ? "default" : "pointer",
-                        opacity: syncStatus === "syncing" ? 0.75 : 1,
-                      }}
-                    >
-                      ☁ Sync to server
-                    </button>
-                  )}
-                  {syncMessage && (
-                    <div style={{ fontSize: 10, fontWeight: 700, color: syncStatus === "error" ? "#ef4444" : syncStatus === "done" ? "#22c55e" : "#9ca3af" }}>{syncMessage}</div>
-                  )}
-                  {pct !== null && (
-                    <div style={{ fontSize: 12, fontWeight: 700, color: pct >= 55 ? "#22c55e" : pct >= 45 ? "#f9fafb" : "#ef4444" }}>{pct}% accuracy</div>
-                  )}
-                </div>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
-                {[
-                  { label: "Total",   value: propLog.length, color: "#9ca3af" },
-                  { label: "Pending", value: pending,         color: "#f59e0b" },
-                  { label: "Hits",    value: hits,            color: "#22c55e" },
-                  { label: "Misses",  value: misses,          color: "#ef4444" },
-                ].map(s => (
-                  <div key={s.label} style={{ background: "#1e2030", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
-                    <div style={{ fontSize: 16, fontWeight: 800, color: s.color }}>{s.value}</div>
-                    <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 2 }}>{s.label}</div>
-                  </div>
-                ))}
-              </div>
-              {graded > 0 && (
-                <div style={{ marginTop: 8, height: 4, background: "#1e2030", borderRadius: 2, overflow: "hidden" }}>
-                  <div style={{ width: `${pct}%`, height: "100%", background: pct >= 55 ? "#22c55e" : pct >= 45 ? "#f59e0b" : "#ef4444", borderRadius: 2, transition: "width 0.4s" }} />
-                </div>
-              )}
-
-              {/* ── ROI row ── */}
-              {graded > 0 && (() => {
-                // Flat -110 assumption: win returns +0.909u, loss costs -1u
-                const netUnits   = hits * 0.909 - misses;
-                const roiPct     = ((netUnits / graded) * 100).toFixed(1);
-                const netColor   = netUnits > 0 ? "#22c55e" : netUnits < 0 ? "#ef4444" : "#9ca3af";
-                const netLabel   = `${netUnits >= 0 ? "+" : ""}${netUnits.toFixed(1)}u`;
-
-                // Best prop type — highest hit rate with ≥3 graded picks
-                const getPropType = (p) => {
-                  if (p.propType) return p.propType;
-                  const lbl = p.label || "";
-                  if (/\bK\b|strikeout/i.test(lbl)) return "K";
-                  if (/\bNRFI\b/i.test(lbl))        return "NRFI";
-                  if (/\bHR\b|home run/i.test(lbl)) return "HR";
-                  if (/\bRBI\b/i.test(lbl))         return "RBI";
-                  if (/TB|total base/i.test(lbl))   return "TB";
-                  if (/hit/i.test(lbl))              return "Hits";
-                  return "Other";
-                };
-                const typeMap = {};
-                propLog.filter(p => p.result !== null).forEach(p => {
-                  const t = getPropType(p);
-                  if (!typeMap[t]) typeMap[t] = { h: 0, tot: 0 };
-                  typeMap[t].tot++;
-                  if (p.result === "hit") typeMap[t].h++;
-                });
-                const bestType = Object.entries(typeMap)
-                  .filter(([, v]) => v.tot >= 3)
-                  .sort(([, a], [, b]) => (b.h / b.tot) - (a.h / a.tot))[0];
-
-                return (
-                  <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "stretch" }}>
-                    {/* Net units — big number */}
-                    <div style={{ flex: 1, background: `${netColor}10`, border: `1px solid ${netColor}30`, borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
-                      <div style={{ fontSize: 22, fontWeight: 900, color: netColor, fontFamily: "monospace", lineHeight: 1 }}>{netLabel}</div>
-                      <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 4, letterSpacing: "0.06em" }}>Net units</div>
-                      <div style={{ fontSize: 8, color: "#4b5563", marginTop: 2 }}>at −110</div>
-                    </div>
-
-                    {/* ROI % */}
-                    <div style={{ flex: 1, background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
-                      <div style={{ fontSize: 22, fontWeight: 900, color: parseFloat(roiPct) >= 0 ? "#22c55e" : "#ef4444", fontFamily: "monospace", lineHeight: 1 }}>{roiPct}%</div>
-                      <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 4, letterSpacing: "0.06em" }}>ROI</div>
-                      <div style={{ fontSize: 8, color: "#4b5563", marginTop: 2 }}>{graded} graded</div>
-                    </div>
-
-                    {/* Best prop type */}
-                    <div style={{ flex: 1, background: "#161827", border: "1px solid #1f2437", borderRadius: 10, padding: "10px 12px", textAlign: "center" }}>
-                      {bestType ? (<>
-                        <div style={{ fontSize: 16, fontWeight: 900, color: "#a78bfa", fontFamily: "monospace", lineHeight: 1 }}>{bestType[0]}</div>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "#22c55e", marginTop: 2 }}>{Math.round((bestType[1].h / bestType[1].tot) * 100)}%</div>
-                        <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 2, letterSpacing: "0.06em" }}>Best type</div>
-                      </>) : (<>
-                        <div style={{ fontSize: 14, fontWeight: 700, color: "#4b5563", lineHeight: 1 }}>—</div>
-                        <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 6, letterSpacing: "0.06em" }}>Best type</div>
-                        <div style={{ fontSize: 8, color: "#4b5563", marginTop: 2 }}>need 3+ per type</div>
-                      </>)}
-                    </div>
-                  </div>
-                );
-              })()}
-            </Card>
-
-            {/* ── TRENDS ───────────────────────────────────── */}
-            {(() => {
-              const graded2 = propLog.filter(p => p.result !== null);
-              if (graded2.length === 0) return null;
-
-              // ── propType resolver: structured field first, regex fallback for old picks ──
-              const getPropType = (p) => {
-                if (p.propType) return p.propType;
-                const lbl = p.label || "";
-                if (/\bK\b|strikeout/i.test(lbl))   return "K";
-                if (/\bHR\b|home run/i.test(lbl))   return "HR";
-                if (/\bRBI\b/i.test(lbl))           return "RBI";
-                if (/TB|total base/i.test(lbl))     return "TB";
-                if (/hit/i.test(lbl))               return "Hits";
-                return "Other";
-              };
-
-              // ── By prop type ───────────────────────────────
-              const typeGroups = { K: [], Hits: [], TB: [], HR: [], RBI: [], Other: [] };
-              graded2.forEach(p => {
-                const t = getPropType(p);
-                (typeGroups[t] ?? typeGroups.Other).push(p);
-              });
-              const typeStats = Object.entries(typeGroups)
-                .filter(([, arr]) => arr.length > 0)
-                .map(([type, arr]) => {
-                  const h = arr.filter(p => p.result === "hit").length;
-                  return { type, total: arr.length, hits: h, pct: Math.round((h / arr.length) * 100) };
-                });
-
-              // ── By confidence tier ─────────────────────────
-              const tierGroups = { High: [], Mid: [], Low: [] };
-              graded2.forEach(p => {
-                const c = p.confidence ?? 0;
-                if      (c >= 65) tierGroups.High.push(p);
-                else if (c >= 50) tierGroups.Mid.push(p);
-                else              tierGroups.Low.push(p);
-              });
-              const tierStats = Object.entries(tierGroups)
-                .filter(([, arr]) => arr.length > 0)
-                .map(([tier, arr]) => {
-                  const h = arr.filter(p => p.result === "hit").length;
-                  return { tier, total: arr.length, hits: h, pct: Math.round((h / arr.length) * 100) };
-                });
-
-              // ── Recent form: last 10 vs all-time ──────────
-              const last10 = graded2.slice(0, 10);
-              const last10Hits = last10.filter(p => p.result === "hit").length;
-              const last10Pct  = last10.length > 0 ? Math.round((last10Hits / last10.length) * 100) : null;
-              const allPct     = graded2.length  > 0 ? Math.round((graded2.filter(p => p.result === "hit").length / graded2.length) * 100) : null;
-              const formDelta  = last10Pct !== null && allPct !== null ? last10Pct - allPct : null;
-
-              // ── Current streak ────────────────────────────
-              let streakCount = 0, streakType = null;
-              for (const p of graded2) {
-                if (streakType === null) { streakType = p.result; streakCount = 1; }
-                else if (p.result === streakType) streakCount++;
-                else break;
-              }
-
-              const trendAccColor = (pct) => pct >= 60 ? "#22c55e" : pct >= 45 ? "#f59e0b" : "#ef4444";
-
-              return (
-                <div style={{ marginBottom: 12 }}>
-                  {/* Header row — collapsible */}
-                  <button
-                    onClick={() => setShowTrends(s => !s)}
-                    style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#161827", border: "1px solid #1f2437", borderRadius: showTrends ? "8px 8px 0 0" : 8, padding: "8px 12px", cursor: "pointer", marginBottom: 0 }}>
-                    <span style={{ fontSize: 10, fontWeight: 800, color: "#a78bfa", textTransform: "uppercase", letterSpacing: "0.05em" }}>📈 Trends</span>
-                    <span style={{ fontSize: 9, color: "#4b5563" }}>{showTrends ? "▲ hide" : "▼ show"}</span>
-                  </button>
-
-                  {showTrends && (
-                    <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "10px 12px" }}>
-
-                      {/* Recent form + streak row */}
-                      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                        {/* Recent form */}
-                        <div style={{ flex: 1, background: "#161827", borderRadius: 8, padding: "8px 10px" }}>
-                          <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginBottom: 4 }}>Last 10</div>
-                          <div style={{ display: "flex", gap: 3, marginBottom: 4 }}>
-                            {last10.map((p, i) => (
-                              <div key={i} style={{ flex: 1, height: 6, borderRadius: 2, background: p.result === "hit" ? "#22c55e" : "#ef4444" }} />
-                            ))}
-                            {/* empty slots */}
-                            {Array.from({ length: Math.max(0, 10 - last10.length) }).map((_, i) => (
-                              <div key={`e${i}`} style={{ flex: 1, height: 6, borderRadius: 2, background: "#1e2030" }} />
-                            ))}
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                            <span style={{ fontSize: 14, fontWeight: 800, color: last10Pct !== null ? trendAccColor(last10Pct) : "#6b7280" }}>
-                              {last10Pct !== null ? `${last10Pct}%` : "—"}
-                            </span>
-                            {formDelta !== null && (
-                              <span style={{ fontSize: 9, color: formDelta > 0 ? "#22c55e" : formDelta < 0 ? "#ef4444" : "#6b7280" }}>
-                                {formDelta > 0 ? `▲ +${formDelta}` : formDelta < 0 ? `▼ ${formDelta}` : "= flat"} vs all-time
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Current streak */}
-                        <div style={{ flex: 1, background: "#161827", borderRadius: 8, padding: "8px 10px" }}>
-                          <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginBottom: 4 }}>Streak</div>
-                          <div style={{ fontSize: 22, fontWeight: 900, color: streakType === "hit" ? "#22c55e" : streakType === "miss" ? "#ef4444" : "#6b7280", lineHeight: 1.1 }}>
-                            {streakType ? `${streakCount}` : "—"}
-                          </div>
-                          <div style={{ fontSize: 9, color: streakType === "hit" ? "#22c55e" : streakType === "miss" ? "#ef4444" : "#6b7280", marginTop: 2 }}>
-                            {streakType === "hit" ? `HIT${streakCount > 1 ? "S" : ""} in a row` : streakType === "miss" ? `MISS${streakCount > 1 ? "ES" : ""} in a row` : "no data"}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* By prop type */}
-                      {typeStats.length > 0 && (
-                        <div style={{ marginBottom: 8 }}>
-                          <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginBottom: 5 }}>By Prop Type</div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            {typeStats.map(({ type, total, hits, pct }) => (
-                              <div key={type} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                <div style={{ fontSize: 9, fontWeight: 700, color: "#9ca3af", width: 32, flexShrink: 0 }}>{type}</div>
-                                <div style={{ flex: 1, height: 6, background: "#1e2030", borderRadius: 3, overflow: "hidden" }}>
-                                  <div style={{ width: `${pct}%`, height: "100%", background: trendAccColor(pct), borderRadius: 3 }} />
-                                </div>
-                                <div style={{ fontSize: 9, fontWeight: 700, color: trendAccColor(pct), width: 28, textAlign: "right", flexShrink: 0 }}>{pct}%</div>
-                                <div style={{ fontSize: 8, color: "#4b5563", width: 28, flexShrink: 0 }}>{hits}/{total}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* By confidence tier + calibration insight */}
-                      {tierStats.length > 0 && (
-                        <div style={{ marginBottom: 8 }}>
-                          <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginBottom: 5 }}>By Confidence</div>
-                          <div style={{ display: "flex", gap: 6, marginBottom: 7 }}>
-                            {tierStats.map(({ tier, total, hits, pct }) => {
-                              const tierColor = tier === "High" ? "#a78bfa" : tier === "Mid" ? "#f59e0b" : "#6b7280";
-                              return (
-                                <div key={tier} style={{ flex: 1, background: "#161827", borderRadius: 8, padding: "7px 8px", textAlign: "center" }}>
-                                  <div style={{ fontSize: 8, color: tierColor, textTransform: "uppercase", marginBottom: 3 }}>{tier}</div>
-                                  <div style={{ fontSize: 14, fontWeight: 800, color: trendAccColor(pct) }}>{pct}%</div>
-                                  <div style={{ fontSize: 8, color: "#4b5563", marginTop: 2 }}>{hits}/{total}</div>
-                                </div>
-                              );
-                            })}
-                          </div>
-
-                          {/* Confidence calibration insight */}
-                          {(() => {
-                            const highStat = tierStats.find(t => t.tier === "High");
-                            const midStat  = tierStats.find(t => t.tier === "Mid");
-                            const lowStat  = tierStats.find(t => t.tier === "Low");
-                            // Need at least two tiers with enough picks to say anything meaningful
-                            const tiersWithData = [highStat, midStat, lowStat].filter(t => t && t.total >= 3);
-                            if (tiersWithData.length < 2) return (
-                              <div style={{ fontSize: 9, color: "#374151", fontStyle: "italic", textAlign: "center" }}>
-                                Log more graded picks to see calibration data
-                              </div>
-                            );
-                            // Check if confidence is predictive: High > Mid and/or High > Low
-                            const highPct = highStat?.total >= 3 ? highStat.pct : null;
-                            const midPct  = midStat?.total  >= 3 ? midStat.pct  : null;
-                            const lowPct  = lowStat?.total  >= 3 ? lowStat.pct  : null;
-                            const highBeatsOthers = (
-                              (highPct !== null && midPct !== null && highPct > midPct) ||
-                              (highPct !== null && lowPct  !== null && highPct > lowPct)
-                            );
-                            const inverted = highPct !== null && midPct !== null && highPct < midPct - 10;
-                            if (inverted) return (
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 6, padding: "6px 8px" }}>
-                                <span style={{ fontSize: 12 }}>⚠️</span>
-                                <div>
-                                  <div style={{ fontSize: 9, fontWeight: 700, color: "#ef4444" }}>Confidence not predictive</div>
-                                  <div style={{ fontSize: 8, color: "#6b7280" }}>High picks hitting less than Mid — recalibrate your lean threshold</div>
-                                </div>
-                              </div>
-                            );
-                            if (highBeatsOthers) return (
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(167,139,250,0.07)", border: "1px solid rgba(167,139,250,0.2)", borderRadius: 6, padding: "6px 8px" }}>
-                                <span style={{ fontSize: 12 }}>✅</span>
-                                <div>
-                                  <div style={{ fontSize: 9, fontWeight: 700, color: "#a78bfa" }}>Confidence is predictive</div>
-                                  <div style={{ fontSize: 8, color: "#6b7280" }}>High-confidence picks are outperforming — trust your edges</div>
-                                </div>
-                              </div>
-                            );
-                            return (
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(251,191,36,0.07)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 6, padding: "6px 8px" }}>
-                                <span style={{ fontSize: 12 }}>📊</span>
-                                <div>
-                                  <div style={{ fontSize: 9, fontWeight: 700, color: "#f59e0b" }}>Calibration unclear</div>
-                                  <div style={{ fontSize: 8, color: "#6b7280" }}>Tiers hitting at similar rates — keep logging for signal</div>
-                                </div>
-                              </div>
-                            );
-                          })()}
-                        </div>
-                      )}
-
-                      {/* ── TRENDS FULL sections (enriched picks only) ── */}
-                      {(() => {
-                        // Only show Full sections when enough enriched picks exist (propType set)
-                        const enriched = graded2.filter(p => p.propType);
-                        if (enriched.length < 2) return null;
-
-                        // ── By Batter (Hits + TB props with playerName) ─
-                        const batterPicks = enriched.filter(p => (p.propType === "Hits" || p.propType === "TB" || p.propType === "HR" || p.propType === "RBI") && p.playerName);
-                        const batterMap = {};
-                        batterPicks.forEach(p => {
-                          if (!batterMap[p.playerName]) batterMap[p.playerName] = [];
-                          batterMap[p.playerName].push(p);
-                        });
-                        const batterStats = Object.entries(batterMap)
-                          .filter(([, arr]) => arr.length >= 2)
-                          .map(([name, arr]) => {
-                            const h = arr.filter(p => p.result === "hit").length;
-                            return { name, total: arr.length, hits: h, pct: Math.round((h / arr.length) * 100) };
-                          })
-                          .sort((a, b) => b.total - a.total);
-
-                        // ── K prop by Pitcher ──────────────────────────
-                        const kPicks = enriched.filter(p => p.propType === "K" && p.pitcherName);
-                        const pitcherMap = {};
-                        kPicks.forEach(p => {
-                          if (!pitcherMap[p.pitcherName]) pitcherMap[p.pitcherName] = [];
-                          pitcherMap[p.pitcherName].push(p);
-                        });
-                        const pitcherStats = Object.entries(pitcherMap)
-                          .filter(([, arr]) => arr.length >= 2)
-                          .map(([name, arr]) => {
-                            const h = arr.filter(p => p.result === "hit").length;
-                            return { name, total: arr.length, hits: h, pct: Math.round((h / arr.length) * 100) };
-                          })
-                          .sort((a, b) => b.total - a.total);
-
-                        // ── K prop by Park (homeTeam = venue) ─────────
-                        const kParkPicks = enriched.filter(p => p.propType === "K" && p.homeTeam);
-                        const parkMap = {};
-                        kParkPicks.forEach(p => {
-                          if (!parkMap[p.homeTeam]) parkMap[p.homeTeam] = [];
-                          parkMap[p.homeTeam].push(p);
-                        });
-                        const parkStats = Object.entries(parkMap)
-                          .filter(([, arr]) => arr.length >= 2)
-                          .map(([park, arr]) => {
-                            const h = arr.filter(p => p.result === "hit").length;
-                            return { park, total: arr.length, hits: h, pct: Math.round((h / arr.length) * 100) };
-                          })
-                          .sort((a, b) => b.total - a.total);
-
-                        // Shared row renderer for name + bar + pct + fraction
-                        const FullRow = ({ label, pct, hits, total }) => (
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <div style={{ fontSize: 9, fontWeight: 700, color: "#9ca3af", flex: "0 0 90px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                                 title={label}>{label}</div>
-                            <div style={{ flex: 1, height: 6, background: "#1e2030", borderRadius: 3, overflow: "hidden" }}>
-                              <div style={{ width: `${pct}%`, height: "100%", background: trendAccColor(pct), borderRadius: 3 }} />
-                            </div>
-                            <div style={{ fontSize: 9, fontWeight: 700, color: trendAccColor(pct), width: 28, textAlign: "right", flexShrink: 0 }}>{pct}%</div>
-                            <div style={{ fontSize: 8, color: "#4b5563", width: 28, flexShrink: 0 }}>{hits}/{total}</div>
-                          </div>
-                        );
-
-                        return (<>
-                          {/* Divider */}
-                          <div style={{ height: 1, background: "#1f2437", margin: "4px 0 10px" }} />
-
-                          {/* By Batter */}
-                          {batterStats.length > 0 && (
-                            <div style={{ marginBottom: 10 }}>
-                              <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginBottom: 5 }}>Hit · TB Props by Batter</div>
-                              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                                {batterStats.map(s => <FullRow key={s.name} label={s.name} pct={s.pct} hits={s.hits} total={s.total} />)}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* K Prop by Pitcher */}
-                          {pitcherStats.length > 0 && (
-                            <div style={{ marginBottom: 10 }}>
-                              <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginBottom: 5 }}>K Prop by Pitcher</div>
-                              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                                {pitcherStats.map(s => <FullRow key={s.name} label={s.name} pct={s.pct} hits={s.hits} total={s.total} />)}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* K Prop by Park */}
-                          {parkStats.length > 0 && (
-                            <div>
-                              <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginBottom: 5 }}>K Prop by Park</div>
-                              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                                {parkStats.map(s => <FullRow key={s.park} label={s.park} pct={s.pct} hits={s.hits} total={s.total} />)}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Placeholder when enriched picks exist but none have enough history yet */}
-                          {batterStats.length === 0 && pitcherStats.length === 0 && parkStats.length === 0 && (
-                            <div style={{ textAlign: "center", padding: "8px 0" }}>
-                              <div style={{ fontSize: 9, color: "#4b5563", lineHeight: 1.6 }}>
-                                Log and grade more picks to unlock<br />per-player · per-pitcher · per-park breakdowns.
-                              </div>
-                            </div>
-                          )}
-                        </>);
-                      })()}
-
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-            {/* ── END TRENDS ───────────────────────────────── */}
-
-            {/* ── 7-DAY DIGEST ───────────────────────────── */}
-            {(liveDigest || digestLoading) && (() => {
-              const d = liveDigest;
-              const pctColor = !d ? "#6b7280" : d.pct >= 55 ? "#22c55e" : d.pct >= 45 ? "#f59e0b" : "#ef4444";
-              const typeEntries = d
-                ? Object.entries(d.byType).filter(([, v]) => v.total > 0)
-                : [];
-              return (
-                <div style={{ marginBottom: 10 }}>
-                  {/* Collapsible header */}
-                  <button
-                    onClick={() => setShowDigest(s => !s)}
-                    style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "#161827", border: "1px solid #1f2437", borderRadius: showDigest ? "8px 8px 0 0" : 8, padding: "8px 12px", cursor: "pointer", marginBottom: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 10, fontWeight: 800, color: "#38bdf8", textTransform: "uppercase", letterSpacing: "0.05em" }}>📅 7-Day Digest</span>
-                      {digestLoading && <span style={{ fontSize: 8, color: "#6b7280" }}>loading…</span>}
-                      {d && <span style={{ fontSize: 10, fontWeight: 800, color: pctColor, fontFamily: "monospace" }}>{d.pct}%</span>}
-                    </div>
-                    <span style={{ fontSize: 9, color: "#4b5563" }}>{showDigest ? "▲ hide" : "▼ show"}</span>
-                  </button>
-
-                  {showDigest && (
-                    <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderTop: "none", borderRadius: "0 0 8px 8px", padding: "10px 12px" }}>
-                      {digestLoading && (
-                        <div style={{ textAlign: "center", padding: "12px 0", color: "#4b5563", fontSize: 11 }}>Computing digest…</div>
-                      )}
-                      {d && d.total === 0 && (
-                        <div style={{ textAlign: "center", padding: "8px 0", color: "#4b5563", fontSize: 10 }}>No graded picks in the last 7 days.</div>
-                      )}
-                      {d && d.total > 0 && (<>
-                        {/* Accuracy row */}
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 10 }}>
-                          {[
-                            { label: "Graded", val: d.total,  color: "#9ca3af" },
-                            { label: "Hits",   val: d.hits,   color: "#22c55e" },
-                            { label: "Misses", val: d.misses, color: "#ef4444" },
-                          ].map(s => (
-                            <div key={s.label} style={{ background: "#1e2030", borderRadius: 8, padding: "7px 8px", textAlign: "center" }}>
-                              <div style={{ fontSize: 15, fontWeight: 800, color: s.color, fontFamily: "monospace" }}>{s.val}</div>
-                              <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", marginTop: 1 }}>{s.label}</div>
-                            </div>
-                          ))}
-                        </div>
-
-                        {/* Accuracy bar */}
-                        <div style={{ height: 4, background: "#1e2030", borderRadius: 2, overflow: "hidden", marginBottom: 10 }}>
-                          <div style={{ width: `${d.pct}%`, height: "100%", background: pctColor, borderRadius: 2, transition: "width 0.4s" }} />
-                        </div>
-
-                        {/* Best hit + worst miss */}
-                        {(d.bestHit || d.worstMiss) && (
-                          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-                            {d.bestHit && (
-                              <div style={{ flex: 1, background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 8, padding: "7px 8px" }}>
-                                <div style={{ fontSize: 8, color: "#22c55e", fontWeight: 700, textTransform: "uppercase", marginBottom: 3 }}>✅ Best Hit</div>
-                                <div style={{ fontSize: 10, color: "#f9fafb", fontWeight: 700, lineHeight: 1.3, marginBottom: 2 }}>{d.bestHit.label}</div>
-                                <div style={{ fontSize: 9, color: "#6b7280" }}>{d.bestHit.awayTeam} @ {d.bestHit.homeTeam} · {d.bestHit.confidence}%</div>
-                              </div>
-                            )}
-                            {d.worstMiss && (
-                              <div style={{ flex: 1, background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 8, padding: "7px 8px" }}>
-                                <div style={{ fontSize: 8, color: "#ef4444", fontWeight: 700, textTransform: "uppercase", marginBottom: 3 }}>❌ Worst Miss</div>
-                                <div style={{ fontSize: 10, color: "#f9fafb", fontWeight: 700, lineHeight: 1.3, marginBottom: 2 }}>{d.worstMiss.label}</div>
-                                <div style={{ fontSize: 9, color: "#6b7280" }}>{d.worstMiss.awayTeam} @ {d.worstMiss.homeTeam} · {d.worstMiss.confidence}%</div>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* By type chips */}
-                        {typeEntries.length > 0 && (
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                            {typeEntries.map(([type, v]) => {
-                              const typePct = v.total > 0 ? Math.round((v.hits / v.total) * 100) : 0;
-                              const tc = typePct >= 55 ? "#22c55e" : typePct >= 45 ? "#f59e0b" : "#ef4444";
-                              return (
-                                <div key={type} style={{ background: `${tc}12`, border: `1px solid ${tc}44`, borderRadius: 6, padding: "3px 8px", display: "flex", gap: 5, alignItems: "center" }}>
-                                  <span style={{ fontSize: 9, fontWeight: 800, color: tc, fontFamily: "monospace" }}>{type}</span>
-                                  <span style={{ fontSize: 8, color: "#9ca3af" }}>{v.hits}/{v.total}</span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </>)}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-            {/* ── END DIGEST ───────────────────────────────── */}
-
-            {/* Filter buttons */}
-            <div style={{ display: "flex", gap: 5, marginBottom: 12 }}>
-              {["all","pending","hit","miss"].map(f => (
-                <button key={f} onClick={() => setPicksFilter(f)}
-                  style={{ flex: 1, background: picksFilter === f ? "#a78bfa" : "#161827", border: `1px solid ${picksFilter === f ? "#a78bfa" : "#1f2437"}`, borderRadius: 6, padding: "5px 0", fontSize: 9, color: picksFilter === f ? "#000" : "#6b7280", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>
-                  {f}
-                </button>
-              ))}
-            </div>
-
-            {/* Lab Picks */}
-            {hasAnyLabPicks && (
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 10, fontWeight: 800, color: "#34d399", letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 8 }}>
-                  🔬 Lab Picks
-                </div>
-                {labPicks.length === 0 ? (
-                  <Card>
-                    <div style={{ textAlign: "center", padding: "16px 0", fontSize: 10, color: "#4b5563" }}>
-                      No Lab picks match the current filter.
-                    </div>
-                  </Card>
-                ) : labPicks.map(p => (
-                  <Card key={p.id} style={{ marginBottom: 8, borderColor: p.result === "hit" ? "rgba(34,197,94,0.25)" : p.result === "miss" ? "rgba(239,68,68,0.25)" : "rgba(52,211,153,0.22)" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 3 }}>{p.date} · {p.game}</div>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", marginBottom: 4 }}>{p.label}</div>
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                          <LeanBadge label={p.lean} positive={p.lean === "HOME" || p.lean === "OVER"} small />
-                          <span style={{ fontSize: 9, color: "#34d399", fontFamily: "monospace", fontWeight: 700 }}>Model {p.confidence}%</span>
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                        {renderPickStatusBadge(p)}
-                      </div>
-                    </div>
-                  </Card>
-                ))}
-              </div>
-            )}
-
-            {/* Pick cards */}
-            {filtered.length === 0 ? (
-              <Card>
-                <div style={{ textAlign: "center", padding: "18px 0" }}>
-                  <div style={{ fontSize: 22, marginBottom: 8 }}>📋</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", marginBottom: 6 }}>No picks yet</div>
-                  <div style={{ fontSize: 10, color: "#4b5563", lineHeight: 1.5 }}>Go to a game → Props tab → tap ＋ on any prop to log it here.</div>
-                </div>
-              </Card>
-            ) : standardFiltered.length === 0 ? null : standardFiltered.map(p => (
-              <Card key={p.id} style={{ borderColor: p.result === "hit" ? "rgba(34,197,94,0.25)" : p.result === "miss" ? "rgba(239,68,68,0.25)" : "#1f2437" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-                  <div>
-                    <div style={{ fontSize: 9, color: "#6b7280", marginBottom: 2 }}>{p.date} · {p.game}</div>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: "#f9fafb", lineHeight: 1.4 }}>{p.label}</div>
-                  </div>
-                  <div style={{ display: "flex", gap: 5, alignItems: "center", flexShrink: 0, marginLeft: 8 }}>
-                    <LeanBadge label={p.lean} positive={p.lean === "OVER"} small />
-                    <button
-                      onClick={() => {
-                        const resultStr = p.result === "hit" ? " ✓ HIT" : p.result === "miss" ? " ✗ MISS" : "";
-                        const text = `${p.label} · ${p.lean} · ${p.confidence}% confidence · ${p.game}${resultStr}`;
-                        navigator.clipboard.writeText(text).then(() => {
-                          setCopiedPickId(p.id);
-                          setTimeout(() => setCopiedPickId(null), 2000);
-                        }).catch(() => {});
-                      }}
-                      title="Copy pick to clipboard"
-                      style={{ background: "none", border: "none", color: copiedPickId === p.id ? "#22c55e" : "#4b5563", fontSize: 11, cursor: "pointer", padding: "0 2px", lineHeight: 1, transition: "color 0.15s" }}>
-                      {copiedPickId === p.id ? "✓" : "⎘"}
-                    </button>
-                    <button onClick={() => deletePick(p.id)} title="Remove pick" style={{ background: "none", border: "none", color: "#4b5563", fontSize: 12, cursor: "pointer", padding: "0 2px", lineHeight: 1 }}>✕</button>
-                  </div>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: p.result ? 0 : 8 }}>
-                  <div style={{ flex: 1, height: 4, background: "#1e2030", borderRadius: 2, overflow: "hidden" }}>
-                    <div style={{ width: `${p.confidence}%`, height: "100%", background: p.lean === "OVER" ? "#22c55e" : "#ef4444", borderRadius: 2 }} />
-                  </div>
-                  <div style={{ fontSize: 10, color: "#6b7280", flexShrink: 0 }}>{p.confidence}%</div>
-                </div>
-                {getPickStatus(p) === "settled" && p.result ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-                    {renderPickStatusBadge(p)}
-                    <button onClick={() => markResult(p.id, null)} style={{ fontSize: 9, color: "#4b5563", background: "none", border: "none", cursor: "pointer" }}>undo</button>
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                    {renderPickStatusBadge(p)}
-                    <button onClick={() => markResult(p.id, "hit")}
-                      style={{ flex: 1, background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.25)", borderRadius: 6, padding: "6px", fontSize: 10, color: "#22c55e", fontFamily: "monospace", fontWeight: 700, cursor: "pointer" }}>
-                      ✓ HIT
-                    </button>
-                    <button onClick={() => markResult(p.id, "miss")}
-                      style={{ flex: 1, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 6, padding: "6px", fontSize: 10, color: "#ef4444", fontFamily: "monospace", fontWeight: 700, cursor: "pointer" }}>
-                      ✗ MISS
-                    </button>
-                  </div>
-                )}
-              </Card>
-            ))}
-          </>);
-        })()}
 
         {/* ════════════════════════════════════
             BOARD VIEW — HR / Hits / K / Outs / Games
@@ -10897,7 +9682,6 @@ export default function App() {
                       const sc = scoreColor(displayScore);
                       const lc = leanColor(c.lean, c.leanAbbr);
                       const boardSummaryRequest = buildBoardSummaryRequest(c, gameSubTab);
-                      const boardSummary = getCardSummaryText(boardSummaryRequest);
                       const gameStatus = getBoardGameStatus(c.gamePk);
                       const liveScore = liveScores[c.gamePk];
                       const finalTotalRuns = gameSubTab === "total" && gameStatus === "FINAL" && liveScore
@@ -10968,11 +9752,19 @@ export default function App() {
                                   </span>
                                 )}
                               </div>
-                              {boardSummary && (
-                                <div style={{ marginTop: 6, fontSize: 10, color: "#d1d5db", lineHeight: 1.45, fontStyle: "italic" }}>
-                                  {boardSummary}
-                                </div>
-                              )}
+                              {(() => {
+                                const summaryText = getCardSummaryText(boardSummaryRequest);
+                                const isPremium = !!aiCardSummaries[`premium:${boardSummaryRequest?.id}`];
+                                if (!summaryText) return null;
+                                return (
+                                  <div style={{ display: "flex", alignItems: "flex-start", gap: 4, marginTop: 6 }}>
+                                    {isPremium && (
+                                      <span style={{ fontSize: 8, color: "#a78bfa", fontFamily: "monospace", fontWeight: 800, flexShrink: 0, marginTop: 1 }}>✦</span>
+                                    )}
+                                    <div style={{ fontSize: 10, color: "#d1d5db", lineHeight: 1.45, fontStyle: "italic" }}>{summaryText}</div>
+                                  </div>
+                                );
+                              })()}
                               {c.odds?.books && gameSubTab !== "nrfi" && (() => {
                                 const BOOK_COLORS = { DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa" };
                                 const isAwayLean = c.leanAbbr != null && c.leanAbbr === c.away?.abbr;
@@ -11064,7 +9856,6 @@ export default function App() {
                   // ── Pitcher card (K Props / Outs) ──────────────────────────
                   const boardGameStatus = getBoardGameStatus(c.gamePk);
                   const boardSummaryRequest = buildBoardSummaryRequest(c, boardTab);
-                  const boardSummary = getCardSummaryText(boardSummaryRequest);
                   const todayResult = liveBoardResults[c.id] ?? null;
                   const hasResolvedResult = !!todayResult && !todayResult.live;
                   const propLineValue = c.propLine?.line ?? c.suggestedLine;
@@ -11183,11 +9974,19 @@ export default function App() {
                               );
                             })()}
                           </div>
-                          {boardSummary && (
-                            <div style={{ marginTop: 6, fontSize: 10, color: "#d1d5db", lineHeight: 1.45, fontStyle: "italic" }}>
-                              {boardSummary}
-                            </div>
-                          )}
+                          {(() => {
+                            const summaryText = getCardSummaryText(boardSummaryRequest);
+                            const isPremium = !!aiCardSummaries[`premium:${boardSummaryRequest?.id}`];
+                            if (!summaryText) return null;
+                            return (
+                              <div style={{ display: "flex", alignItems: "flex-start", gap: 4, marginTop: 6 }}>
+                                {isPremium && (
+                                  <span style={{ fontSize: 8, color: "#a78bfa", fontFamily: "monospace", fontWeight: 800, flexShrink: 0, marginTop: 1 }}>✦</span>
+                                )}
+                                <div style={{ fontSize: 10, color: "#d1d5db", lineHeight: 1.45, fontStyle: "italic" }}>{summaryText}</div>
+                              </div>
+                            );
+                          })()}
                           {c.propLine?.books && (
                             <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
                               {[preferredBook, ...["DK", "FD", "CZR", "MGM", "BOV"].filter(bk => bk !== preferredBook)]
@@ -11237,7 +10036,6 @@ export default function App() {
                 // ── Batter card (HR / Hits) ────────────────────────────────
                 const l5dots = Array.from({ length: 5 }, (_, j) => c.hitRate[j] ?? null);
                 const boardSummaryRequest = buildBoardSummaryRequest(c, boardTab);
-                const boardSummary = getCardSummaryText(boardSummaryRequest);
                 const todayResult = liveBoardResults[c.id] ?? null;
                 const boardGameStatus = getBoardGameStatus(c.gamePk);
                 const hasResult   = todayResult && todayResult.ab > 0;
@@ -11351,11 +10149,19 @@ export default function App() {
                             </span>
                           )}
                         </div>
-                        {boardSummary && (
-                          <div style={{ marginTop: 6, fontSize: 10, color: "#d1d5db", lineHeight: 1.45, fontStyle: "italic" }}>
-                            {boardSummary}
-                          </div>
-                        )}
+                        {(() => {
+                          const summaryText = getCardSummaryText(boardSummaryRequest);
+                          const isPremium = !!aiCardSummaries[`premium:${boardSummaryRequest?.id}`];
+                          if (!summaryText) return null;
+                          return (
+                            <div style={{ display: "flex", alignItems: "flex-start", gap: 4, marginTop: 6 }}>
+                              {isPremium && (
+                                <span style={{ fontSize: 8, color: "#a78bfa", fontFamily: "monospace", fontWeight: 800, flexShrink: 0, marginTop: 1 }}>✦</span>
+                              )}
+                              <div style={{ fontSize: 10, color: "#d1d5db", lineHeight: 1.45, fontStyle: "italic" }}>{summaryText}</div>
+                            </div>
+                          );
+                        })()}
                         {c.propLine?.books && (
                           <div style={{ display: "flex", gap: 4, marginTop: 6, flexWrap: "wrap" }}>
                             {[preferredBook, ...["DK", "FD", "CZR", "MGM", "BOV"].filter(bk => bk !== preferredBook)]
@@ -11414,7 +10220,7 @@ export default function App() {
                               <span>{group.gameLabel}</span>
                               {group.gameTime && (
                                 <span style={{ color: "#38bdf8" }}>
-                                  {new Date(group.gameTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/New_York" })} ET
+                                  {formatLocalTime(group.gameTime)}
                                 </span>
                               )}
                             </div>
@@ -11700,9 +10506,19 @@ export default function App() {
                             ) : (
                               <div style={{ fontSize: 10, color: "#9ca3af", marginBottom: c.aiReason ? 4 : 0 }}>{c.gameLabel}</div>
                             )}
-                            {c.aiReason && (
-                              <div style={{ fontSize: 10, color: "#d1d5db", fontStyle: "italic", lineHeight: 1.4 }}>{c.aiReason}</div>
-                            )}
+                            {(() => {
+                              const premiumText = aiCardSummaries[`premium:${c.id}`];
+                              const summaryText = premiumText ?? c.aiReason ?? null;
+                              if (!summaryText) return null;
+                              return (
+                                <div style={{ display: "flex", alignItems: "flex-start", gap: 4, marginTop: 2 }}>
+                                  {premiumText && (
+                                    <span style={{ fontSize: 8, color: "#a78bfa", fontFamily: "monospace", fontWeight: 800, flexShrink: 0, marginTop: 1 }}>✦</span>
+                                  )}
+                                  <div style={{ fontSize: 10, color: "#d1d5db", fontStyle: "italic", lineHeight: 1.4 }}>{summaryText}</div>
+                                </div>
+                              );
+                            })()}
                             {c.bookLine != null && (
                               <div style={{ marginTop: 4, fontSize: 9, color: "#6b7280" }}>
                                 Line: <span style={{ color: "#9ca3af", fontFamily: "monospace" }}>{c.bookLine}</span>
@@ -12116,7 +10932,6 @@ export default function App() {
         const isGameType = type === "nrfi" || type === "total" || type === "spread" || type === "ml" || type === "f5ml" || type === "f5spread";
         const factors = generateWhyFactors(c, type);
         const whySummaryRequest = buildBoardSummaryRequest(c, type);
-        const whySummary = getCardSummaryText(whySummaryRequest);
         const displayScore = isGameType
           ? (c.lean === "YRFI" || c.lean === "UNDER" || c.lean === "AWAY" ? 100 - c.score : c.score)
           : c.score;
@@ -12204,8 +11019,20 @@ export default function App() {
 
               {/* Footer */}
               <div style={{ padding: "12px 16px 20px", borderTop: "1px solid #1f2437", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#161827" }}>
-                <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace" }}>
-                  {whySummary}
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 4, flex: 1, minWidth: 0 }}>
+                  {(() => {
+                    const summaryText = getCardSummaryText(whySummaryRequest);
+                    const isPremium = !!aiCardSummaries[`premium:${whySummaryRequest?.id}`];
+                    if (!summaryText) return null;
+                    return (
+                      <>
+                        {isPremium && (
+                          <span style={{ fontSize: 8, color: "#a78bfa", fontFamily: "monospace", fontWeight: 800, flexShrink: 0, marginTop: 1 }}>✦</span>
+                        )}
+                        <span style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace", lineHeight: 1.4 }}>{summaryText}</span>
+                      </>
+                    );
+                  })()}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                   <div style={{ background: `${leanColor}18`, border: `1px solid ${leanColor}55`, borderRadius: 8, padding: "5px 10px", display: "flex", alignItems: "center", gap: 5 }}>
@@ -12290,7 +11117,7 @@ export default function App() {
                   <Row color="#22c55e" label="Green  →  Pitcher Edge (score < 35)" sub="The pitcher has the advantage in this matchup. Good for K props and unders." />
                   <Row color="#fbbf24" label="Yellow  →  Neutral (score 35–54)" sub="No clear edge either way. Look for other factors before betting." />
                   <Row color="#ef4444" label="Red  →  Batter Edge (score 55+)" sub="The batter has the advantage. Good for hit, TB, and HR props." />
-                  <Row color="#a78bfa" label="Purple  →  Picks & logged data" sub="Used for your saved prop picks and the picks tracker." />
+                  <Row color="#a78bfa" label="Purple  →  Chat & scout tools" sub="Used for Chat (when enabled) and scout-only views such as AI Board or Predict." />
                   <div style={{ background: "rgba(99,102,241,0.07)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 8, padding: "10px 12px", marginTop: 4 }}>
                     <div style={{ fontSize: 11, color: "#818cf8", lineHeight: 1.6 }}>
                       <strong style={{ color: "#a78bfa" }}>Quick rule:</strong> Green favors the pitcher, red favors the batter. A red matchup score on a hitter = good spot for a hits or TB prop. A green matchup score = good spot for a K prop, Outs over, or under.
@@ -12351,7 +11178,7 @@ export default function App() {
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {[
-                      ["Pitcher Card", "Season ERA, WHIP, K/9, BB/9, avg IP/K/PC/ER, and a sparkline of recent outings. Shows W-L record and how many of his last 5 starts were clean (0 ER). A red ⚠ IL badge next to the pitcher name means he has an active IL placement — verify before logging any K or Outs props. Use this for K props and Outs lines."],
+                      ["Pitcher Card", "Season ERA, WHIP, K/9, BB/9, avg IP/K/PC/ER, and a sparkline of recent outings. Shows W-L record and how many of his last 5 starts were clean (0 ER). A red ⚠ IL badge next to the pitcher name means he has an active IL placement — verify before betting any K or Outs props. Use this for K props and Outs lines."],
                       ["Lineup Matchup Intel", "Counts how many RHB, LHB, and switch hitters are in the opposing lineup vs the pitcher's hand — higher same-hand count = pitcher edge. Shows the aggregate matchup score across all opposing batters and flags the top 3 danger hitters by score. Use this for deciding whether to lean Over or Under on team runs."],
                       ["Game Lean Card", "NRFI lean derived from both SPs' clean-start rate (0 ER starts / recent starts). Quick directional read for NRFI props."],
                     ].map(([label, desc]) => (
@@ -12475,6 +11302,23 @@ export default function App() {
                       <span style={{ color: "#f9fafb" }}>5. Outs props need deep starters.</span> If the avg IP row on the Outs card is below 5.0 IP, the score likely came from control/ERA factors. Shorter starters are risky for outs overs even with good numbers.
                     </div>
                   </div>
+
+                  {/* Card summaries + live locking */}
+                  <div style={{ background: "rgba(167,139,250,0.07)", border: "1px solid rgba(167,139,250,0.25)", borderRadius: 10, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace" }}>AI Card Summaries &amp; Live Game Locking</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {[
+                        ["AI summary line", "Every card shows a one-line AI-written summary below the player name — a specific, data-driven sentence explaining the key reason to back this pick (e.g. 'Cole averages 8.4 Ks L3 facing a lineup with 27% K rate; tight zone ump adds edge'). Generated by Claude Haiku using the same signals that built the score."],
+                        ["✦ Premium summary", "Cards with a board score of 75+ show a ✦ badge next to the summary. This indicates the summary was upgraded to GPT-4o — a sharper, longer analyst-voice sentence that cites at least two concrete numbers and reads like a professional bettor's notes."],
+                        ["Live game locking", "When a game moves from pre-game to In Progress, the Board locks that game's candidates in place. Locked cards stay visible even after the game starts — preventing the board from going blank mid-day. A 🔒 LIVE or ✓ FINAL indicator shows status. Only cards with real candidate data are locked; if lineups haven't posted yet when the game starts, the board waits and locks once lineup data arrives."],
+                      ].map(([label, desc]) => (
+                        <div key={label} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                          <div style={{ background: "rgba(167,139,250,0.15)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 5, padding: "2px 7px", fontSize: 9, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace", flexShrink: 0, whiteSpace: "nowrap" }}>{label}</div>
+                          <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </Section>
 
                 <Section title="📋 Props Tab — Sportsbook Lines &amp; Book Filter">
@@ -12534,10 +11378,65 @@ export default function App() {
                       When the purple <span style={{ color: "#818cf8", fontWeight: 700 }}>✦ CARD AGREES</span> badge appears on a Model Pick card, it means the <strong style={{ color: "#f9fafb" }}>Daily Card</strong> (the AI-assisted analysis) independently selected the same pitcher for the same prop type. This is a convergence signal — the algorithmic model and the AI-assisted analysis reached the same conclusion through separate reasoning paths. Two independent systems agreeing is meaningfully stronger than either alone.
                     </div>
                   </div>
-                  <div style={{ background: "rgba(34,197,94,0.07)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 8, padding: "10px 12px" }}>
-                    <div style={{ fontSize: 11, color: "#86efac", fontWeight: 700, marginBottom: 4 }}>Performance Header</div>
-                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>
-                      The thin stats bar at the top of Model Picks shows today's logged record (W-L-pending) and a rolling 7-day win rate based on picks you've logged to the Pick Log. Use this to track how the model is running — if the L7 rate is above 55%, the current signals are reliable.
+                </Section>
+
+                <Section title="🤖 AI Board — AI-Scored Picks">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                    The <span style={{ color: "#34d399", fontWeight: 700 }}>AI Board</span> tab takes the same candidates from the Board and runs them through a second AI scoring layer — Claude Haiku + optional GPT-4o — to produce an independent ranked pick list across five markets: K props, Outs, Hits, HR, and F5 ML. AI scores are separate from the algorithmic board score and reflect a blend of the model score, simulation confidence, and stat quality.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["AI Score (0–100)", "The AI Board's primary ranking signal. Scored by Claude Haiku using the algorithmic score (35%), simulation confidence (35%), and stat quality (30%). 75+ = strong edge with multiple independent signals; 55–74 = solid lean; 40–54 = neutral; below 40 = weak setup. The board sorts by AI Score within each market tab."],
+                      ["Market tabs", "Five filter tabs across the top: K · Outs · Hits · HR · F5 ML. Each shows only the candidates relevant to that market, ranked by AI Score. The All tab shows the combined list. Tap any tab to narrow your focus."],
+                      ["AI reason line", "Every AI Board card shows a one-sentence AI-written reason below the player name, generated by Claude Haiku using market-specific logic: K = K rate + opposing lineup K% + umpire or park edge; Outs = avg IP + WHIP; Hits = batter form vs pitcher hand; HR = SLG/power pace + park or wind; F5 ML = SP ERA comparison + environment."],
+                      ["✦ Premium summary", "Cards with AI Score 75+ show a ✦ badge. These summaries have been upgraded to GPT-4o — a sharper, longer analyst-voice sentence citing at least two concrete numbers. Reads like notes from a professional bettor rather than a model output."],
+                      ["Locked candidates", "When a game goes live (In Progress), the AI Board locks that game's candidates in place so the board doesn't go blank mid-day. Locked cards show a 🔒 LIVE indicator. Once the game ends, ✓ FINAL is shown. Locking only fires when real candidate data exists — if lineups hadn't posted yet when the game started, the board waits and locks once data arrives."],
+                      ["Score ≥ 75 refresh", "After the initial AI scoring pass, any candidate that scores 75+ automatically triggers a premium GPT-4o summary call to upgrade its reason text. This happens in the background and the card updates in place when the premium text arrives — no reload needed."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#34d399", fontFamily: "monospace", flexShrink: 0, minWidth: 90, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ background: "rgba(52,211,153,0.07)", border: "1px solid rgba(52,211,153,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#6ee7b7", fontWeight: 700, marginBottom: 4 }}>💡 How to use AI Board vs the Board</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.7 }}>
+                      <span style={{ color: "#f9fafb" }}>Board = algorithmic signal.</span> The Board scores are built from weighted factors (K/9, WHIP, park, ump, etc.). Use it to find plays where the raw data lines up.<br />
+                      <span style={{ color: "#f9fafb" }}>AI Board = independent AI judgment.</span> The AI layer re-ranks the same candidates using a different lens — model score + sim confidence + stat quality. When a candidate ranks high on both, that convergence is a stronger signal than either alone.<br />
+                      <span style={{ color: "#f9fafb" }}>Use the Chat tab to go deeper.</span> Once the AI Board has scored candidates, the Chat feature has full visibility into those rankings — ask it to build a parlay, find the top K props, or explain a specific pick.
+                    </div>
+                  </div>
+                </Section>
+
+                <Section title="💬 Chat — AI Prop Assistant">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                    The <span style={{ color: "#60a5fa", fontWeight: 700 }}>Chat</span> tab is an AI assistant with full access to today's Prop Scout data — board candidates, AI scores, pitcher stats, sportsbook lines, umpire tendencies, weather, park factors, lineup data, and injury reports. Ask it anything from a quick question to a full parlay build.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["Quick Chips", "Tap-to-send shortcut prompts at the top of the chat: 'Build me a 3-leg parlay', 'Best K props tonight', 'Best hits props tonight', 'Top plays across all markets', 'Any injury alerts?'. These are the most common research workflows — one tap sends the question with full board context already attached."],
+                      ["Board-aware answers", "When the AI Board has scored candidates, Chat automatically includes the top 6 per market (sorted by AI Score) in every request. The assistant knows each player's name, team, game, AI Score, book line, and the AI reason — so answers like 'Best K props tonight' return specific picks with scores and lines, not generic advice."],
+                      ["Parlay builder", "Ask 'Build me a 3-leg parlay' and the assistant selects legs from the ranked board candidates, strongly preferring legs from different games to avoid same-game correlation. It mixes markets when possible (e.g. K prop + hits prop from separate games), estimates combined implied probability, and flags any correlated legs explicitly."],
+                      ["Market-specific picks", "Ask 'Best K props tonight', 'Best hits props', 'Best outs props', or 'Best HR props' and the assistant filters to that market and ranks the top 2–3 candidates, naming the line and the sharpest reason to back each."],
+                      ["Web search", "For injury news, lineup changes, or anything time-sensitive, Chat automatically runs a web search (via Tavily) and cites recent results. Trigger words like 'injury', 'lineup change', 'latest news', or 'IL' activate this path."],
+                      ["Confidence score", "Stat-based answers come with a confidence score (0–100) and label: HIGH (75+), MEDIUM (60–74), SPEC (50–59), LOW (<50). General conversational questions return without a confidence score."],
+                      ["Daily limit", "Each user account has a daily message limit to keep costs manageable. The counter resets at midnight. Conceptual or non-stat questions don't use a different path — all Chat messages count toward the limit."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#60a5fa", fontFamily: "monospace", flexShrink: 0, minWidth: 90, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ background: "rgba(96,165,250,0.07)", border: "1px solid rgba(96,165,250,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#93c5fd", fontWeight: 700, marginBottom: 4 }}>💡 Best prompts to try</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.7 }}>
+                      <span style={{ color: "#fbbf24", fontWeight: 600 }}>"Build me a 3-leg parlay"</span> — gets a specific parlay from different games with implied probability and reasoning.<br />
+                      <span style={{ color: "#fbbf24", fontWeight: 600 }}>"Act like a professional sports bettor — what are your top plays today?"</span> — board-aware overview across all markets.<br />
+                      <span style={{ color: "#fbbf24", fontWeight: 600 }}>"Which outs props do you like tonight?"</span> — filters to outs market and ranks the top candidates.<br />
+                      <span style={{ color: "#fbbf24", fontWeight: 600 }}>"Is [pitcher] a good K prop?"</span> — deep dive on a specific pitcher using season stats + board context.<br />
+                      <span style={{ color: "#fbbf24", fontWeight: 600 }}>"Any injury news?"</span> — triggers live web search for the latest injury and lineup updates.
                     </div>
                   </div>
                 </Section>
@@ -12549,7 +11448,7 @@ export default function App() {
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {[
                       ["Preferred Sportsbook", "Sets which book's line and odds appear first throughout the app — on Model Pick LINES grids, Board prop lines, and any multi-book display. Options: DK (DraftKings), FD (FanDuel), CZR (Caesars), MGM (BetMGM), BOV (Bovada). DraftKings is the default. Tap a different book to switch, tap it again to reset back to DK."],
-                      ["Sign Out", "Signs you out of your account and clears your session token. Your pick log and preferences are saved to your account and will be restored on next login."],
+                      ["Sign Out", "Signs you out of your account and clears your session token. Your preferences are saved to your account and will be restored on next login."],
                     ].map(([label, desc]) => (
                       <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                         <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 80, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
@@ -12595,9 +11494,6 @@ export default function App() {
                     ["Favor/Gm", "Average absolute run favor per game — how many runs the umpire's calls are worth cumulatively. Higher values (> 0.5) mean the ump's zone meaningfully shifts expected run scoring, which can create an edge on totals."],
                     ["ACCURATE / INCONSISTENT", "Badge on the Umpire card when real scorecard data is loaded. ACCURATE = above expected accuracy (+0.5% or better). INCONSISTENT = below expected (−1.0% or worse). Falls back to PITCHER UMP / NEUTRAL UMP when only static data is available."],
                     ["PITCHER UMP / NEUTRAL UMP", "Badge shown when real scorecard data isn't loaded yet. Based on historical K rate estimates — PITCHER UMP = wider zone, above-average strikeout environment. NEUTRAL = average zone."],
-                    ["Net Units", "Your total profit or loss in units assuming flat −110 betting. Each win returns +0.909u (the standard −110 payout), each loss costs −1u. Shown in the Pick Log header once you have graded picks."],
-                    ["ROI %", "Return on investment as a percentage — net units divided by total graded picks × 100. Positive ROI over a large sample (50+ picks) is the key long-term edge indicator. Break-even at −110 is roughly 52.4%."],
-                    ["Best Type", "The prop type (K, Hits, TB, HR, etc.) where your hit rate is highest, based on picks with at least 3 graded results. Use this to identify where the model's signals align best with your own research."],
                     ["⚠ IL", "Injured List flag — shown next to a player name in the Lineup tab or pitcher card when that player has an active IL placement in the last 14 days. Data from the MLB Stats API transactions feed, updated every 30 minutes."],
                   ].map(([t, d]) => <Stat key={t} term={t} def={d} />)}
                 </Section>

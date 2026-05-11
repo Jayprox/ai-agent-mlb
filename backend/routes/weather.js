@@ -74,4 +74,60 @@ router.get("/", async (req, res) => {
   }
 });
 
+// ── POST /api/weather/batch ───────────────────────────────────────────────
+// Accepts an array of game weather requests. Returns { [gamePk]: weatherData }
+// Uses the same per-stadium cache as GET /api/weather.
+//
+// Body: [ { gamePk, lat, lon, tz, hour, key } ]
+router.post("/batch", async (req, res) => {
+  const games = req.body;
+  if (!Array.isArray(games) || games.length === 0) {
+    return res.status(400).json({ error: "Body must be a non-empty array" });
+  }
+
+  const results = await Promise.allSettled(
+    games.map(async ({ gamePk, lat, lon, tz, hour, key }) => {
+      const cacheKey = `weather:${key ?? `${lat},${lon}`}`;
+      const cached   = cache.get(cacheKey);
+      if (cached) return { gamePk, data: cached };
+
+      const url = [
+        `https://api.open-meteo.com/v1/forecast`,
+        `?latitude=${lat}&longitude=${lon}`,
+        `&hourly=temperature_2m,windspeed_10m,winddirection_10m,weathercode,precipitation_probability,relativehumidity_2m`,
+        `&wind_speed_unit=mph&temperature_unit=fahrenheit`,
+        `&timezone=${encodeURIComponent(tz)}&forecast_days=1`,
+      ].join("");
+
+      const response = await axios.get(url, { timeout: 8000 });
+      const h        = response.data.hourly;
+      const targetHr = parseInt(hour ?? 0, 10);
+      const idx      = h.time.findIndex(t => new Date(t).getHours() === targetHr);
+      const i        = idx >= 0 ? idx : Math.min(targetHr, h.time.length - 1);
+
+      const data = {
+        temp:                      Math.round(h.temperature_2m[i]),
+        windspeed:                 h.windspeed_10m[i],
+        winddirection:             h.winddirection_10m[i],
+        weathercode:               h.weathercode[i],
+        precipitation_probability: h.precipitation_probability[i],
+        relativehumidity:          h.relativehumidity_2m[i],
+        fetchedAt:                 new Date().toLocaleTimeString(),
+      };
+
+      cache.set(cacheKey, data, TTL_MS);
+      console.log(`  ✓ Weather cached  key=${key ?? `${lat},${lon}`}  temp=${data.temp}°F  wind=${data.windspeed}mph`);
+      return { gamePk, data };
+    })
+  );
+
+  const output = {};
+  results.forEach((r, i) => {
+    const gamePk = games[i].gamePk;
+    output[gamePk] = r.status === "fulfilled" ? r.value.data : null;
+  });
+
+  return res.json(output);
+});
+
 module.exports = router;

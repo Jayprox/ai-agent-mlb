@@ -7,6 +7,7 @@ const { query, isConnected } = require("../services/db");
 const SEASON      = new Date().getFullYear();
 const BULLPEN_TTL = 30 * 60 * 1000; // 30 min — refresh before game
 const GAME_BULLPEN_TTL = 15 * 60 * 1000;
+const PITCHER_TTL_MS  = 6 * 60 * 60 * 1000; // 6 hours — season stats update nightly
 
 // ── Helpers ──────────────────────────────────────────────────
 const gradeFromEra = (era) => {
@@ -45,6 +46,35 @@ const isLikelyReliever = (r) => (
   r._inherited > 0
 );
 
+// Fetches and caches all three per-pitcher data sources in one shot.
+// Cache key `pitcher:${personId}` is bullpen-specific so it doesn't
+// collide with the `player:${personId}:pitching` key used by players.js
+// (which stores a different shape).
+async function getPitcherData(personId) {
+  const cacheKey = `pitcher:${personId}`;
+  const cached   = cache.get(cacheKey);
+  if (cached) return cached;
+
+  const [seasonRes, gameLogRes, personRes] = await Promise.all([
+    mlb.get(`/people/${personId}/stats`, {
+      params: { stats: "season", group: "pitching", season: SEASON },
+    }),
+    mlb.get(`/people/${personId}/stats`, {
+      params: { stats: "gameLog", group: "pitching", season: SEASON },
+    }),
+    mlb.get(`/people/${personId}`, {}),
+  ]);
+
+  const result = {
+    stat:   seasonRes.data.stats?.[0]?.splits?.[0]?.stat ?? {},
+    games:  gameLogRes.data.stats?.[0]?.splits ?? [],
+    person: personRes.data.people?.[0] ?? {},
+  };
+
+  cache.set(cacheKey, result, PITCHER_TTL_MS);
+  return result;
+}
+
 async function buildTeamBullpen(teamId) {
   const cacheKey   = `bullpen:team:${teamId}`;
 
@@ -75,19 +105,7 @@ async function buildTeamBullpen(teamId) {
   const pitcherData = await Promise.all(pitchers.map(async (p) => {
     const personId = p.person.id;
     try {
-      const [seasonRes, gameLogRes, personRes] = await Promise.all([
-        mlb.get(`/people/${personId}/stats`, {
-          params: { stats: "season", group: "pitching", season: SEASON },
-        }),
-        mlb.get(`/people/${personId}/stats`, {
-          params: { stats: "gameLog", group: "pitching", season: SEASON },
-        }),
-        mlb.get(`/people/${personId}`, {}),
-      ]);
-
-      const stat  = seasonRes.data.stats?.[0]?.splits?.[0]?.stat ?? {};
-      const games = gameLogRes.data.stats?.[0]?.splits ?? [];
-      const person = personRes.data.people?.[0] ?? {};
+      const { stat, games, person } = await getPitcherData(personId);
 
       // Most recent appearance
       const lastGame    = games[games.length - 1];
@@ -234,14 +252,27 @@ async function buildGameBullpen(gamePk) {
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  const { data } = await mlb.get("/schedule", {
-    params: { sportId: 1, gamePks: gamePk, hydrate: "team" },
-  });
-  const game = data.dates?.[0]?.games?.[0];
-  if (!game) throw new Error(`Game not found for gamePk=${gamePk}`);
+  // Reuse the same gameMeta cache key as nrfi.js — if NRFI already fetched it, this is free
+  const GAME_META_TTL_MS = 4 * 60 * 60 * 1000;
+  const metaCacheKey = `gameMeta:${gamePk}`;
+  let gameMeta = cache.get(metaCacheKey);
 
-  const awayTeamId = game.teams?.away?.team?.id;
-  const homeTeamId = game.teams?.home?.team?.id;
+  if (!gameMeta) {
+    const { data } = await mlb.get("/schedule", {
+      params: { sportId: 1, gamePks: gamePk, hydrate: "team" },
+    });
+    const game = data.dates?.[0]?.games?.[0];
+    if (!game) throw new Error(`Game not found for gamePk=${gamePk}`);
+    gameMeta = {
+      gameDate: game.gameDate?.slice(0, 10),
+      away: { id: game.teams?.away?.team?.id, name: game.teams?.away?.team?.name ?? "" },
+      home: { id: game.teams?.home?.team?.id, name: game.teams?.home?.team?.name ?? "" },
+    };
+    cache.set(metaCacheKey, gameMeta, GAME_META_TTL_MS);
+  }
+
+  const awayTeamId = gameMeta.away?.id;
+  const homeTeamId = gameMeta.home?.id;
   if (!awayTeamId || !homeTeamId) throw new Error(`Missing team ids for gamePk=${gamePk}`);
 
   const [awayTeam, homeTeam] = await Promise.all([

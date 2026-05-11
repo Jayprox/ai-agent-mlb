@@ -6506,3 +6506,82 @@ Individual `GET /api/players/:playerId/gamelog` unchanged — still used by line
 **Prompt file:** `codex-task-105-prompt.md`
 
 *Updated 2026-05-09 — Session 114 complete · picks.js hotfix + CODEX TASK 105 specced*
+
+---
+
+## 🗒 Session 115 — BACKLOG TASK 62 added (Localize game times to user timezone)
+
+User noticed board cards display "3:07 PM ET" regardless of the viewer's location.
+
+**Root cause:** `formatLocalTime(isoStr)` already exists at line ~325 and correctly converts ISO datetimes to the browser's local timezone (e.g. "10:07 AM PT", "7:07 AM HST"). But it's applied inconsistently — some views use it, others fall through to `game.time` (a raw ET-formatted string from the backend) or even hardcode `timeZone: "America/New_York"` explicitly.
+
+**4 locations to fix in `prop-scout-v7.jsx` (no backend changes):**
+1. Board game card subtitle — `{game.time}` → `{formatLocalTime(game.gameTime) ?? game.time}`
+2. K/Outs board card game time — same swap
+3. AI Board group header — hardcoded `toLocaleTimeString(..., { timeZone: "America/New_York" }) ET` → `{formatLocalTime(group.gameTime)}`
+4. Verify two regex-based parsers of `game.time` don't affect display (internal logic only)
+
+Spec added as **BACKLOG TASK 62** in `AGENT_SYSTEM_PROMPT.md`.
+
+*Updated 2026-05-09 — Session 115 complete · BACKLOG TASK 62 added (Localize game times)*
+
+---
+
+## 🗒 Session 116 — CW: CODEX TASK 105 approved (Batch Gamelog Endpoint)
+
+**CODEX TASK 105 approved** — both files verified clean.
+
+**`backend/routes/players.js`:**
+- `POST /gamelogs/batch` added at line 143, before the existing `GET /:playerId/gamelog` handler (no Express routing conflict)
+- L1 in-memory cache check per ID → L2 single bulk DB query `WHERE player_id = ANY($1)` → L3 chunked parallel MLB API (8 concurrent per chunk)
+- Same cache key format, TTL, and write-through pattern as the individual route
+- Payload shape identical for both hitting and pitching groups
+
+**`prop-scout-v7.jsx`:**
+- Board pre-fetch batter loop replaced with `missingBatterIds` collector + single `apiMutate("/api/players/gamelogs/batch", "POST", ...)` call
+- Deduped with `[...new Set(missingBatterIds)]`
+- Results merged into `liveHittingLog` in one `setLiveHittingLog` call
+- Pitcher data loop unchanged — correct, pitcher count (~30) doesn't need batching
+
+**Result:** 270 individual HTTP requests → 1 on Board open. On a warm DB (after cron runs) the batch returns in one fast round trip.
+
+*Updated 2026-05-09 — Session 116 complete · CODEX TASK 105 approved*
+
+---
+
+## 🗒 Session 117 — Cold-start API audit: 3 new backlog tasks (TASKS 63, 64, 65)
+
+**Task:** Analyzed `backend/output.txt` — a 5,529-line log of all outbound API calls made during a cold-start page load (64 seconds total, 00:54:39 → 00:55:43).
+
+**Total outbound MLB/Savant API calls on cold start: ~3,800+**
+
+### Three problems identified (and specced as backlog tasks):
+
+**BACKLOG TASK 63 — Share schedule cache across all routes**
+- `/api/v1/schedule` called **98 times** to the MLB API during one startup
+- Every NRFI and bullpen route handler calls the MLB API directly instead of checking the shared in-memory cache that `warmCache` already populated
+- Fix: add `cache.get("schedule")` check at top of each route handler before making the fetch
+- Impact: 98 calls → 1 per TTL window
+
+**BACKLOG TASK 64 — Cache linescore responses (dedup 936 → ~316)**
+- `/api/v1/game/:pk/linescore` called **936 times**, only 316 unique game PKs
+- Pitcher-splits route fetches linescore for every prior start — multiple starters share the same past game PKs, so the same completed linescore gets re-fetched 3-6x per startup
+- Game `824850` alone was fetched **6 times**
+- Fix: `cache.get/set('linescore:${gamePk}', data, 24h)` wrapper — completed games are immutable
+- Impact: eliminates all 620 duplicate linescore fetches
+
+**BACKLOG TASK 65 — Fix bullpen double-stats bug**
+- Every bullpen pitcher triggers `/api/v1/people/:id/stats` called **twice** consecutively, then `/api/v1/people/:id` once — 3 calls per pitcher
+- 30 bullpen fetches × 13 pitchers × 1 extra stats call = **~390 extra calls**, estimated ~856 total redundant people/stats calls across all bullpen processing
+- Fix: find and remove the duplicate stats fetch in `backend/routes/bullpen.js`
+- Impact: ~50% reduction in bullpen-related MLB API calls
+
+### Combined impact of tasks 63 + 64 + 65:
+~1,576 needless MLB API calls eliminated per cold start, reducing total outbound calls from ~3,800 to ~2,200.
+
+### Other observations (not immediately specced):
+- Batter Power CSV + Gamelog + people/stats fire in groups of 3 concurrently — this is expected behavior but still heavy on cold cache (~280 batters × 3 = 840 calls)
+- Savant pitcher CSVs (for arsenal) each contain 300-2,700 rows — these are huge downloads; already cached on L1 after first fetch
+- DB warm cache (`warmCache` cron) runs before frontend connects — if it completes before user lands, most of the above is moot; the issue only manifests on cold start or after a Railway restart
+
+*Updated 2026-05-09 — Session 117 complete · Cold-start audit + BACKLOG TASKs 63/64/65 added*

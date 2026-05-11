@@ -27,7 +27,13 @@ function emptyTeamFirst() {
   return { scoredPct: "0%", avgRuns: 0, tendency: "No recent data" };
 }
 
+const GAME_META_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours — team assignments never change mid-day
+
 async function fetchGameMeta(gamePk) {
+  const cacheKey = `gameMeta:${gamePk}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
   const { data } = await mlb.get("/schedule", {
     params: {
       sportId: 1,
@@ -39,7 +45,7 @@ async function fetchGameMeta(gamePk) {
   const game = data.dates?.[0]?.games?.[0] ?? null;
   if (!game) return null;
 
-  return {
+  const result = {
     gameDate: game.gameDate?.slice(0, 10),
     away: {
       id: game.teams?.away?.team?.id,
@@ -50,29 +56,57 @@ async function fetchGameMeta(gamePk) {
       name: game.teams?.home?.team?.name ?? "",
     },
   };
+
+  cache.set(cacheKey, result, GAME_META_TTL_MS);
+  return result;
+}
+
+const TEAM_RECENT_GAMES_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+const LINESCORE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — completed games are immutable
+
+async function getLinescore(gamePk) {
+  const cacheKey = `linescore:prior:${gamePk}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  const { data } = await mlb.get(`/game/${gamePk}/linescore`);
+  cache.set(cacheKey, data, LINESCORE_TTL_MS);
+  return data;
 }
 
 async function fetchRecentTeamGames(teamId, endDate, excludeGamePk) {
-  const { data } = await mlb.get("/schedule", {
-    params: {
-      sportId: 1,
-      teamId,
-      startDate: shiftDate(endDate, -120),
-      endDate,
-      gameType: "R",
-    },
-  });
+  // Cache the raw completed-games list keyed by team+date (before excludeGamePk filter,
+  // since the same list is reused for both away and home team lookups on a given day).
+  const cacheKey = `teamRecentGames:${teamId}:${endDate}`;
+  let allGames = cache.get(cacheKey);
 
-  return (data.dates || [])
-    .flatMap((date) => date.games || [])
-    .filter((game) => game.gamePk !== excludeGamePk)
-    .filter((game) => game.status?.codedGameState === "F" || game.status?.abstractGameState === "Final")
-    .sort((a, b) => Date.parse(b.gameDate) - Date.parse(a.gameDate))
-    .slice(0, LOOKBACK_GAMES)
-    .map((game) => ({
-      gamePk: game.gamePk,
-      side: game.teams?.away?.team?.id === teamId ? "away" : "home",
-    }));
+  if (!allGames) {
+    const { data } = await mlb.get("/schedule", {
+      params: {
+        sportId: 1,
+        teamId,
+        startDate: shiftDate(endDate, -120),
+        endDate,
+        gameType: "R",
+      },
+    });
+
+    allGames = (data.dates || [])
+      .flatMap((date) => date.games || [])
+      .filter((game) => game.status?.codedGameState === "F" || game.status?.abstractGameState === "Final")
+      .sort((a, b) => Date.parse(b.gameDate) - Date.parse(a.gameDate))
+      .slice(0, LOOKBACK_GAMES)
+      .map((game) => ({
+        gamePk: game.gamePk,
+        side: game.teams?.away?.team?.id === teamId ? "away" : "home",
+      }));
+
+    cache.set(cacheKey, allGames, TEAM_RECENT_GAMES_TTL_MS);
+  }
+
+  // Apply excludeGamePk after cache retrieval so the cached list stays reusable
+  return allGames.filter((game) => game.gamePk !== excludeGamePk);
 }
 
 async function computeTeamFirstInning(teamId, endDate, excludeGamePk) {
@@ -80,13 +114,13 @@ async function computeTeamFirstInning(teamId, endDate, excludeGamePk) {
   if (!recentGames.length) return emptyTeamFirst();
 
   const lineScores = await Promise.allSettled(
-    recentGames.map((game) => mlb.get(`/game/${game.gamePk}/linescore`))
+    recentGames.map((game) => getLinescore(game.gamePk))
   );
 
   const runs = lineScores.flatMap((result, index) => {
     if (result.status !== "fulfilled") return [];
     const side = recentGames[index].side;
-    const inning = result.value.data?.innings?.[0];
+    const inning = result.value?.innings?.[0];
     const firstRuns = Number(inning?.[side]?.runs);
     return Number.isNaN(firstRuns) ? [] : [firstRuns];
   });

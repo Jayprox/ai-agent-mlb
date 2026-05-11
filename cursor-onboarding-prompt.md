@@ -31,23 +31,19 @@ Every task has a **CODEX TASK N** section in `AGENT_SYSTEM_PROMPT.md`. The spec 
 
 ## Current task queue
 
-### ✅ No immediate task — backlog cleared
+### ✅ No immediate task queued
 
-A full backlog audit (Session 112) confirmed that every previously documented open item has been implemented. The codebase includes:
-
-- **Predictive Lane** (Phases 1–3): edge scoring on AI Board candidates, Predict tab with MIN_EDGE=0.08 filter, Calibration Panel bucketing simConfidence vs actual hit rate
-- **Batter Gamelog Pre-fetch Cron** (CODEX TASK 104): `snapshotBatterGamelogs` fires at 10 AM + 2 PM Honolulu, warming the DB before board opens
-- **Active Roster Fallback**: lineups route returns `source: "roster"` pre-lineup; board/HR/Hits tabs show roster hitters with `ROSTER` badge
-- **F5 Moneyline**: full Lab + Models tabs with `f5ml` scoring, AI Board integration, pick logging, and grading
-- **Hybrid AI Card Summaries**: `backend/routes/cardSummary.js` (Haiku + GPT-4o-mini fallback); board cards hydrate `aiReason` text on load
-- **Lab Calibration DB Migration**: `labCalibration.js` uses `lab_outcomes` PostgreSQL table with JSON file fallback
+Next items are in the backlog below — bring to Cowork to spec before implementing.
 
 ### 🟡 BACKLOG — Needs spec before implementing
 
 | Feature | Notes |
 |---|---|
-| **CODEX TASK 105 — Batch Gamelog Endpoint** | 🔴 DO THIS FIRST. Spec + prompt at `codex-task-105-prompt.md`. 270 HTTP requests → 1. Fixes Board load delay users reported. |
 | **BACKLOG TASK 61 — Remove Picks Tab** | Spec ready in `AGENT_SYSTEM_PROMPT.md`. Frontend-only (~600-line view block + supporting infrastructure). Read the full spec before starting. |
+| **BACKLOG TASK 62 — Localize Game Times** | 4 targeted find-and-replace fixes in `prop-scout-v7.jsx`. `formatLocalTime()` already exists — just needs consistent use. Spec in `AGENT_SYSTEM_PROMPT.md`. |
+| **BACKLOG TASK 63 — Share Schedule Cache** | Backend only. NRFI + bullpen routes call `/api/v1/schedule` 98x per startup — should be 1. Add `cache.get("schedule")` check in each route handler. Spec in `AGENT_SYSTEM_PROMPT.md`. |
+| **BACKLOG TASK 64 — Cache Linescore Responses** | Backend only. 936 linescore calls on cold start, only 316 unique — eliminate 620 duplicate fetches with a simple `cache.get/set('linescore:${pk}', ...)` wrapper. Spec in `AGENT_SYSTEM_PROMPT.md`. |
+| **BACKLOG TASK 65 — Fix Bullpen Double-Stats Bug** | Backend only, XS. Each bullpen pitcher calls `/api/v1/people/:id/stats` twice — remove the duplicate. Find it in `backend/routes/bullpen.js`. Spec in `AGENT_SYSTEM_PROMPT.md`. |
 | Global Track Record | App-wide hit rate tracking across Board/Picks/Lab. Needs product decision + full spec. Prerequisite (Lab DB) is done. |
 | (Any new features) | Bring to Cowork session for spec before implementing |
 

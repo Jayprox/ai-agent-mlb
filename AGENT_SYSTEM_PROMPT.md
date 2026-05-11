@@ -18399,3 +18399,204 @@ Frontend Board pre-fetch: collect all missing batter IDs → one `apiMutate` POS
 - K/Outs pitcher gamelog fetches — unaffected (small count, per-pitcher GETs are fine)
 
 **Prompt file:** `codex-task-105-prompt.md`
+
+---
+
+## BACKLOG TASK 62 — Localize All Game Times to User's Browser Timezone
+
+**Priority: Medium | LOE: Small | File: `prop-scout-v7.jsx` only**
+
+Game times are displayed inconsistently across the app. Some views correctly use `formatLocalTime(gameTime)` (which converts an ISO datetime to the user's local timezone via `toLocaleTimeString`), but others render the raw `game.time` string (which comes from the backend pre-formatted in ET, e.g. "3:07 PM ET") or hardcode `timeZone: "America/New_York"` explicitly.
+
+A user in Hawaii sees "3:07 PM ET" — the time means nothing to them. The fix is already built (`formatLocalTime` at line ~325) — it just needs to be applied consistently everywhere.
+
+### `formatLocalTime` — how it works
+
+```js
+const formatLocalTime = (isoStr) => {
+  if (!isoStr) return null;
+  try {
+    return new Date(isoStr).toLocaleTimeString("en-US", {
+      hour:         "numeric",
+      minute:       "2-digit",
+      timeZoneName: "short",   // renders "3:07 PM HST", "10:07 AM PT", etc.
+    });
+  } catch {
+    return null;
+  }
+};
+```
+
+It uses no explicit `timeZone` — the browser's local timezone is applied automatically. Result: "10:07 AM PT" for a Pacific user, "1:07 PM ET" for Eastern, "7:07 AM HST" for Hawaii.
+
+### Locations to fix (search, don't use line numbers)
+
+**1. Board game card subtitle** — search for:
+```js
+<div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>{game.time} · {game.stadium}</div>
+```
+Replace `{game.time}` with `{formatLocalTime(game.gameTime) ?? game.time}`.
+
+**2. K/Outs board card game time** — search for:
+```js
+<div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>{game.time}</div>
+```
+Replace with `{formatLocalTime(game.gameTime) ?? game.time}`.
+
+**3. AI Board group header — hardcoded ET** — search for:
+```js
+{new Date(group.gameTime).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/New_York" })} ET
+```
+Replace with `{formatLocalTime(group.gameTime)}` — the timezone abbreviation is already included in the `formatLocalTime` output via `timeZoneName: "short"`.
+
+**4. Any remaining `game.time` regex parsers** — there are two blocks that parse `game.time` with `/(\d+):(\d+)\s*(AM|PM)/i` to extract hour numbers (used for park factor wind direction). These don't need to be localized (they compute a numeric hour for internal logic, not display), but confirm they don't affect any rendered text.
+
+### What does NOT change
+
+- `formatLocalTime` itself — it's already correct
+- Backend time fields — `gameTime` (ISO) and `time` (ET string) both stay as-is
+- Sandbox mock data (hardcoded ET strings) — acceptable in sandbox mode
+
+### Validation checklist
+
+1. `npm run build` passes
+2. Board game cards show local time with correct timezone abbreviation (e.g. "10:07 AM PT" not "1:07 PM ET" for a Pacific user)
+3. AI Board group headers show local time
+4. K/Outs board cards show local time
+5. No "ET" hardcoded anywhere in rendered output (grep: `} ET`)
+
+---
+
+## BACKLOG TASK 63 — Share Schedule Cache Across All Routes (98 MLB API calls → 1)
+
+**Priority: High | LOE: Small | File: `backend/routes/nrfi.js`, `backend/routes/bullpen.js`, any other route calling `/api/v1/schedule` directly**
+
+### Problem
+
+On every cold start, `/api/v1/schedule` is called **98 times** to the MLB API. Every route that needs schedule data — NRFI, bullpen, and others — calls the MLB API directly, even though the main `warmCache` already fetches and stores the schedule at startup. The routes bypass the shared in-memory cache entirely.
+
+On a 15-game slate: roughly 6+ routes × 15 games × 2 teams ≈ 90-100 redundant schedule fetches per startup.
+
+### Root cause
+
+Each route handler calls something like:
+```js
+const schedRes = await fetch(`https://statsapi.mlb.com/api/v1/schedule?...`);
+```
+...without first checking `cache.get("schedule")` (or equivalent). The `warmCache` function stores the schedule under a cache key, but the individual route handlers don't look there first.
+
+### Fix
+
+In `backend/routes/nrfi.js` and `backend/routes/bullpen.js` (and any other route that calls `/api/v1/schedule` directly):
+
+1. Before calling the MLB API, check the shared in-memory cache:
+   ```js
+   const SCHEDULE_CACHE_KEY = "schedule"; // confirm the actual key used in warmCache
+   const cached = cache.get(SCHEDULE_CACHE_KEY);
+   if (cached) {
+     // use cached schedule — no MLB API call needed
+   } else {
+     // fetch from MLB API, then cache it
+   }
+   ```
+2. Confirm the TTL used in `warmCache` is appropriate (it should be short enough to stay fresh but long enough to survive a full pre-fetch cycle — 5 minutes is reasonable).
+
+### How to identify the correct cache key
+
+Search `backend/` for where `warmCache` sets the schedule:
+```
+grep -r "cache.set" backend/ | grep -i schedule
+```
+Use that exact key in the route handlers.
+
+### Validation checklist
+
+1. `npm run build` passes (backend only, no frontend changes)
+2. Restart the server cold; check logs — `/api/v1/schedule` should appear once (or at most once per TTL window), not dozens of times
+3. NRFI and bullpen responses still return correct data
+4. Run `grep "schedule" output.txt` on a fresh log — count should drop from ~98 to 1-2
+
+---
+
+## BACKLOG TASK 64 — Cache Linescore Responses to Eliminate Duplicate Fetches (936 calls → ~316)
+
+**Priority: High | LOE: Small | File: `backend/routes/` (wherever linescore is fetched — likely `pitcher-splits.js` or similar)**
+
+### Problem
+
+On cold start, `/api/v1/game/:pk/linescore` is called **936 times**, but only **316 unique game PKs** are actually requested — meaning each game's linescore is fetched an average of **~3x**, with some (e.g. game `824850`) fetched **6 times**.
+
+The pitcher-splits route looks up recent start results by fetching the linescore for each prior outing. Multiple starters on the same slate share prior game PKs (they both pitched in the same games recently), so the same completed linescore gets re-fetched from the MLB API every time.
+
+These are **completed-game linescores** — the data is immutable. Once fetched, it will never change. There is no reason to fetch the same game PK twice.
+
+### Fix
+
+Wrap every linescore fetch with a cache check:
+
+```js
+// Wherever linescore is fetched (search: "linescore")
+async function getLinescore(gamePk) {
+  const key = `linescore:${gamePk}`;
+  const cached = cache.get(key);
+  if (cached) return cached;
+
+  const res = await fetch(`https://statsapi.mlb.com/api/v1/game/${gamePk}/linescore`);
+  const data = await res.json();
+  // Completed games: cache indefinitely (or with a very long TTL like 24h)
+  // Use a short TTL (30s) if the game might still be live
+  cache.set(key, data, 24 * 60 * 60 * 1000); // 24 hours
+  return data;
+}
+```
+
+Replace all direct linescore fetches with calls to this helper. The in-memory cache will serve the result for all subsequent pitchers who reference the same game.
+
+### Notes
+
+- The cache key format `linescore:${gamePk}` follows the existing convention (cf. `gamelog:${id}:${group}`)
+- Only completed games should get the long TTL — if there's any risk a game is still live, use a shorter TTL (60 seconds is fine; it still eliminates the burst duplication)
+- No DB write-through needed — linescore is small and in-memory is sufficient
+
+### Validation checklist
+
+1. Server restarts cleanly
+2. Cold-start log: total linescore calls drop from ~936 to ~316 (one per unique game PK)
+3. Pitcher-splits responses are unchanged — same W/L/ND results on each card
+4. No duplicate `linescore:` cache keys (each game PK appears exactly once in log)
+
+---
+
+## BACKLOG TASK 65 — Fix Bullpen Double-Stats Bug (~856 redundant MLB API calls)
+
+**Priority: Medium | LOE: XS | File: `backend/routes/bullpen.js`**
+
+### Problem
+
+For every bullpen pitcher, the output log shows `/api/v1/people/:id/stats` called **twice in a row**, followed by `/api/v1/people/:id` once:
+
+```
+→ MLB API  GET https://statsapi.mlb.com/api/v1/people/666201/stats
+→ MLB API  GET https://statsapi.mlb.com/api/v1/people/666201/stats   ← duplicate
+→ MLB API  GET https://statsapi.mlb.com/api/v1/people/666201
+```
+
+With 30 bullpen fetches (15 games × 2 teams) × 13 pitchers each × 1 extra stats call = **~390 extra calls**. Combined with all related overhead, the duplication accounts for roughly **856 redundant people/stats API calls** on cold start.
+
+### Fix
+
+In `backend/routes/bullpen.js`, find where bullpen pitcher stats are fetched. There are likely two `await fetch(`.../people/${id}/stats...`)` calls in the same function, pipeline, or `Promise.all` block for the same pitcher — one of which is a duplicate.
+
+Search for:
+```
+grep -n "people" backend/routes/bullpen.js
+```
+
+Identify and remove the duplicate stats call. Keep whichever call retrieves the data actually used (ERA, WHIP, K/9, etc.). The `/api/v1/people/:id` call (profile endpoint) should remain — it's used for handedness/position.
+
+### Validation checklist
+
+1. Server starts cleanly; bullpen cards render correct ERA/fatigue data
+2. Cold-start log: each bullpen pitcher shows exactly one `→ MLB API GET .../stats` call, not two
+3. Bullpen ERA and fatigue classifications unchanged on the NRFI/game cards
+4. Total `people/[id]/stats` calls in log drop by ~50% for bullpen pitchers

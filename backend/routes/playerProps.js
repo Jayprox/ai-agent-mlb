@@ -29,7 +29,8 @@ const lastWord = (str) => str.trim().split(/\s+/).pop();
 // Format American odds integer → "+150" or "-110"
 const fmtOdds = (n) => (n == null ? null : n > 0 ? `+${n}` : String(n));
 const todayHonolulu = () => new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
-const ttlForReason = (reason) => reason === "ok" ? TTL : SHORT_TTL;
+const LONG_TTL     = 60 * 60 * 1000; // 1h — for completed/final games
+const ttlForReason = (reason) => reason === "ok" ? TTL : reason === "game_final" ? LONG_TTL : SHORT_TTL;
 
 async function buildPlayerPropsPayload(gamePk, eventIdHint = null) {
   const apiKey = process.env.ODDS_API_KEY;
@@ -48,10 +49,18 @@ async function buildPlayerPropsPayload(gamePk, eventIdHint = null) {
     throw err;
   }
 
-  const awayName = mlbGame.teams.away.team.name;
-  const homeName = mlbGame.teams.home.team.name;
-  const awayLast = lastWord(awayName);
-  const homeLast = lastWord(homeName);
+  const awayName  = mlbGame.teams.away.team.name;
+  const homeName  = mlbGame.teams.home.team.name;
+  const awayLast  = lastWord(awayName);
+  const homeLast  = lastWord(homeName);
+  const gameState = mlbGame.status?.abstractGameState; // "Preview" | "Live" | "Final"
+
+  // Prop markets close at/after first pitch — Odds API won't list completed
+  // games in /events. Short-circuit here so we don't waste API quota on them.
+  if (gameState === "Final") {
+    console.log(`  · Player props: game is Final — skipping Odds API  ${awayName} @ ${homeName}`);
+    return { props: [], reason: "game_final" };
+  }
 
   // ── Step 2: resolve Odds API event ID ────────────────────────────────
   let eventId = eventIdHint;

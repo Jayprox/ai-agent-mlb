@@ -58,14 +58,20 @@ router.post("/score", async (req, res) => {
     const client = getAnthropic();
     const message = await client.messages.create({
       model: MODEL,
-      max_tokens: 1200,
+      max_tokens: 2500,
       temperature: 0.15,
       system:
         "You score MLB prop betting candidates on a 0–100 scale. " +
         "Use only the supplied stats. Do not invent numbers or players. " +
         "Score meaning: 75–100 = strong edge, 55–74 = moderate lean, 40–54 = neutral, below 40 = weak. " +
         "Weight inputs: algorithmic score (35%), simulation confidence (35%), stat quality (30%). " +
-        "Write one factual reason sentence per candidate, 10–20 words, no hype or emojis. " +
+        "Write one factual reason sentence per candidate, 12–22 words, no hype or emojis. " +
+        "Always lead with the player or pitcher name. Use market-specific angles: " +
+        "k = K/9 or L3 avg Ks + opposing lineup K% + umpire or park edge; " +
+        "outs = avg IP + WHIP or control angle; " +
+        "hits = batter avg/form + opposing pitcher ERA or handedness split; " +
+        "hr = SLG or HR pace + park/wind angle; " +
+        "f5ml = SP ERA comparison + park or weather edge. " +
         "Return strict JSON only: {\"scores\":[{\"id\":\"...\",\"aiScore\":75,\"aiReason\":\"...\"}]}",
       messages: [{
         role: "user",

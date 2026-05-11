@@ -49,8 +49,14 @@ const TEAM_CITY = {
   WSH: ["wsh", "washington", "nationals", "nats"],
 };
 
-const WEB_KEYWORDS = ["news", "injury", "il ", " il,", "hurt", "scratch", "lineup change", "trade", "recent", "latest", "update", "report"];
-const SLATE_KEYWORDS = ["best play", "best prop", "top pick", "today", "slate", "recommend", "suggest", "should i", "what do you like", "who do you like"];
+const WEB_KEYWORDS    = ["news", "injury", "il ", " il,", "hurt", "scratch", "lineup change", "trade", "recent", "latest", "update", "report"];
+const SLATE_KEYWORDS  = ["best play", "best prop", "top pick", "today", "slate", "recommend", "suggest", "should i", "what do you like", "who do you like"];
+const PARLAY_KEYWORDS = ["parlay", "parlay", "multi-leg", "3-leg", "2-leg", "3 leg", "2 leg", "multi leg", "combine", "combo", "build me", "put together"];
+const BOARD_KEYWORDS  = ["board", "ai board", "k prop", "ks prop", "strikeout prop", "outs prop", "hits prop", "hit prop", "hr prop", "home run prop", "best k", "best hits", "best outs", "best hr", "pitcher prop", "batter prop", "top plays", "top picks", "best plays", "best picks"];
+const K_KEYWORDS      = ["k prop", "strikeout", "pitcher k", "k tab", "ks tab", "best k", "k props"];
+const HITS_KEYWORDS   = ["hits prop", "hit prop", "hits tab", "best hits", "batter hit"];
+const OUTS_KEYWORDS   = ["outs prop", "outs tab", "best outs", "innings prop", "ip prop"];
+const HR_KEYWORDS     = ["hr prop", "home run prop", "hr tab", "best hr", "homer prop"];
 
 let _client = null;
 function getClient() {
@@ -249,6 +255,40 @@ async function tavilySearch(query) {
   }
 }
 
+function formatBoardContext(candidates, { parlayMode = false, marketFilter = null } = {}) {
+  if (!candidates.length) return "";
+
+  const filtered = marketFilter
+    ? candidates.filter(c => c.market === marketFilter)
+    : candidates;
+
+  if (!filtered.length) return "";
+
+  const MARKET_LABELS = { k: "K PROPS", outs: "OUTS PROPS", hits: "HITS PROPS", hr: "HR PROPS", f5ml: "F5 ML" };
+
+  const byMarket = {};
+  filtered.forEach(c => {
+    if (!byMarket[c.market]) byMarket[c.market] = [];
+    byMarket[c.market].push(c);
+  });
+
+  const sections = Object.entries(byMarket).map(([mkt, cards]) => {
+    const label = MARKET_LABELS[mkt] ?? mkt.toUpperCase();
+    const rows = cards.map((c, i) => {
+      const lineStr = c.bookLine != null ? `O${c.bookLine}` : "no line posted";
+      const reasonStr = c.aiReason ? ` — ${c.aiReason}` : "";
+      return `  ${i + 1}. ${c.name ?? "TBD"} (${c.team ?? "?"}) | ${c.gameLabel ?? "?"} | AI Score ${c.aiScore ?? "?"} | Line: ${lineStr}${reasonStr}`;
+    });
+    return `${label}:\n${rows.join("\n")}`;
+  });
+
+  const header = parlayMode
+    ? "PROP SCOUT AI BOARD — CANDIDATES FOR PARLAY CONSTRUCTION:"
+    : "PROP SCOUT AI BOARD — TODAY'S RANKED CANDIDATES:";
+
+  return `${header}\n\n${sections.join("\n\n")}`;
+}
+
 function requireChatAccess(req, res, next) {
   const identity = (req.user?.username ?? req.user?.email ?? "").toLowerCase();
   if (!CHAT_ALLOWLIST.includes(identity)) {
@@ -272,6 +312,8 @@ router.post("/", async (req, res) => {
   const history = Array.isArray(body.history) ? body.history : [];
   if (!message) return res.status(400).json({ error: "message required" });
 
+  const boardCandidates = Array.isArray(body.boardCandidates) ? body.boardCandidates.slice(0, 40) : [];
+
   const userId = req.user?.id ?? req.user?.username ?? "unknown";
   if (getUsage(userId) >= DAILY_LIMIT) {
     return res.status(429).json({
@@ -282,8 +324,14 @@ router.post("/", async (req, res) => {
   }
 
   const lower = message.toLowerCase();
-  const needsWebSearch = WEB_KEYWORDS.some((kw) => lower.includes(kw));
+  const needsWebSearch  = WEB_KEYWORDS.some((kw) => lower.includes(kw));
   const isSlateQuestion = SLATE_KEYWORDS.some((kw) => lower.includes(kw));
+  const isBoardQuestion = boardCandidates.length > 0 && BOARD_KEYWORDS.some((kw) => lower.includes(kw));
+  const isParlayRequest = boardCandidates.length > 0 && PARLAY_KEYWORDS.some((kw) => lower.includes(kw));
+  const wantsKOnly     = K_KEYWORDS.some((kw) => lower.includes(kw));
+  const wantsHitsOnly  = HITS_KEYWORDS.some((kw) => lower.includes(kw));
+  const wantsOutsOnly  = OUTS_KEYWORDS.some((kw) => lower.includes(kw));
+  const wantsHROnly    = HR_KEYWORDS.some((kw) => lower.includes(kw));
 
   const today = todayHonolulu();
   let games = [];
@@ -405,6 +453,13 @@ DK: ML ${odds.awayML ?? "—"}/${odds.homeML ?? "—"} | Total ${odds.total ?? "
     }
   }
 
+  // Inject board candidates context when the question is board/parlay related
+  if (boardCandidates.length > 0 && (isBoardQuestion || isParlayRequest || isSlateQuestion)) {
+    const marketFilter = wantsKOnly ? "k" : wantsHitsOnly ? "hits" : wantsOutsOnly ? "outs" : wantsHROnly ? "hr" : null;
+    const boardText = formatBoardContext(boardCandidates, { parlayMode: isParlayRequest, marketFilter });
+    if (boardText) contextParts.push(boardText);
+  }
+
   let webContext = "";
   if (needsWebSearch) {
     const queryText = extractSearchQuery(message, matchedPitchers, matchedGames);
@@ -414,7 +469,14 @@ DK: ML ${odds.awayML ?? "—"}/${odds.homeML ?? "—"} | Total ${odds.total ?? "
     }
   }
 
-  const systemPrompt = `You are a sharp MLB prop research analyst with access to today's Prop Scout data — pitcher stats, sportsbook lines, umpire tendencies, weather, park factors, lineup data, and injury reports.
+  const systemPrompt = `You are a sharp MLB prop research analyst and professional sports bettor with access to today's Prop Scout data — pre-scored board candidates, pitcher stats, sportsbook lines, umpire tendencies, weather, park factors, lineup data, and injury reports.
+
+When AI Board candidate data is provided (PROP SCOUT AI BOARD section):
+- These are pre-ranked picks scored by the Prop Scout model — treat them as your primary source for specific recommendations
+- Always reference players by name and cite their AI Score, line, and key reason
+- For parlay requests: select 2–3 legs, strongly prefer legs from DIFFERENT games to avoid correlated outcomes, mix markets when possible (e.g. K prop + hits prop from separate games), calculate approximate combined implied probability (assume each leg near the line is ~52–55% to win unless AI Score is 75+ which is ~58–62%), flag any same-game legs as correlated risk
+- Parlay format: list each leg clearly (Player — Market — Line — Why), then give the combined read and overall confidence
+- For market-specific questions (best K props, best hits, etc.): rank the top 2–3 from that market, name the line, and give the sharpest reason to back it
 
 When answering prop or game-specific questions:
 - Cite specific numbers that support your analysis
