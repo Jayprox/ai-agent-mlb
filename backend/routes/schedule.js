@@ -4,8 +4,9 @@ const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
 const { query, isConnected } = require("../services/db");
 
-const SCHEDULE_TTL = 60 * 60 * 1000;
-const DB_FRESH_MS = 35 * 60 * 1000;
+const SCHEDULE_TTL       = 60 * 60 * 1000; // 1h — normal cache when pitchers are set
+const SCHEDULE_TTL_NOPITCHERS = 10 * 60 * 1000; // 10min — short cache when probables missing
+const DB_FRESH_MS        = 35 * 60 * 1000;
 
 // MLB team ID → abbreviation lookup (all 30 teams)
 const TEAM_ABBR = {
@@ -156,8 +157,9 @@ router.get("/", async (req, res) => {
   try {
     const transformed = await buildSchedulePayload(date);
 
-    // Cache for 1 hour — pitchers are set well before game time
-    cache.set(cacheKey, transformed, SCHEDULE_TTL);
+    // Short cache when no probable pitchers are set yet — re-check every 10 min
+    const hasPitchers = transformed.some(g => g.probablePitchers?.home || g.probablePitchers?.away);
+    cache.set(cacheKey, transformed, hasPitchers ? SCHEDULE_TTL : SCHEDULE_TTL_NOPITCHERS);
     res.setHeader("X-Cache", "MISS");
     res.json(transformed);
   } catch (err) {
