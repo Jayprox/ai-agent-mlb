@@ -9427,7 +9427,7 @@ export default function App() {
             ? computeGameBoard(gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)
             : [];
           const totalPitcherSlots = isPitcherBoard
-            ? (activeSlate ?? []).filter(g => g.pitcher?.id || g.awayPitcher?.id).length * 2
+            ? (activeSlate ?? []).filter(g => g.probablePitchers?.home?.id || g.probablePitchers?.away?.id).length * 2
             : 0;
           const totalBatters = isPitcherBoard
             ? totalPitcherSlots

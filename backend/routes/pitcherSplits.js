@@ -4,7 +4,8 @@ const axios   = require("axios");
 const cache   = require("../services/cache");
 
 const SEASON   = new Date().getFullYear();
-const TTL      = 6 * 60 * 60 * 1000; // 6 hours
+const TTL           = 6 * 60 * 60 * 1000; // 6 hours
+const MISS_TTL      = 30 * 60 * 1000;      // 30 min — cache "no data" to avoid hammering Savant
 
 const SAVANT_HEADERS = {
   "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -91,8 +92,9 @@ router.get("/:pitcherId", async (req, res) => {
   const cacheKey  = `splits:pitcher:${pitcherId}:${year}`;
 
   const cached = cache.get(cacheKey);
-  if (cached) {
+  if (cached !== undefined) {
     res.setHeader("X-Cache", "HIT");
+    if (cached === null) return res.status(502).json({ error: "No platoon splits available", pitcherId });
     return res.json(cached);
   }
 
@@ -117,6 +119,8 @@ router.get("/:pitcherId", async (req, res) => {
     }
   }
 
+  // Cache the miss so the warm-cache job and rapid retries don't keep hitting Savant
+  cache.set(cacheKey, null, MISS_TTL);
   return res.status(502).json({ error: "No platoon splits available", pitcherId });
 });
 
