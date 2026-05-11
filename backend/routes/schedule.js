@@ -6,7 +6,7 @@ const { query, isConnected } = require("../services/db");
 
 const SCHEDULE_TTL       = 60 * 60 * 1000; // 1h — normal cache when pitchers are set
 const SCHEDULE_TTL_NOPITCHERS = 10 * 60 * 1000; // 10min — short cache when probables missing
-const DB_FRESH_MS        = 35 * 60 * 1000;
+const DB_FRESH_MS        = 10 * 60 * 1000; // 10min — matches short TTL when no pitchers posted
 
 // MLB team ID → abbreviation lookup (all 30 teams)
 const TEAM_ABBR = {

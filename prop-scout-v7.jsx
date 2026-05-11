@@ -11441,6 +11441,36 @@ export default function App() {
                   </div>
                 </Section>
 
+                <Section title="⚡ Predict Tab — Edge-Based Plays">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                    The <span style={{ color: "#fbbf24", fontWeight: 700 }}>Predict</span> tab surfaces plays where the Prop Scout simulation model believes there is a meaningful pricing gap — the model's win probability is materially higher than what the sportsbook is implying. Only plays with a gap of 8 points or more are shown.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["SIM %", "The simulation model's estimated probability that this prop hits — e.g. 72% means the model thinks this outcome happens 72 times out of 100. Derived from the AI Board scoring pass using stat quality, matchup, and situational factors."],
+                      ["BOOK %", "The sportsbook's implied probability, calculated from the posted odds. A line of −130 implies ~57% probability. This is what you're paying for — if SIM is higher, there's a potential edge."],
+                      ["EDGE pts", "The raw gap: SIM% minus BOOK%. +12pts means the model is 12 percentage points more confident than the book. Only plays with +8pts or more make the board. Green = 15+ pts (strong edge), yellow = 8–14 pts (moderate edge)."],
+                      ["Markets", "Predict covers all five AI Board markets: K props, Outs, Hits, HR, and F5 ML. Each card shows the market badge and the direction (OVER/UNDER or HOME/AWAY for F5 ML)."],
+                      ["Upcoming / Locked", "Upcoming plays are for games that haven't started yet — these are actionable. Once a game goes live or final, plays move to the Locked section. Locked plays show their graded result (HIT ✓ or MISS ✗) once the game ends."],
+                      ["HIT / MISS grading", "Results are graded automatically after each game finishes. HIT = the model's lean was correct vs the book line. MISS = it wasn't. The running record (e.g. '5/7 hit') shows in the header. This is how you track whether the edge is real over time."],
+                      ["Model Calibration", "At the bottom of the page (once games have resolved), a calibration chart shows how well the SIM percentages are tracking actual outcomes — grouped into confidence bands (55–64%, 65–74%, 75–84%, 85%+). If the 75–84% band is hitting at 70%+, the model is well-calibrated at that confidence level."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", flexShrink: 0, minWidth: 80, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ background: "rgba(251,191,36,0.07)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#fde68a", fontWeight: 700, marginBottom: 4 }}>💡 Predict vs Board vs AI Board</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.7 }}>
+                      <span style={{ color: "#f9fafb" }}>Board</span> — ranks every pitcher/batter by algorithmic signal strength. Doesn't need a sportsbook line to show a card.<br />
+                      <span style={{ color: "#f9fafb" }}>AI Board</span> — re-ranks the same candidates using an AI scoring layer (Haiku + GPT-4o). Still signal-based, not line-dependent.<br />
+                      <span style={{ color: "#f9fafb" }}>Predict</span> — only shows plays where the model's probability is at least 8pts above the book's implied probability. Requires a live sportsbook line. Fewer plays, but each one has a specific, quantified edge against the market.
+                    </div>
+                  </div>
+                </Section>
+
                 <Section title="⚙ Settings">
                   <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
                     Access Settings by tapping the <span style={{ color: "#fbbf24", fontWeight: 700 }}>⚙</span> gear icon in the bottom footer bar. Settings are saved to your account server-side — they persist across devices and sessions.
