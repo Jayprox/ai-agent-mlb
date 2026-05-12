@@ -5185,8 +5185,12 @@ export default function App() {
     try {
       const data = await apiMutate("/api/card-summary", "POST", {
         premium,
-        cards: pending.map(({ id, market, lean, positives, caution, matchup, signals, name, hand, facingTeam, avgK3, avgIP, era, whip, oppKPct, umpire, umpireRating, bookLine, windFav, order }) => ({
-          id, market, lean, positives, caution, matchup: matchup ?? null,
+        cards: pending.map(({ id, market, lean, score, scoreTier, positives, negatives, caution, matchup, signals, name, hand, facingTeam, avgK3, avgIP, era, whip, oppKPct, umpire, umpireRating, bookLine, windFav, order }) => ({
+          id, market, lean,
+          score:     score     ?? null,
+          scoreTier: scoreTier ?? "mid",
+          positives, negatives: negatives ?? [],
+          caution, matchup: matchup ?? null,
           signals: signals ?? [], name: name ?? null, hand: hand ?? null,
           facingTeam: facingTeam ?? null, avgK3: avgK3 ?? null, avgIP: avgIP ?? null,
           era: era ?? null, whip: whip ?? null, oppKPct: oppKPct ?? null,
