@@ -507,8 +507,37 @@ const normalizeScratchName = (name) => String(name ?? "").toLowerCase().replace(
 
 const buildBoardSummaryRequest = (c, type) => {
   const factors = c?.factors ?? generateWhyFactors(c, type);
-  const positives = topPositiveSummaryLines(factors, 2);
-  const caution = topCautionSummaryLine(factors);
+
+  // For game-board markets the score is HOME-biased (> 50 = lean HOME/NRFI/OVER).
+  // When the lean is toward the AWAY side the factors with pts > 0 are actually
+  // working AGAINST the lean — don't feed them to the AI as "positives."
+  const GAME_BOARD_TYPES = new Set(["nrfi", "total", "spread", "ml", "f5ml", "f5spread"]);
+  let positives, caution;
+  if (GAME_BOARD_TYPES.has(type) && c?.lean) {
+    const leanHigh = ["HOME", "NRFI", "OVER"].includes(c.lean); // score > 50
+    const sortedByImpact = [...(factors ?? [])].sort(
+      (a, b) => Math.abs(b?.pts ?? 0) - Math.abs(a?.pts ?? 0)
+    );
+    // Factors that SUPPORT the lean direction
+    const supporting = sortedByImpact.filter(f => leanHigh ? (f?.pts ?? 0) > 0 : (f?.pts ?? 0) < 0);
+    // Factors that WORK AGAINST the lean
+    const headwinds  = sortedByImpact.filter(f => leanHigh ? (f?.pts ?? 0) < 0 : (f?.pts ?? 0) > 0);
+    positives = supporting.slice(0, 2).map(f => String(f?.detail ?? f?.label ?? "").trim()).filter(Boolean);
+    const topHeadwind = headwinds[0];
+    caution   = topHeadwind ? (String(topHeadwind?.detail ?? topHeadwind?.label ?? "").trim() || null) : null;
+  } else {
+    positives = topPositiveSummaryLines(factors, 2);
+    caution   = topCautionSummaryLine(factors);
+  }
+
+  // For game boards, explicitly pass home/away team abbreviations so the AI
+  // cannot confuse which side has home-field advantage.
+  const awayAbbr = c?.away?.abbr ?? null;
+  const homeAbbr = c?.home?.abbr ?? null;
+  const gameMatchup = (awayAbbr && homeAbbr)
+    ? `${awayAbbr} (away) @ ${homeAbbr} (home)`
+    : (c?.matchup ?? null);
+
   return {
     id: `board:${type}:${c?.id ?? c?.gamePk}:${c?.score ?? "na"}`,
     market:
@@ -525,7 +554,7 @@ const buildBoardSummaryRequest = (c, type) => {
     lean: c?.leanAbbr ?? c?.lean ?? "",
     positives,
     caution,
-    matchup:      c?.matchup ?? null,
+    matchup:      gameMatchup,
     signals:      Array.isArray(c?.signals) ? c.signals.slice(0, 4) : [],
     name:         c?.name ?? null,
     hand:         c?.hand ?? null,
@@ -1358,11 +1387,12 @@ const buildLiveGame = (sg) => {
     odds:        { ...tpl.odds, lineMove: "none" },  // lineMove reset — overridden by Odds API when live
     nrfi:        tpl.nrfi,     // mock — pending historical data integration
     bullpen:     tpl.bullpen,  // mock — pending bullpen data integration
-    pitcher:     mkPitcher(hp),  // home SP — faces the away lineup
-    awayPitcher: mkPitcher(ap),  // away SP — faces the home lineup
-    batter:      tpl.batter,     // featured batter — pending player selection logic
-    lineups:     { away: [], home: [] },
-    props:       [],
+    pitcher:          mkPitcher(hp),       // home SP — faces the away lineup
+    awayPitcher:      mkPitcher(ap),       // away SP — faces the home lineup
+    probablePitchers: sg.probablePitchers, // preserved so computePitcherBoard + totalPitcherSlots work on activeSlate
+    batter:           tpl.batter,          // featured batter — pending player selection logic
+    lineups:          { away: [], home: [] },
+    props:            [],
   };
 };
 
@@ -9452,8 +9482,88 @@ export default function App() {
               return ta - tb;
             });
           })();
+          // ── Scratch substitution for locked batter candidates ───────────────────
+          // Called at render-time for each locked batter candidate.
+          // • Player still in lineup      → keep as-is
+          // • Player scratched, good sub  → swap card to replacement (score ≥ 50)
+          // • Player scratched, no sub    → drop slot (return [])
+          // • Pitcher boards              → drop if SP is no longer the listed starter
+          const applySubstitution = (c) => {
+            const lu = liveLineups[c.gamePk];
+            if (!lu) return [c]; // no lineup data — keep
+
+            if (isPitcherBoard) {
+              // For pitcher boards: check if the locked pitcher is still the probable starter
+              const game = activeSlate.find(g => String(g.gamePk) === String(c.gamePk));
+              if (!game) return [c];
+              const sp = c.team === game.home?.abbr ? game.probablePitchers?.home : game.probablePitchers?.away;
+              // If the probable starter changed and no longer matches locked candidate, drop
+              if (sp?.id && String(sp.id) !== String(c.id)) return [];
+              return [c];
+            }
+
+            // Batter board (hits / hr)
+            const game      = activeSlate.find(g => String(g.gamePk) === String(c.gamePk));
+            const side      = game && String(c.team) === String(game.away?.abbr) ? "away" : "home";
+            const lineupArr = lu[side] ?? [];
+            const scratchIds = new Set((lu?.scratches?.[side] ?? []).map(s => String(s.id)));
+
+            const isScratched = scratchIds.has(String(c.id)) ||
+                                !lineupArr.some(b => String(b.id) === String(c.id));
+
+            if (!isScratched) return [c]; // still playing — keep
+
+            // Find the replacement who took their batting order slot
+            const replacement = lineupArr.find(b =>
+              b.order === c.order && String(b.id) !== String(c.id)
+            );
+            if (!replacement?.id) return []; // no one in that slot — drop
+
+            const hlog = liveHittingLog[replacement.id];
+            if (!hlog) return []; // no stats yet — drop rather than show empty card
+
+            const pf         = PARK_FACTORS[game?.home?.abbr] ?? NEUTRAL_PARK;
+            const facingP    = side === "away" ? game?.pitcher : (game?.awayPitcher ?? game?.pitcher);
+            const pitHand    = facingP?.hand ?? "R";
+            const sd         = liveStatSplits[`${replacement.id}:hitting`];
+            const wxFav      = !!(liveWeather[c.gamePk]?.hrFavorable);
+
+            const repScore   = boardTab === "hr"
+              ? hrBoardScore(hlog, replacement.order, pitHand, pf, wxFav, sd)
+              : hitBoardScore(hlog, replacement.order, pitHand, pf, sd);
+
+            if (!repScore || repScore < 50) return []; // not worth showing — drop slot
+
+            // Build replacement card (inherits game metadata from original locked card)
+            const market   = boardTab === "hr" ? "batter_home_runs" : "batter_hits";
+            const ppKey    = String(c.gamePk);
+            const props    = Array.isArray(livePlayerProps[ppKey]?.props) ? livePlayerProps[ppKey].props : [];
+            const lastName = (replacement.name ?? "").split(" ").pop().toLowerCase();
+            const propLine = props.find(p =>
+              p.market === market && p.player.toLowerCase().includes(lastName)
+            ) ?? null;
+
+            return [{
+              ...c,
+              id:             replacement.id,
+              name:           replacement.name,
+              hand:           replacement.hand ?? "R",
+              order:          replacement.order,
+              team:           c.team,
+              score:          repScore,
+              avg:            hlog.avg ?? "—",
+              propLine,
+              isSubstitution: true,
+              substitutedFor: c.name,
+            }];
+          };
+
           const hasLocked = lockedCandidatesByGame.length > 0;
-          const lockedBoardCandidatesForTab = lockedCandidatesByGame.flatMap(g => g.candidates);
+          // Apply substitutions to each game's locked candidates at render-time.
+          // This keeps the localStorage snapshot clean (original locked data)
+          // while dynamically handling late scratches without dropping the whole game group.
+          const lockedBoardCandidatesForTab = lockedCandidatesByGame
+            .flatMap(g => g.candidates.flatMap(c => applySubstitution(c)));
           // Game board candidates computed on-the-fly for the active sub-tab
           const gameBoardCandidates = isGameBoard
             ? computeGameBoard(gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)
@@ -10109,6 +10219,11 @@ export default function App() {
                           <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.name}</span>
                           <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
                           {c.order != null && <span style={{ fontSize: 9, color: "#6b7280" }}>#{c.order}</span>}
+                          {c.isSubstitution && (
+                            <div style={{ background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.35)", borderRadius: 5, padding: "1px 6px" }}>
+                              <span style={{ fontSize: 8, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", letterSpacing: "0.05em" }}>↔ SUB</span>
+                            </div>
+                          )}
                           {boardGameStatus === "LIVE" && (
                             <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
                               <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
@@ -10146,6 +10261,11 @@ export default function App() {
                         <div style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>
                           vs {c.pitcher} ({c.pitcherHand}HP) · {c.gameLabel}{c.gameTime ? ` ${formatLocalTime(c.gameTime)}` : ""}
                         </div>
+                        {c.isSubstitution && c.substitutedFor && (
+                          <div style={{ fontSize: 8, color: "#92400e", background: "rgba(251,191,36,0.08)", borderRadius: 4, padding: "1px 5px", marginTop: 2, display: "inline-block" }}>
+                            replaces {c.substitutedFor}
+                          </div>
+                        )}
                         {/* Stats row */}
                         <div style={{ display: "flex", gap: 10, marginTop: 5, flexWrap: "wrap" }}>
                           {c.avg !== "—" && (
@@ -10280,6 +10400,9 @@ export default function App() {
                         </div>
                         {lockedCandidatesByGame.map(group => {
                           const phase = getBoardGamePhase(group.gamePk);
+                          // Apply scratch substitution at render-time so game groups reflect live lineup
+                          const substituted = group.candidates.flatMap(c => applySubstitution(c));
+                          if (!substituted.length) return null; // all slots dropped — skip game group
                           return (
                             <div key={group.gamePk} style={{ marginBottom: 12, opacity: phase === "final" ? 0.85 : 1 }}>
                               <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace",
@@ -10291,7 +10414,7 @@ export default function App() {
                                   {phase === "live" ? "● LIVE" : "FINAL"}
                                 </span>
                               </div>
-                              {group.candidates.map(item => renderBoardCandidateCard(
+                              {substituted.map(item => renderBoardCandidateCard(
                                 item,
                                 Math.max(0, lockedBoardCandidatesForTab.findIndex(c => candidateKey(c) === candidateKey(item)))
                               ))}
