@@ -3735,6 +3735,28 @@ export default function App() {
       .finally(() => setSlateLoading(false));
   }, [slateDate]);
 
+  // Auto-refresh schedule every 5 min to keep game statuses current for board locking.
+  // Merges status fields into existing liveSlate without wiping other state.
+  useEffect(() => {
+    if (IS_STATS_SANDBOX) return;
+    const interval = setInterval(() => {
+      const url = slateDate ? `/api/schedule?date=${slateDate}` : "/api/schedule";
+      apiFetch(url)
+        .then(games => {
+          setLiveSlate(prev => {
+            if (!prev || !games?.length) return prev;
+            // Merge updated statuses without replacing the full slate (avoids re-fetch cascade)
+            return prev.map(g => {
+              const fresh = games.find(fg => fg.gamePk === g.gamePk);
+              return fresh ? { ...g, status: fresh.status } : g;
+            });
+          });
+        })
+        .catch(() => {});
+    }, 5 * 60 * 1000); // every 5 minutes
+    return () => clearInterval(interval);
+  }, [slateDate]);
+
   // Fetch recent IL / DL placements for lineup flags
   useEffect(() => {
     if (IS_STATS_SANDBOX) return;
