@@ -95,10 +95,12 @@ function cardPayload(card) {
 
 const HAIKU_SYSTEM =
   "You write one factual sentence per MLB betting card. " +
+  "You MUST return one summary object for EVERY card in the request — same count, same ids, no omissions. " +
   "Tone is driven by scoreTier: " +
   "  high (≥75) → confident edge statement, lead with what makes this pick strong; " +
   "  mid (55–74) → balanced — name the main edge but acknowledge the key headwind; " +
   "  low (<55)   → honest risk assessment — lead with what's working AGAINST this pick, do NOT spin it positive. " +
+  "For high and mid tiers: cite at least two concrete numbers or stats from the payload (ERA, WHIP, K/9, avgK3, avgIP, AVG, OPS, bookLine, oppKPct, park, etc.) when any are present. " +
   "Use only the supplied data. Do not invent stats or players. " +
   "Always lead with the player or pitcher name if provided. Use signals[] and negatives[] as primary material for low-tier cards. " +
   "Market-specific angles: " +
@@ -112,10 +114,12 @@ const HAIKU_SYSTEM =
 
 const GPT4O_MINI_SYSTEM =
   "You write one factual sentence per MLB betting card. " +
+  "You MUST return one summary object for EVERY card in the request — same count, same ids, no omissions. " +
   "Tone is driven by scoreTier: " +
   "  high (≥75) → confident edge statement, lead with what makes this pick strong; " +
   "  mid (55–74) → balanced — name the main edge but acknowledge the key headwind; " +
   "  low (<55)   → honest risk assessment — lead with what's working AGAINST this pick, do NOT spin it positive. " +
+  "For high and mid tiers: cite at least two concrete numbers from the payload when present. " +
   "Use only the supplied data. Do not invent stats or players. " +
   "Always lead with the player or pitcher name if provided. Use signals[] and negatives[] as primary material for low-tier cards. " +
   "Market-specific angles: " +
@@ -129,6 +133,7 @@ const GPT4O_MINI_SYSTEM =
 
 const GPT4O_SYSTEM =
   "You are a sharp MLB prop betting analyst. Write one specific, realistic sentence per card. " +
+  "You MUST return one summary object for EVERY card in the request — same count, same ids, no omissions. " +
   "Tone is driven by scoreTier: " +
   "  high (≥75) → confident, analyst-voice edge statement citing at least two concrete numbers; " +
   "  mid (55–74) → balanced assessment — lead with the main edge but include the most significant headwind; " +
@@ -146,11 +151,17 @@ const GPT4O_SYSTEM =
   "Sentence length: 18–30 words. No emojis, no bullet points. " +
   "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}";
 
+/** Enough output headroom so JSON is not truncated mid-batch (was causing fallback text for tail cards). */
+function maxOutputTokensForBatch(cardCount, premium) {
+  const per = premium ? 200 : 160;
+  return Math.min(8192, Math.max(1024, 350 + Math.max(1, cardCount) * per));
+}
+
 async function generateWithAnthropic(cards) {
   const client = getAnthropic();
   const message = await client.messages.create({
     model: SUMMARY_MODEL,
-    max_tokens: 2000,
+    max_tokens: maxOutputTokensForBatch(cards.length, false),
     temperature: 0.2,
     system: HAIKU_SYSTEM,
     messages: [
@@ -169,6 +180,7 @@ async function generateWithOpenAI(cards) {
   const client = getOpenAI();
   const message = await client.chat.completions.create({
     model: FALLBACK_MODEL,
+    max_tokens: maxOutputTokensForBatch(cards.length, false),
     response_format: { type: "json_object" },
     temperature: 0.2,
     messages: [
@@ -186,6 +198,7 @@ async function generateWithGPT4o(cards) {
   const client = getOpenAI();
   const message = await client.chat.completions.create({
     model: PREMIUM_MODEL,
+    max_tokens: maxOutputTokensForBatch(cards.length, true),
     response_format: { type: "json_object" },
     temperature: 0.3,
     messages: [
@@ -246,25 +259,30 @@ router.post("/", async (req, res) => {
 
   if (!uncached.length) return res.json({ summaries });
 
-  try {
-    const generated = await generateSummaries(uncached, isPremium);
-    const byId = new Map(
-      Array.isArray(generated?.summaries)
-        ? generated.summaries.map((item) => [item?.id, String(item?.text ?? "").trim()])
-        : []
-    );
+  const SUMMARY_CHUNK = 10; // large single calls were truncated → many cards fell back to semicolon glue
 
-    uncached.forEach((card) => {
-      const text = byId.get(card.id) || fallbackSummary(card);
-      summaries[card.id] = text;
-      cache.set(card._cacheKey, text, SUMMARY_TTL);
-    });
+  try {
+    for (let offset = 0; offset < uncached.length; offset += SUMMARY_CHUNK) {
+      const slice = uncached.slice(offset, offset + SUMMARY_CHUNK);
+      const generated = await generateSummaries(slice, isPremium);
+      const byId = new Map(
+        Array.isArray(generated?.summaries)
+          ? generated.summaries.map((item) => [item?.id, String(item?.text ?? "").trim()])
+          : []
+      );
+
+      slice.forEach((card) => {
+        const text = byId.get(card.id) || fallbackSummary(card);
+        summaries[card.id] = text;
+        cache.set(card._cacheKey, text, SUMMARY_TTL);
+      });
+    }
 
     return res.json({ summaries });
   } catch (err) {
     console.warn(`  ⚠ card-summary failed: ${err.message}`);
     uncached.forEach((card) => {
-      summaries[card.id] = fallbackSummary(card);
+      if (summaries[card.id] == null) summaries[card.id] = fallbackSummary(card);
     });
     return res.json({ summaries, fallback: true });
   }

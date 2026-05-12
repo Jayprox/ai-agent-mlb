@@ -587,18 +587,23 @@ const buildBoardSummaryRequest = (c, type) => {
 const buildModelSummaryRequest = (p) => {
   const allSignals = (p?.signals ?? []).filter(Boolean);
   const positives  = allSignals.filter(s => !SUMMARY_NEGATIVE_RE.test(String(s))).slice(0, 2);
-  const caution    = allSignals.find(s => SUMMARY_NEGATIVE_RE.test(String(s))) ?? null;
+  const negatives    = allSignals.filter(s => SUMMARY_NEGATIVE_RE.test(String(s))).slice(0, 2).map(s => String(s).trim());
+  const caution      = allSignals.find(s => SUMMARY_NEGATIVE_RE.test(String(s))) ?? null;
+  const score        = p?.confidence ?? null;
+  const scoreTier    = score == null ? "mid" : score >= 75 ? "high" : score >= 55 ? "mid" : "low";
   return {
     id: `model:${p?.gamePk}:${p?.label}:${p?.confidence ?? "na"}`,
     market: `${p?.propType ?? "Model"} Picks`,
     lean: p?.lean ?? "",
     positives,
+    negatives,
     caution,
     signals:    allSignals.slice(0, 4),
     name:       p?.player ?? p?.playerName ?? null,
     hand:       p?.hand ?? null,
     facingTeam: p?.opponent ?? p?.facingTeam ?? null,
-    score:      p?.confidence ?? null,
+    score,
+    scoreTier,
   };
 };
 
@@ -5246,9 +5251,14 @@ export default function App() {
       });
 
     const allRequests = [...requests, ...lockedRequests.filter(r => !requests.some(lr => lr.id === r.id))];
-    hydrateCardSummaries(allRequests);
-    const premiumRequests = allRequests.filter(r => (r.score ?? 0) >= 75);
-    if (premiumRequests.length) hydrateCardSummaries(premiumRequests, { premium: true });
+    let cancelled = false;
+    void (async () => {
+      await hydrateCardSummaries(allRequests);
+      if (cancelled) return;
+      const premiumRequests = allRequests.filter(r => (r.score ?? 0) >= 75);
+      if (premiumRequests.length) await hydrateCardSummaries(premiumRequests, { premium: true });
+    })();
+    return () => { cancelled = true; };
   }, [view, boardTab, gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires, liveLineups, livePlayerProps, liveHittingLog, liveStatSplits, liveGameLog, liveTeamStats, lockedBoardCandidates, hydrateCardSummaries]);
 
   // Lock board candidates when a game goes live — prevents survivorship bias in result tracking.
@@ -5300,9 +5310,14 @@ export default function App() {
   useEffect(() => {
     if (view !== "model" || !topSlatePicks.length) return;
     const modelRequests = topSlatePicks.slice(0, 12).map(buildModelSummaryRequest);
-    hydrateCardSummaries(modelRequests);
-    const premiumModel = modelRequests.filter(r => (r.score ?? 0) >= 75);
-    if (premiumModel.length) hydrateCardSummaries(premiumModel, { premium: true });
+    let cancelled = false;
+    void (async () => {
+      await hydrateCardSummaries(modelRequests);
+      if (cancelled) return;
+      const premiumModel = modelRequests.filter(r => (r.score ?? 0) >= 75);
+      if (premiumModel.length) await hydrateCardSummaries(premiumModel, { premium: true });
+    })();
+    return () => { cancelled = true; };
   }, [view, topSlatePicks, hydrateCardSummaries]);
 
   const QUICK_CHIPS = [
