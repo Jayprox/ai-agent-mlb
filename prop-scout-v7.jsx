@@ -5235,13 +5235,21 @@ export default function App() {
         ? computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
         : computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
     )
-      .slice(0, 20)
+      .slice(0, 60)  // cover top 60 live candidates (board renders well past rank 20 for multi-game slates)
       .map(c => buildBoardSummaryRequest(c, isGameBoard ? gameSubTab : boardTab));
 
-    hydrateCardSummaries(requests);
-    const premiumRequests = requests.filter(r => (r.score ?? 0) >= 75);
+    // Also include any locked candidates for this tab so they get summaries too
+    const lockedRequests = Object.values(lockedBoardCandidates)
+      .flatMap(entry => {
+        const tabCandidates = isGameBoard ? [] : (entry[boardTab] ?? []);
+        return tabCandidates.map(c => buildBoardSummaryRequest(c, boardTab));
+      });
+
+    const allRequests = [...requests, ...lockedRequests.filter(r => !requests.some(lr => lr.id === r.id))];
+    hydrateCardSummaries(allRequests);
+    const premiumRequests = allRequests.filter(r => (r.score ?? 0) >= 75);
     if (premiumRequests.length) hydrateCardSummaries(premiumRequests, { premium: true });
-  }, [view, boardTab, gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires, liveLineups, livePlayerProps, liveHittingLog, liveStatSplits, liveGameLog, liveTeamStats, hydrateCardSummaries]);
+  }, [view, boardTab, gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires, liveLineups, livePlayerProps, liveHittingLog, liveStatSplits, liveGameLog, liveTeamStats, lockedBoardCandidates, hydrateCardSummaries]);
 
   // Lock board candidates when a game goes live — prevents survivorship bias in result tracking.
   // Re-runs when hitting logs arrive so batter tabs (Hits/HR) aren't stored empty.
