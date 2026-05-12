@@ -41,8 +41,18 @@ function safeJsonParse(text) {
 }
 
 function fallbackSummary(card) {
+  const tier = card?.scoreTier ?? "mid";
+  const negatives = Array.isArray(card?.negatives) ? card.negatives.filter(Boolean).slice(0, 2) : [];
   const positives = Array.isArray(card?.positives) ? card.positives.filter(Boolean).slice(0, 2) : [];
   const caution = card?.caution ? String(card.caution).trim() : "";
+
+  if (tier === "low") {
+    // Lead with what's working against this card
+    if (negatives.length >= 2) return `${negatives[0]}; ${negatives[1]}.`;
+    if (negatives.length === 1) return caution ? `${negatives[0]}. ${caution}.` : `${negatives[0]}.`;
+    return caution || `${card?.market ?? "Matchup"} shows limited edge from the current factor mix.`;
+  }
+
   if (positives.length >= 2) {
     return caution
       ? `${positives[0]}; ${positives[1]}. ${caution}.`
@@ -54,51 +64,99 @@ function fallbackSummary(card) {
   return caution || `${card?.market ?? "Matchup"} leans ${card?.lean ?? "neutral"} from the current factor mix.`;
 }
 
+// Shared card payload shape for all AI calls
+function cardPayload(card) {
+  return {
+    id:           card.id,
+    market:       card.market,
+    lean:         card.lean,
+    score:        card.score ?? null,
+    scoreTier:    card.scoreTier ?? "mid",   // "high" | "mid" | "low"
+    positives:    card.positives ?? [],
+    negatives:    card.negatives ?? [],
+    caution:      card.caution ?? null,
+    matchup:      card.matchup ?? null,
+    signals:      card.signals ?? [],
+    name:         card.name ?? null,
+    hand:         card.hand ?? null,
+    facingTeam:   card.facingTeam ?? null,
+    avgK3:        card.avgK3 ?? null,
+    avgIP:        card.avgIP ?? null,
+    era:          card.era ?? null,
+    whip:         card.whip ?? null,
+    oppKPct:      card.oppKPct ?? null,
+    umpire:       card.umpire ?? null,
+    umpireRating: card.umpireRating ?? null,
+    bookLine:     card.bookLine ?? null,
+    windFav:      card.windFav ?? null,
+    order:        card.order ?? null,
+  };
+}
+
+const HAIKU_SYSTEM =
+  "You write one factual sentence per MLB betting card. " +
+  "Tone is driven by scoreTier: " +
+  "  high (≥75) → confident edge statement, lead with what makes this pick strong; " +
+  "  mid (55–74) → balanced — name the main edge but acknowledge the key headwind; " +
+  "  low (<55)   → honest risk assessment — lead with what's working AGAINST this pick, do NOT spin it positive. " +
+  "Use only the supplied data. Do not invent stats or players. " +
+  "Always lead with the player or pitcher name if provided. Use signals[] and negatives[] as primary material for low-tier cards. " +
+  "Market-specific angles: " +
+  "k = K/9 or avgK3 + oppKPct + one edge (umpire, park); " +
+  "outs = avgIP + whip + rest/workload signal; " +
+  "hits = batterVsHand split or L5 form + opposing pitcher ERA; " +
+  "hr = SLG/HR pace + park or wind; " +
+  "f5ml/f5spread/nrfi/total/ml/spread = SP comparison + park/weather. " +
+  "Keep each sentence 12–22 words. No hype, no emojis, no bullet points. " +
+  "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}";
+
+const GPT4O_MINI_SYSTEM =
+  "You write one factual sentence per MLB betting card. " +
+  "Tone is driven by scoreTier: " +
+  "  high (≥75) → confident edge statement, lead with what makes this pick strong; " +
+  "  mid (55–74) → balanced — name the main edge but acknowledge the key headwind; " +
+  "  low (<55)   → honest risk assessment — lead with what's working AGAINST this pick, do NOT spin it positive. " +
+  "Use only the supplied data. Do not invent stats or players. " +
+  "Always lead with the player or pitcher name if provided. Use signals[] and negatives[] as primary material for low-tier cards. " +
+  "Market-specific angles: " +
+  "k = K/9 or avgK3 + oppKPct + one edge (umpire, park); " +
+  "outs = avgIP + whip + rest/workload signal; " +
+  "hits = batterVsHand split or L5 form + opposing pitcher ERA; " +
+  "hr = SLG/HR pace + park or wind; " +
+  "f5ml/f5spread/nrfi/total/ml/spread = SP comparison + park/weather. " +
+  "Keep each sentence 12–22 words. No hype, no emojis, no bullet points. " +
+  "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}";
+
+const GPT4O_SYSTEM =
+  "You are a sharp MLB prop betting analyst. Write one specific, realistic sentence per card. " +
+  "Tone is driven by scoreTier: " +
+  "  high (≥75) → confident, analyst-voice edge statement citing at least two concrete numbers; " +
+  "  mid (55–74) → balanced assessment — lead with the main edge but include the most significant headwind; " +
+  "  low (<55)   → honest, direct risk summary — explain clearly what factors are working against this pick; do NOT frame it as a good bet. " +
+  "Use only the supplied data. Do not invent stats or players. " +
+  "Always lead with the player or pitcher name. For low-tier cards, draw from negatives[] and caution first. " +
+  "Market-specific guidance: " +
+  "• k: combine K rate (K/9 or L3 avg Ks), opposing lineup weakness (oppKPct), and one situational edge (umpire, park, weather, signals). " +
+  "• outs: lead with longevity (avgIP), command (WHIP), and any rest/workload angle from signals. " +
+  "• hits: lead with batter's handedness split vs tonight's pitcher, recent form (L5), and pitcher's ERA or trend. " +
+  "• hr: power profile (SLG or HR pace) + best situational edge (park HR factor, wind blowing out, pitcher ERA). " +
+  "• f5ml/f5spread: SP quality comparison + park or weather edge; mention that bullpen doesn't factor in (F5 ends after 5 innings). " +
+  "• nrfi/total/ml/spread: game-level edge — SP ERA match-up, park run environment, weather, or line value. " +
+  "• Model Picks: player name, market, key stat, and why the line has value tonight. " +
+  "Sentence length: 18–30 words. No emojis, no bullet points. " +
+  "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}";
+
 async function generateWithAnthropic(cards) {
   const client = getAnthropic();
   const message = await client.messages.create({
     model: SUMMARY_MODEL,
     max_tokens: 2000,
     temperature: 0.2,
-    system:
-      "You write one factual sentence per MLB betting card explaining why it scores well. " +
-      "Use only the supplied data. Do not invent stats or players. " +
-      "Always lead with the player or pitcher name if provided. Use signals[] as primary material. " +
-      "Market-specific angles: " +
-      "k = K/9 or avgK3 + oppKPct + one edge (umpire, park); " +
-      "outs = avgIP + whip + rest/workload signal; " +
-      "hits = batterVsHand split or L5 form + opposing pitcher ERA; " +
-      "hr = SLG/HR pace + park or wind; " +
-      "f5ml/f5spread/nrfi/total/ml/spread = SP comparison + park/weather. " +
-      "Keep each sentence 12–22 words. No hype, no emojis, no bullet points. " +
-      "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}",
+    system: HAIKU_SYSTEM,
     messages: [
       {
         role: "user",
-        content: JSON.stringify({
-          cards: cards.map((card) => ({
-            id: card.id,
-            market: card.market,
-            lean: card.lean,
-            positives: card.positives ?? [],
-            caution: card.caution ?? null,
-            matchup: card.matchup ?? null,
-            signals: card.signals ?? [],
-            name: card.name ?? null,
-            hand: card.hand ?? null,
-            facingTeam: card.facingTeam ?? null,
-            avgK3: card.avgK3 ?? null,
-            avgIP: card.avgIP ?? null,
-            era: card.era ?? null,
-            whip: card.whip ?? null,
-            oppKPct: card.oppKPct ?? null,
-            umpire: card.umpire ?? null,
-            umpireRating: card.umpireRating ?? null,
-            bookLine: card.bookLine ?? null,
-            windFav: card.windFav ?? null,
-            order: card.order ?? null,
-          })),
-        }),
+        content: JSON.stringify({ cards: cards.map(cardPayload) }),
       },
     ],
   });
@@ -114,47 +172,10 @@ async function generateWithOpenAI(cards) {
     response_format: { type: "json_object" },
     temperature: 0.2,
     messages: [
-      {
-        role: "system",
-        content:
-          "You write one factual sentence per MLB betting card explaining why it scores well. " +
-          "Use only the supplied data. Do not invent stats or players. " +
-          "Always lead with the player or pitcher name if provided. Use signals[] as primary material. " +
-          "Market-specific angles: " +
-          "k = K/9 or avgK3 + oppKPct + one edge (umpire, park); " +
-          "outs = avgIP + whip + rest/workload signal; " +
-          "hits = batterVsHand split or L5 form + opposing pitcher ERA; " +
-          "hr = SLG/HR pace + park or wind; " +
-          "f5ml/f5spread/nrfi/total/ml/spread = SP comparison + park/weather. " +
-          "Keep each sentence 12–22 words. No hype, no emojis, no bullet points. " +
-          "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}",
-      },
+      { role: "system", content: GPT4O_MINI_SYSTEM },
       {
         role: "user",
-        content: JSON.stringify({
-          cards: cards.map((card) => ({
-            id: card.id,
-            market: card.market,
-            lean: card.lean,
-            positives: card.positives ?? [],
-            caution: card.caution ?? null,
-            matchup: card.matchup ?? null,
-            signals: card.signals ?? [],
-            name: card.name ?? null,
-            hand: card.hand ?? null,
-            facingTeam: card.facingTeam ?? null,
-            avgK3: card.avgK3 ?? null,
-            avgIP: card.avgIP ?? null,
-            era: card.era ?? null,
-            whip: card.whip ?? null,
-            oppKPct: card.oppKPct ?? null,
-            umpire: card.umpire ?? null,
-            umpireRating: card.umpireRating ?? null,
-            bookLine: card.bookLine ?? null,
-            windFav: card.windFav ?? null,
-            order: card.order ?? null,
-          })),
-        }),
+        content: JSON.stringify({ cards: cards.map(cardPayload) }),
       },
     ],
   });
@@ -168,50 +189,10 @@ async function generateWithGPT4o(cards) {
     response_format: { type: "json_object" },
     temperature: 0.3,
     messages: [
-      {
-        role: "system",
-        content:
-          "You are a sharp MLB prop betting analyst. Write one specific, confident sentence per card " +
-          "explaining the key edge for this pick. Use only the supplied data. Do not invent stats or players. " +
-          "Always lead with the player or pitcher name. Cite at least two concrete numbers. " +
-          "Sound like a professional bettor who has reviewed the data — direct, no hedging, no hype. " +
-          "Market-specific guidance: " +
-          "• k: combine K rate (K/9 or L3 avg Ks), opposing lineup weakness (oppKPct), and one situational edge (umpire, park, weather, signals). " +
-          "• outs: lead with longevity (avgIP), command (WHIP), and any rest/workload angle from signals. " +
-          "• hits: lead with batter's handedness split vs tonight's pitcher (batterVsHand.avg/ops if available), recent form (L5), and pitcher's ERA or trend. " +
-          "• hr: power profile (SLG or HR pace) + best situational edge (park HR factor, wind blowing out, pitcher ERA). " +
-          "• f5ml/f5spread: SP quality comparison + park or weather edge; mention that bullpen doesn't factor in (F5 ends after 5 innings). " +
-          "• nrfi/total/ml/spread: game-level edge — SP ERA match-up, park run environment, weather, or line value. " +
-          "• Model Picks: player name, market, key stat, and why the line has value tonight. " +
-          "Sentence length: 18–30 words. No emojis, no bullet points. " +
-          "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}",
-      },
+      { role: "system", content: GPT4O_SYSTEM },
       {
         role: "user",
-        content: JSON.stringify({
-          cards: cards.map((card) => ({
-            id: card.id,
-            market: card.market,
-            lean: card.lean,
-            positives: card.positives ?? [],
-            caution: card.caution ?? null,
-            signals: card.signals ?? [],
-            name: card.name ?? null,
-            hand: card.hand ?? null,
-            facingTeam: card.facingTeam ?? null,
-            avgK3: card.avgK3 ?? null,
-            avgIP: card.avgIP ?? null,
-            era: card.era ?? null,
-            whip: card.whip ?? null,
-            oppKPct: card.oppKPct ?? null,
-            umpire: card.umpire ?? null,
-            umpireRating: card.umpireRating ?? null,
-            bookLine: card.bookLine ?? null,
-            windFav: card.windFav ?? null,
-            order: card.order ?? null,
-            matchup: card.matchup ?? null,
-          })),
-        }),
+        content: JSON.stringify({ cards: cards.map(cardPayload) }),
       },
     ],
   });
@@ -239,16 +220,19 @@ router.post("/", async (req, res) => {
   inputCards.forEach((card) => {
     if (!card?.id) return;
     const payload = {
-      market: card.market ?? "",
-      lean: card.lean ?? "",
+      market:    card.market ?? "",
+      lean:      card.lean ?? "",
+      score:     card.score ?? null,
+      scoreTier: card.scoreTier ?? "mid",
       positives: Array.isArray(card.positives) ? card.positives.slice(0, 3) : [],
-      caution: card.caution ?? null,
-      matchup: card.matchup ?? null,
-      signals: Array.isArray(card.signals) ? card.signals.slice(0, 4) : [],
-      name: card.name ?? null,
-      hand: card.hand ?? null,
+      negatives: Array.isArray(card.negatives) ? card.negatives.slice(0, 2) : [],
+      caution:   card.caution ?? null,
+      matchup:   card.matchup ?? null,
+      signals:   Array.isArray(card.signals) ? card.signals.slice(0, 4) : [],
+      name:      card.name ?? null,
+      hand:      card.hand ?? null,
       facingTeam: card.facingTeam ?? null,
-      premium: isPremium,
+      premium:   isPremium,
     };
     const hash = crypto.createHash("md5").update(JSON.stringify(payload)).digest("hex");
     const cacheKey = `card-summary:${hash}`;
