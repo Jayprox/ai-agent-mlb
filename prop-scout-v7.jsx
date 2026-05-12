@@ -5199,7 +5199,8 @@ export default function App() {
   }, [view, boardTab, gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires, liveLineups, livePlayerProps, liveHittingLog, liveStatSplits, liveGameLog, liveTeamStats, hydrateCardSummaries]);
 
   // Lock board candidates when a game goes live — prevents survivorship bias in result tracking.
-  // Runs when liveSlate updates. Idempotent: only locks a gamePk once.
+  // Re-runs when hitting logs arrive so batter tabs (Hits/HR) aren't stored empty.
+  // Uses activeSlate (enriched with game.pitcher/awayPitcher) so platoon hands are correct.
   useEffect(() => {
     if (!liveSlate || view !== "board") return;
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
@@ -5207,24 +5208,33 @@ export default function App() {
     liveSlate.forEach(game => {
       const phase = getBoardGamePhase(game.gamePk);
       if (phase === "upcoming") return;
-      if (lockedBoardCandidates[game.gamePk]) return;
 
+      // Allow re-locking if batter tabs are still empty (hitting logs may have arrived late)
+      const existing = lockedBoardCandidates[game.gamePk];
+      const batterLocked  = existing?.hits?.length > 0 || existing?.hr?.length > 0;
+      const pitcherLocked = existing?.k?.length   > 0 || existing?.outs?.length > 0;
+      if (batterLocked && pitcherLocked) return; // fully locked — nothing to do
+
+      // Use activeSlate (enriched) so game.pitcher/awayPitcher are correct for platoon splits
       const newEntry = {
-        hits: computeBatterBoard("hits", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
+        hits: batterLocked  ? (existing?.hits ?? []) :
+              computeBatterBoard("hits", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
                 .filter(c => String(c.gamePk) === String(game.gamePk)),
-        hr:   computeBatterBoard("hr", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
+        hr:   batterLocked  ? (existing?.hr ?? []) :
+              computeBatterBoard("hr", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
                 .filter(c => String(c.gamePk) === String(game.gamePk)),
-        k:    computePitcherBoard("k", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
+        k:    pitcherLocked ? (existing?.k ?? []) :
+              computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
                 .filter(c => String(c.gamePk) === String(game.gamePk)),
-        outs: computePitcherBoard("outs", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
+        outs: pitcherLocked ? (existing?.outs ?? []) :
+              computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
                 .filter(c => String(c.gamePk) === String(game.gamePk)),
       };
 
-      // Only lock if we actually have candidates — if lineup data isn't ready yet,
-      // skip and let the effect retry when liveLineups updates.
-      const hasContent = newEntry.hits.length > 0 || newEntry.hr.length > 0
-                      || newEntry.k.length > 0    || newEntry.outs.length > 0;
-      if (!hasContent) return;
+      // Only commit when we have genuinely new content — avoids re-writing identical empty arrays
+      const hasNewBatters  = !batterLocked  && (newEntry.hits.length > 0 || newEntry.hr.length > 0);
+      const hasNewPitchers = !pitcherLocked && (newEntry.k.length   > 0 || newEntry.outs.length > 0);
+      if (!hasNewBatters && !hasNewPitchers) return;
 
       setLockedBoardCandidates(prev => {
         const updated = { ...prev, [game.gamePk]: newEntry };
@@ -5232,7 +5242,7 @@ export default function App() {
         return updated;
       });
     });
-  }, [liveSlate, view, liveLineups]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [liveSlate, view, liveLineups, liveHittingLog]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (view !== "model" || !topSlatePicks.length) return;
