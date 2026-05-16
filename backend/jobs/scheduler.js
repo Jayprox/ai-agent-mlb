@@ -5,6 +5,7 @@ const {
   snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, snapshotPitcherGamelogs, snapshotBatterGamelogs, runScoutEvaluation, todayHonolulu,
 } = require("./snapshotJobs");
 const { gradePendingPicks } = require("./gradePicksJob");
+const { resolveCardSnapshots } = require("./resolveCardSnapshotsJob");
 const { resolveLabCalibration } = require("./resolveLabCalibrationJob");
 const { refreshUmpireData } = require("./refreshUmpireDataJob");
 const { warmCache } = require("./warmCache");
@@ -115,6 +116,22 @@ function startScheduler() {
     yesterday.setDate(yesterday.getDate() - 1);
     const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
     await runScoutEvaluation(yDate);
+  }, { timezone: "Pacific/Honolulu" });
+
+  // Resolve Board card snapshots — 1 AM and 2 AM Honolulu
+  // West coast games finish ~9–10 PM Honolulu; run twice to catch late finishes
+  cron.schedule("0 1 * * *", async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    await resolveCardSnapshots(yDate);
+  }, { timezone: "Pacific/Honolulu" });
+
+  cron.schedule("0 2 * * *", async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yDate = yesterday.toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    await resolveCardSnapshots(yDate);
   }, { timezone: "Pacific/Honolulu" });
 
   // Grade pending picks nightly at 4 AM Honolulu (after all west coast games finish)

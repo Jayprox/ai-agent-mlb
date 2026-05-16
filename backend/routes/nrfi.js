@@ -3,6 +3,9 @@ const router = express.Router();
 const mlb = require("../services/mlbApi");
 const cache = require("../services/cache");
 
+const _linescoreInFlight = new Map(); // gamePk → Promise
+const _recentGamesInFlight = new Map(); // `${teamId}:${endDate}` → Promise
+
 const NRFI_TTL_MS = 60 * 60 * 1000;
 const LOOKBACK_GAMES = 20;
 
@@ -70,39 +73,65 @@ async function getLinescore(gamePk) {
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  const { data } = await mlb.get(`/game/${gamePk}/linescore`);
-  cache.set(cacheKey, data, LINESCORE_TTL_MS);
-  return data;
+  if (_linescoreInFlight.has(gamePk)) return _linescoreInFlight.get(gamePk);
+
+  const promise = mlb.get(`/game/${gamePk}/linescore`)
+    .then(({ data }) => {
+      cache.set(cacheKey, data, LINESCORE_TTL_MS);
+      _linescoreInFlight.delete(gamePk);
+      return data;
+    })
+    .catch((err) => {
+      _linescoreInFlight.delete(gamePk);
+      throw err;
+    });
+
+  _linescoreInFlight.set(gamePk, promise);
+  return promise;
 }
 
 async function fetchRecentTeamGames(teamId, endDate, excludeGamePk) {
   // Cache the raw completed-games list keyed by team+date (before excludeGamePk filter,
   // since the same list is reused for both away and home team lookups on a given day).
   const cacheKey = `teamRecentGames:${teamId}:${endDate}`;
+  const inflightKey = `${teamId}:${endDate}`;
   let allGames = cache.get(cacheKey);
 
   if (!allGames) {
-    const { data } = await mlb.get("/schedule", {
-      params: {
-        sportId: 1,
-        teamId,
-        startDate: shiftDate(endDate, -120),
-        endDate,
-        gameType: "R",
-      },
-    });
+    if (_recentGamesInFlight.has(inflightKey)) {
+      allGames = await _recentGamesInFlight.get(inflightKey);
+    } else {
+      const promise = mlb.get("/schedule", {
+        params: {
+          sportId: 1,
+          teamId,
+          startDate: shiftDate(endDate, -120),
+          endDate,
+          gameType: "R",
+        },
+      })
+        .then(({ data }) => {
+          const games = (data.dates || [])
+            .flatMap((date) => date.games || [])
+            .filter((game) => game.status?.codedGameState === "F" || game.status?.abstractGameState === "Final")
+            .sort((a, b) => Date.parse(b.gameDate) - Date.parse(a.gameDate))
+            .slice(0, LOOKBACK_GAMES)
+            .map((game) => ({
+              gamePk: game.gamePk,
+              side: game.teams?.away?.team?.id === teamId ? "away" : "home",
+            }));
+          cache.set(cacheKey, games, TEAM_RECENT_GAMES_TTL_MS);
+          _recentGamesInFlight.delete(inflightKey);
+          return games;
+        })
+        .catch((err) => {
+          _recentGamesInFlight.delete(inflightKey);
+          throw err;
+        });
 
-    allGames = (data.dates || [])
-      .flatMap((date) => date.games || [])
-      .filter((game) => game.status?.codedGameState === "F" || game.status?.abstractGameState === "Final")
-      .sort((a, b) => Date.parse(b.gameDate) - Date.parse(a.gameDate))
-      .slice(0, LOOKBACK_GAMES)
-      .map((game) => ({
-        gamePk: game.gamePk,
-        side: game.teams?.away?.team?.id === teamId ? "away" : "home",
-      }));
-
-    cache.set(cacheKey, allGames, TEAM_RECENT_GAMES_TTL_MS);
+      _recentGamesInFlight.set(inflightKey, promise);
+      allGames = await promise;
+    }
   }
 
   // Apply excludeGamePk after cache retrieval so the cached list stays reusable

@@ -16559,6 +16559,44 @@ All other parts of Task 97 (MARKET_META, tab filter, getAiBoardGrade, card rende
 
 ---
 
+**HANDOFF NOTE — 2026-05-15 — CODEX TASK 119 COMPLETED (Top-20 Filter for Hits/HR Board Tabs)**
+
+- Added `boardTop20` state near the board state declarations and reset it to `false` on `boardTab` change
+- Applied the Top-20 filter at render time only:
+  - `displayLiveCandidates`
+  - `displayLockedCandidates`
+- Re-grouped the filtered display arrays back into per-game live / locked sections so the existing rolling-lock board layout stays intact
+- Added the `TOP 20` toggle chip to the prop-board sub-header and limited it to the `Hits` / `HR` tabs only
+- Left all non-display logic untouched:
+  - counts / summaries
+  - AI summary hydration
+  - board snapshot / backtesting lock flow
+  - K / Outs tabs
+- No backend changes; single-file frontend task in `prop-scout-v7.jsx`
+
+---
+
+**HANDOFF NOTE — 2026-05-15 — CODEX TASK 120 COMPLETED (Cold-Start API Efficiency)**
+
+- Added module-level inflight dedup Maps in `backend/routes/nrfi.js`:
+  - `_linescoreInFlight`
+  - `_recentGamesInFlight`
+- Updated `getLinescore(gamePk)` to use:
+  - cache hit
+  - inflight reuse
+  - one underlying MLB request per unique prior `gamePk`
+- Updated `fetchRecentTeamGames(teamId, endDate, excludeGamePk)` to use:
+  - cache hit
+  - inflight reuse keyed by `${teamId}:${endDate}`
+  - exclude filtering applied after the cached list is retrieved
+- Updated `backend/routes/bullpen.js#getPitcherData` to combine:
+  - `stats=season`
+  - `stats=gameLog`
+  into one `stats=season,gameLog` MLB call, while preserving the same returned shape (`stat`, `games`, `person`)
+- No frontend changes, no schema changes, no user-facing behavior changes
+
+---
+
 ## CODEX TASK 98 — AI Board Survivorship Bias Fix
 
 **File:** `prop-scout-v7.jsx` only.
@@ -18515,6 +18553,92 @@ Use that exact key in the route handlers.
 2. Restart the server cold; check logs — `/api/v1/schedule` should appear once (or at most once per TTL window), not dozens of times
 3. NRFI and bullpen responses still return correct data
 4. Run `grep "schedule" output.txt` on a fresh log — count should drop from ~98 to 1-2
+
+---
+
+## HANDOFF NOTE — 2026-05-16 — CODEX TASK 121 COMPLETED (Lock Games Board Candidates at Game Start)
+
+**Files changed:** `prop-scout-v7.jsx`
+
+**What changed**
+- Added `lockedGameBoardCandidates` state with Honolulu-date localStorage hydration via:
+  - `game_board_locked_snapshot`
+- Added a new game-board lock `useEffect` immediately after the existing prop-board lock effect
+  - locks once a game leaves `"upcoming"`
+  - snapshots all 6 game sub-tabs per gamePk:
+    - `nrfi`
+    - `total`
+    - `spread`
+    - `ml`
+    - `f5ml`
+    - `f5spread`
+  - skips already-locked games
+  - skips empty/cold lock attempts when no sub-tab produced a candidate
+- Replaced the active `gameBoardCandidates` computation with a merged live+locked version
+  - upcoming games continue using live `computeGameBoard(...)`
+  - live/final games substitute the locked pregame candidate for the active sub-tab
+- Added `getGameBoardCandidatesForSubTab(sub)` helper
+- Rewrote `gameSubtabHitSummary` to use the merged helper instead of raw `computeGameBoard(...)`
+
+**Why**
+- Fixes the critical Games-board bug where pregame cards were being silently re-ranked/replaced after first pitch, causing hit badges to settle against the wrong candidates
+
+**What stayed unchanged**
+- No backend changes
+- No schema changes
+- No changes to prop-board lock logic
+- No changes to `computeGameBoard(...)` internals
+
+**Validation**
+- `npm run build` passed
+
+---
+
+## HANDOFF NOTE — 2026-05-16 — CODEX TASKS 122–124 COMPLETED (K Model / NRFI Factors / EV Badges)
+
+**Files changed:** `prop-scout-v7.jsx`
+
+### Task 122 — K model upgrade
+- Replaced the old K/9-first `kBoardScore(...)` weighting with:
+  - `SwStr%` as the primary strikeout signal
+  - `Chase Rate` (`chasePct` / `oSwing`) as a secondary swing-miss factor
+  - `K/9` preserved only as graceful fallback when swing-miss fields are absent
+- Preserved all existing secondary factors:
+  - recent Ks
+  - park
+  - umpire
+  - WHIP
+  - opponent K%
+  - xwOBA allowed
+- Added SwStr% / Chase% display to pitcher board cards when present
+
+### Task 123 — NRFI model upgrade
+- Updated `computeGameBoard(...)` signature to accept optional `liveLineups = {}`
+- Re-weighted historical first-inning scoring into the stronger:
+  - `1st Inning Scoring History`
+  - each team scored independently
+  - combined max impact ±14
+- Added new `Top-Order OBP` NRFI factor using lineup spots 1–3 when OBP is available on lineup batters
+- Passed `liveLineups` only to the two render-time Games board candidate builders:
+  - active `gameBoardCandidates`
+  - `getGameBoardCandidatesForSubTab(...)`
+- Left all other `computeGameBoard(...)` call sites untouched so they rely on the default empty-object fallback
+
+### Task 124 — EV / line value context on batter board cards
+- Added `computeEVEdge(...)` helper in the board render IIFE
+- HR / Hits board cards now show an EV badge when:
+  - edge ≥ `+3%`
+  - or negative value ≤ `-5%`
+- Badge includes:
+  - model implied %
+  - book implied %
+  - best available odds
+- In `TOP 20` mode for HR / Hits only:
+  - display arrays now sort by EV edge before slicing to 20
+- K / Outs / Games remain unaffected
+
+**Validation**
+- `npm run build` passed
 
 ---
 

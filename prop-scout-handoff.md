@@ -6585,3 +6585,235 @@ Spec added as **BACKLOG TASK 62** in `AGENT_SYSTEM_PROMPT.md`.
 - DB warm cache (`warmCache` cron) runs before frontend connects — if it completes before user lands, most of the above is moot; the issue only manifests on cold start or after a Railway restart
 
 *Updated 2026-05-09 — Session 117 complete · Cold-start audit + BACKLOG TASKs 63/64/65 added*
+
+---
+
+## 🗒 Session 118 — Score-Tier-Aware AI Summaries + Pre-Fetch Fix
+
+### Score-tier-aware summaries for all Board cards
+
+Previously AI summaries were only meaningfully generated for high-scoring (≥75) cards. Yellow and red cards fell through to `fallbackCardSummary` — a semicolon-joined phrase string like "Hot — on a tear recently; Good hitter (.270+). Neutral park for hits." which wasn't useful.
+
+**Root cause 1 — `buildBoardSummaryRequest` didn't compute `negatives[]` or `scoreTier`.**
+Fixed by adding to the returned payload:
+```js
+const scoreTier = score == null ? "mid" : score >= 75 ? "high" : score >= 55 ? "mid" : "low";
+const sortedNeg = [...(factors ?? [])].filter(f => (f?.pts ?? 0) <= 0).sort((a, b) => (a?.pts ?? 0) - (b?.pts ?? 0));
+negatives = sortedNeg.slice(0, 2).map(f => String(f?.detail ?? f?.label ?? "").trim()).filter(Boolean);
+return { ..., negatives, score, scoreTier };
+```
+
+**Root cause 2 — `hydrateCardSummaries` POST body was missing `score`, `scoreTier`, `negatives`.**
+The destructure list when building the API call omitted these three fields — backend received `scoreTier: undefined` → defaulted to `"mid"` for every card. Fixed by adding all three to the destructure and POST payload.
+
+**Root cause 3 — Pre-fetch useEffect had `.slice(0, 20)`, capping AI requests to top 20 candidates.**
+Cards ranked 21+ (Basallo #22, Judge #40, etc.) always fell through to fallback text. Fixed by increasing to `.slice(0, 60)` and also pre-fetching locked candidates:
+```js
+const lockedRequests = Object.values(lockedBoardCandidates)
+  .flatMap(entry => {
+    const tabCandidates = isGameBoard ? [] : (entry[boardTab] ?? []);
+    return tabCandidates.map(c => buildBoardSummaryRequest(c, boardTab));
+  });
+const allRequests = [...requests, ...lockedRequests.filter(r => !requests.some(lr => lr.id === r.id))];
+```
+
+**Backend (`backend/routes/cardSummary.js`) changes:**
+- Added `cardPayload()` helper including `score`, `scoreTier`, `negatives`
+- Updated all three system prompts (Haiku, gpt-4o-mini, gpt-4o) with tier-aware tone instructions:
+  - `high (≥75)` → confident edge statement, lead with what makes this pick strong; cite ≥2 stats
+  - `mid (55–74)` → balanced — name main edge but acknowledge key headwind
+  - `low (<55)` → honest risk assessment — lead with what's working AGAINST the pick, do NOT spin positive
+- Added `negatives[]` and `scoreTier` to cache key payload so changing fields busts stale cache
+- Updated `fallbackSummary()` to be tier-aware (low tier leads with negatives)
+
+### Layout audit (research question, no code changes)
+
+1. **Mobile-first or desktop-first?** Hybrid, desktop-leaning. Root container `maxWidth: 960` centered. Base layout assumes wider viewport then shrinks via JS conditionals.
+2. **Nav style:** Top nav only — horizontal flex-wrap button row in app header. No bottom nav bar.
+3. **CSS responsiveness:** No `@media` queries. Pure inline JS conditionals on `windowWidth > 640` and `isNarrowPhone` (≤430). Flexbox + CSS Grid for layout.
+4. **Card widths:** Slate cards go 1-column (mobile) → 2-column grid (>640px). Board/prop cards always single-column. Root padding: 12px mobile → 24px desktop, capped at 960px.
+
+*Updated 2026-05-15 — Session 118 complete · Score-tier summaries + pre-fetch fix + layout audit*
+
+---
+
+## 🗒 Session 119 — Backtesting Architecture + CODEX TASK 118 (Phases 1 & 2)
+
+### Why backtesting is limited without this
+
+Going back to a past date in research mode doesn't produce a faithful replay because:
+- Odds API is live-only — historical lines not available
+- `lockedBoardCandidates` is in-memory only — lost on refresh/session end
+- AI summaries are cached for only 6 hours
+
+### Architecture scoped (4 phases)
+
+**Phase 1 — Snapshot at lock time** (implemented)
+**Phase 2 — Result resolution via cron** (implemented)
+**Phase 3 — History replay UI** (backlog — needs data first)
+**Phase 4 — Performance dashboard** (backlog — needs Phase 3 + sample size)
+
+Player prop markets only for Phases 1 & 2: K, Hits, HR, Outs. Game-level markets (ML, Spread, NRFI, Total) out of scope.
+
+### CODEX TASK 118 — implemented and approved
+
+**New files:**
+- `backend/migrations/005_board_card_snapshots.sql` — new table with columns: `id`, `slate_date`, `game_pk`, `card_id`, `market`, `lean`, `score`, `score_tier`, `book_line`, `ai_summary`, `card_data` (JSONB), `locked_at`, `result_hit`, `actual_stat`, `resolved_at`. Unique index on `(slate_date, card_id, market)` — idempotent.
+- `backend/routes/boardSnapshot.js` — `POST /api/board-snapshot` (idempotent insert, `ON CONFLICT DO NOTHING`) + `GET /api/board-snapshot/:date` (returns cards grouped by market for Phase 3 replay).
+- `backend/jobs/resolveCardSnapshotsJob.js` — self-contained job (copies `fetchBoxForGrading`, `normalizeName`, `parseIpToOuts` from gradePicksJob pattern). Queries unresolved snapshots for a date, fetches MLB boxscores, resolves K/Outs via pitcher match + Hits/HR via batter match. HR: line ≤0.5 → binary (any HR = hit), line >0.5 → lean comparison.
+
+**Modified files:**
+- `backend/server.js` — route mounted at `/api/board-snapshot`; admin trigger `GET /api/admin/jobs/resolve-card-snapshots?date=YYYY-MM-DD`.
+- `backend/jobs/scheduler.js` — two cron entries at 1 AM and 2 AM Honolulu to resolve yesterday's snapshots.
+- `prop-scout-v7.jsx` — fire-and-forget `fetch POST /api/board-snapshot` added immediately before `setLockedBoardCandidates`. Builds `newlyLocked` from cards just gaining content (`hasNewBatters`/`hasNewPitchers`). Each card enriched with `market`, `lean` (score ≥55 → "over"), `scoreTier`, `bookLine` (DK → FD → CZR → propLine → suggestedLine priority). `IS_SANDBOX` guarded.
+
+**Migration applied** to Railway Postgres via `psql` public URL. Table confirmed live with `\d board_card_snapshots`.
+
+**Admin smoke test command:**
+```bash
+curl -H "x-admin-secret: YOUR_SECRET" \
+  "https://ai-agent-mlb-production.up.railway.app/api/admin/jobs/resolve-card-snapshots?date=YYYY-MM-DD"
+```
+Returns `{ ok: true, date, resolved: N, skipped: M }`.
+
+**Important note on lean derivation:** `lean` is computed as `score >= 55 → "over"`. This is a valid approximation for batter/pitcher prop markets. If under-leaning cards are ever added to the Board, this logic needs revisiting.
+
+**Backlog tasks added:**
+- Task #72 — Phase 3: History replay UI in date picker
+- Task #73 — Phase 4: Performance dashboard (hit rate by tier/market)
+
+*Updated 2026-05-15 — Session 119 complete · CODEX TASK 118 specced, implemented, approved, migrated*
+
+---
+
+## 🗒 Session 120 — CODEX TASK 119 Specced (Top-20 Filter for Hits/HR Tabs)
+
+### Feature
+
+Toggle chip labeled **"TOP 20"** on the Hits and HR board tabs that limits the displayed card list to rank ≤ 20. Renders inline with the existing sub-header rank label row.
+
+### Key design decisions
+
+- New state: `boardTop20` (boolean), resets to `false` on `boardTab` change
+- Filter applied at render time only via `.slice(0, 20)` on display arrays — the underlying `lockedBoardCandidatesForTab` and `liveBoardCandidates` arrays are never mutated
+- All other logic (counts, AI summary hydration, backtesting snapshot POST) continues to use full arrays
+- K and Outs tabs completely unaffected
+- Chip style: amber (`#fbbf24`) when active, matches existing board UI monospace palette
+
+**Prompt file:** `codex-task-119-prompt.md`
+
+*Updated 2026-05-15 — Session 120 complete · CODEX TASK 119 specced*
+
+---
+
+## 🗒 Session 121 — Codex: Top-20 Filter for Hits/HR Board Tabs
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Added `boardTop20` state and reset it to `false` whenever `boardTab` changes
+- Applied the filter at render time only via:
+  - `displayLiveCandidates`
+  - `displayLockedCandidates`
+- Re-grouped those filtered arrays back into the existing per-game live / locked board sections so the rolling-lock layout remains unchanged
+- Added a `TOP 20` toggle chip to the prop-board sub-header
+- Restricted the chip to `Hits` and `HR` only
+- Left all non-display logic untouched:
+  - summaries / counts
+  - AI summary hydration
+  - backtesting snapshot lock flow
+  - K / Outs tabs
+
+*Updated 2026-05-15 — Session 121 complete · CODEX TASK 119 implemented*
+
+---
+
+## 🗒 Session 122 — Codex: Cold-Start API Efficiency
+
+**Files changed this session:** `backend/routes/nrfi.js`, `backend/routes/bullpen.js`
+
+**Changes:**
+- Added module-level inflight dedup Maps in `nrfi.js`:
+  - `_linescoreInFlight`
+  - `_recentGamesInFlight`
+- `getLinescore(gamePk)` now uses cache → inflight → fetch, so parallel cold-start requests reuse the same MLB linescore Promise
+- `fetchRecentTeamGames(teamId, endDate, excludeGamePk)` now uses cache → inflight → fetch, keyed by `${teamId}:${endDate}`
+- Both inflight Maps clean up on resolve and reject
+- `bullpen.js#getPitcherData(personId)` now combines `stats=season` and `stats=gameLog` into a single `stats=season,gameLog` MLB request plus the existing `/people/:id` profile call
+- Returned bullpen data shape is unchanged:
+  - `stat`
+  - `games`
+  - `person`
+
+**Validation:**
+- `node --check backend/routes/nrfi.js` passed
+- `node --check backend/routes/bullpen.js` passed
+- `npm run build` passed
+
+*Updated 2026-05-15 — Session 122 complete · CODEX TASK 120 implemented*
+
+---
+
+## 🗒 Session 123 — Codex: Lock Games Board Candidates at Game Start
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Added `lockedGameBoardCandidates` state with Honolulu-date localStorage restore using key:
+  - `game_board_locked_snapshot`
+- Added a game-board lock `useEffect` that snapshots a game the first time it leaves `"upcoming"`
+- Each locked game stores candidates for all 6 Games sub-tabs:
+  - `nrfi`
+  - `total`
+  - `spread`
+  - `ml`
+  - `f5ml`
+  - `f5spread`
+- Lock effect is idempotent:
+  - skips already-locked `gamePk`s
+  - skips empty locks when a cold slate has not produced any game candidates yet
+- Replaced active `gameBoardCandidates` with a merged live+locked computation:
+  - upcoming games still use live `computeGameBoard(...)`
+  - live/final games substitute the locked pregame candidate for the active sub-tab
+- Added `getGameBoardCandidatesForSubTab(sub)` helper
+- Rewrote `gameSubtabHitSummary` to use the merged helper so top-of-tab `#/# hit` badges resolve against locked pregame candidates instead of drifting live rankings
+
+**Why:**
+- Fixes the Games-board survivorship / mid-game rerank bug where users returned to check results and found the pregame card itself had changed
+
+**Validation:**
+- `npm run build` passed
+
+*Updated 2026-05-16 — Session 123 complete · CODEX TASK 121 implemented*
+
+---
+
+## 🗒 Session 124 — Codex: K Model / NRFI / EV Audit Pass
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Task 122 — K model**
+- Reworked `kBoardScore(...)` so SwStr% is now the primary strikeout signal
+- Added Chase Rate (`chasePct` / `oSwing`) as a secondary swing-miss input
+- Preserved K/9 as the fallback branch when swing-miss fields are missing
+- Left recent Ks, park, umpire, WHIP, opponent K%, and xwOBA factors in place
+- Added SwStr% / Chase% display to pitcher board cards when available
+
+**Task 123 — NRFI**
+- Expanded `computeGameBoard(...)` to accept optional `liveLineups = {}`
+- Upweighted historical first-inning scoring into a stronger dual-team factor:
+  - `1st Inning Scoring History`
+- Added `Top-Order OBP` factor using lineup spots 1–3 when OBP is present on lineup objects
+- Updated only the two render-time Games-board candidate builders to pass `liveLineups`
+- Left lock/snapshot callers untouched so they use the safe default empty object
+
+**Task 124 — EV board context**
+- Added `computeEVEdge(...)` helper inside the board render IIFE
+- HR and Hits board cards now show an EV/value badge when the edge is material
+- `TOP 20` mode on Hits / HR now sorts by EV edge before slicing
+- K / Outs / Games tabs unchanged
+
+**Validation:**
+- `npm run build` passed
+
+*Updated 2026-05-16 — Session 124 complete · CODEX TASKS 122–124 implemented*

@@ -55,19 +55,24 @@ async function getPitcherData(personId) {
   const cached   = cache.get(cacheKey);
   if (cached) return cached;
 
-  const [seasonRes, gameLogRes, personRes] = await Promise.all([
+  const [combinedRes, personRes] = await Promise.all([
     mlb.get(`/people/${personId}/stats`, {
-      params: { stats: "season", group: "pitching", season: SEASON },
-    }),
-    mlb.get(`/people/${personId}/stats`, {
-      params: { stats: "gameLog", group: "pitching", season: SEASON },
+      params: { stats: "season,gameLog", group: "pitching", season: SEASON },
     }),
     mlb.get(`/people/${personId}`, {}),
   ]);
 
+  const statsArr = combinedRes.data.stats ?? [];
+  const seasonEntry = statsArr.find((s) =>
+    /season|regular/i.test(s.type?.displayName ?? "")
+  );
+  const gameLogEntry = statsArr.find((s) =>
+    /log/i.test(s.type?.displayName ?? "")
+  );
+
   const result = {
-    stat:   seasonRes.data.stats?.[0]?.splits?.[0]?.stat ?? {},
-    games:  gameLogRes.data.stats?.[0]?.splits ?? [],
+    stat:   seasonEntry?.splits?.[0]?.stat ?? {},
+    games:  gameLogEntry?.splits ?? [],
     person: personRes.data.people?.[0] ?? {},
   };
 

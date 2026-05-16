@@ -116,6 +116,42 @@ const PARK_FACTORS = {
 };
 const NEUTRAL_PARK = { hr: 1.0, hit: 1.0, k: 1.0, label: "Neutral" };
 
+// Home field advantage score boosts — [mlPts, spreadPts, f5Pts]
+// Based on multi-season home win % and venue-specific familiarity effects.
+// MLB average home win rate ≈ 53.5%, scaled to scoring impact.
+const HOME_FIELD_ADV = {
+  BOS: [6, 5, 3], // Fenway — tight quarters, loud crowd, unique dimensions
+  LAD: [5, 4, 3], // Dodger Stadium — powerhouse roster + familiar setting
+  HOU: [5, 4, 3], // Minute Maid / Crawford Boxes favour home hitters
+  ATL: [5, 4, 3], // Truist Park — strong consistent home-field performance
+  NYY: [5, 4, 2], // Yankee Stadium — short porch familiarity
+  COL: [5, 4, 3], // Coors altitude — away pitchers visibly struggle
+  CHC: [5, 3, 2], // Wrigley crowd + wind pattern familiarity
+  PHI: [4, 3, 2], // Citizens Bank — loud fan base
+  STL: [4, 3, 2], // Busch Stadium — consistent home advantage
+  MIL: [4, 3, 2], // American Family Field
+  SF:  [4, 3, 2], // Oracle Park — tricky dimensions for visitors
+  MIN: [4, 3, 2], // Target Field
+  CIN: [4, 3, 2], // Great American Ball Park
+  DET: [3, 3, 2], // Comerica Park
+  TEX: [3, 3, 2], // Globe Life Field — retractable roof, hot air
+  BAL: [3, 3, 2], // Camden Yards
+  NYM: [3, 2, 2], // Citi Field
+  PIT: [3, 2, 2], // PNC Park
+  CLE: [3, 2, 2], // Progressive Field
+  SEA: [3, 2, 2], // T-Mobile — pitcher's park dampens scoring variance
+  KC:  [3, 2, 2], // Kauffman Stadium
+  WSH: [3, 2, 2], // Nationals Park
+  LAA: [3, 2, 2], // Angel Stadium
+  CHW: [3, 2, 2], // Guaranteed Rate Field
+  ARI: [3, 2, 2], // Chase Field
+  SD:  [3, 2, 2], // Petco Park
+  OAK: [3, 2, 1], // Sacramento — new venue, limited home crowd effect
+  TB:  [3, 2, 1], // Tropicana — sparse crowds reduce home advantage
+  MIA: [2, 2, 1], // loanDepot — consistently low attendance
+};
+const DEFAULT_HOME_ADV = [4, 3, 2]; // MLB average [mlPts, spreadPts, f5Pts]
+
 // ─────────────────────────────────────────────
 // UMPIRE STATS — keyed by full name as returned by the MLB Stats API.
 // kRate / bbRate: career per-game K% / BB% with that umpire behind the plate.
@@ -2117,7 +2153,7 @@ function simF5MLConfidence(homeEra, awayEra, parkFactor, umpireRating, lean, n =
 }
 
 // hrBoardScore: 0–95 composite. Primary = SLG/HR pace. Secondary = park, wind, order, platoon.
-const hrBoardScore = (hlog, order, pitcherHand, pf, wxFav, sd) => {
+const hrBoardScore = (hlog, order, pitcherHand, pf, wxFav, sd, facingPitcherEra = null) => {
   if (!hlog) return null;
   let s = 50;
   const slg = parseFloat(hlog.slg) || 0;
@@ -2141,11 +2177,16 @@ const hrBoardScore = (hlog, order, pitcherHand, pf, wxFav, sd) => {
     const hand = pitcherHand === "L" ? sd.vsL : sd.vsR;
     if (hand?.slg) s += (parseFloat(hand.slg) - (slg || 0.410)) * 25;
   }
+  // Opposing pitcher quality — weak SP = more HR opportunity; ace suppresses power
+  if (facingPitcherEra !== null) {
+    s += facingPitcherEra > 5.0 ? 9 : facingPitcherEra > 4.5 ? 5 : facingPitcherEra > 4.0 ? 2
+       : facingPitcherEra < 2.5 ? -10 : facingPitcherEra < 3.0 ? -6 : facingPitcherEra < 3.5 ? -3 : 0;
+  }
   return Math.round(Math.max(15, Math.min(95, s)));
 };
 
-// hitBoardScore: 0–95 composite. Primary = AVG + recent form. Secondary = park, order, platoon.
-const hitBoardScore = (hlog, order, pitcherHand, pf, sd) => {
+// hitBoardScore: 0–95 composite. Primary = AVG + recent form. Secondary = park, order, platoon, pitcher.
+const hitBoardScore = (hlog, order, pitcherHand, pf, sd, facingPitcherEra = null) => {
   if (!hlog) return null;
   let s = 50;
   const avg = parseFloat(hlog.avg) || 0;
@@ -2168,6 +2209,11 @@ const hitBoardScore = (hlog, order, pitcherHand, pf, sd) => {
     const hand = pitcherHand === "L" ? sd.vsL : sd.vsR;
     if (hand?.avg) s += (parseFloat(hand.avg) - (avg || 0.250)) * 110;
   }
+  // Opposing pitcher quality — shaky SP inflates hit opportunity; ace suppresses
+  if (facingPitcherEra !== null) {
+    s += facingPitcherEra > 5.0 ? 8 : facingPitcherEra > 4.5 ? 4 : facingPitcherEra > 4.0 ? 2
+       : facingPitcherEra < 2.5 ? -9 : facingPitcherEra < 3.0 ? -5 : facingPitcherEra < 3.5 ? -2 : 0;
+  }
   return Math.round(Math.max(15, Math.min(95, s)));
 };
 
@@ -2176,39 +2222,46 @@ const hitBoardScore = (hlog, order, pitcherHand, pf, sd) => {
 const kBoardScore = (pStats, gamelog, pf, umpire, oppTeamStats) => {
   if (!pStats) return null;
   let s = 40;
-  const k9   = parseFloat(pStats.kPer9  ?? pStats.k9)  || 0;
-  const whip = parseFloat(pStats.whip)                  || 0;
-  // K/9 — primary signal (30 pts)
-  if (k9 > 0) s += k9 >= 10 ? 30 : k9 >= 9 ? 22 : k9 >= 8 ? 14 : k9 >= 7 ? 7 : 0;
-  // Recent K production — avg Ks last 3 starts (22 pts)
+  const swStrPct = parseFloat(pStats.swStrPct ?? pStats.swStr) || null;
+  if (swStrPct !== null) {
+    s += swStrPct >= 16 ? 35 : swStrPct >= 14 ? 27 : swStrPct >= 12 ? 18
+       : swStrPct >= 11 ? 10 : swStrPct >= 10 ? 4 : 0;
+  } else {
+    const k9 = parseFloat(pStats.kPer9 ?? pStats.k9) || 0;
+    s += k9 >= 10 ? 27 : k9 >= 9 ? 20 : k9 >= 8 ? 12 : k9 >= 7 ? 6 : 0;
+  }
+
+  const chasePct = parseFloat(pStats.chasePct ?? pStats.oSwing) || null;
+  if (chasePct !== null) {
+    s += chasePct >= 36 ? 10 : chasePct >= 33 ? 6 : chasePct >= 31 ? 3
+       : chasePct <= 26 ? -4 : chasePct <= 28 ? -2 : 0;
+  }
+
   const recentStarts = gamelog?.games ?? [];
   const last3 = recentStarts.slice(0, 3);
   if (last3.length > 0) {
     const avgK = last3.reduce((acc, g) => acc + (g.k ?? 0), 0) / last3.length;
-    s += avgK >= 7 ? 22 : avgK >= 6 ? 16 : avgK >= 5 ? 10 : avgK >= 4 ? 5 : 0;
+    s += avgK >= 7 ? 20 : avgK >= 6 ? 14 : avgK >= 5 ? 8 : avgK >= 4 ? 4 : 0;
   }
-  // Park K factor (18 pts)
+
   s += (pf.k - 1.0) * 90;
-  // Umpire tendency (15 pts)
+
   if (umpire?.rating === "pitcher") s += 15;
   else if (umpire?.rating === "neutral" || !umpire) s += 8;
   else s += 3;
-  // WHIP bonus — low WHIP = pitcher in control (10 pts)
-  if (whip > 0) s += whip <= 1.05 ? 10 : whip <= 1.20 ? 6 : whip <= 1.35 ? 2 : 0;
+
+  const whip = parseFloat(pStats.whip) || 0;
+  if (whip > 0) s += whip <= 1.05 ? 8 : whip <= 1.20 ? 5 : whip <= 1.35 ? 2 : 0;
+
   const oppKPct = oppTeamStats?.kPct ?? null;
   if (oppKPct !== null) {
-    if      (oppKPct >= 24) { s += 4; }
-    else if (oppKPct >= 21) { s += 2; }
-    else if (oppKPct <= 17) { s -= 4; }
-    else if (oppKPct <= 19) { s -= 2; }
+    s += oppKPct >= 24 ? 4 : oppKPct >= 21 ? 2 : oppKPct <= 17 ? -4 : oppKPct <= 19 ? -2 : 0;
   }
+
   const xwOBA = pStats?.pitcherStats?.xwOBAAllowed ?? null;
   if (xwOBA !== null) {
-    if      (xwOBA <= 0.270) { s += 5; }
-    else if (xwOBA <= 0.290) { s += 3; }
-    else if (xwOBA <= 0.310) { s += 1; }
-    else if (xwOBA >= 0.350) { s -= 4; }
-    else if (xwOBA >= 0.330) { s -= 2; }
+    s += xwOBA <= 0.270 ? 5 : xwOBA <= 0.290 ? 3 : xwOBA <= 0.310 ? 1
+       : xwOBA >= 0.350 ? -4 : xwOBA >= 0.330 ? -2 : 0;
   }
   return Math.round(Math.max(10, Math.min(95, s)));
 };
@@ -2392,10 +2445,11 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
         const hlog = liveHittingLog[b.id];
         const sdKey = `${b.id}:hitting`;
         const sd = liveStatSplits[sdKey];
+        const facingPitcherEra = parseFloat(facingPitcher?.era) || null;
 
         const score = type === "hr"
-          ? hrBoardScore(hlog, b.order, pitcherHand, pf, wxFav, sd)
-          : hitBoardScore(hlog, b.order, pitcherHand, pf, sd);
+          ? hrBoardScore(hlog, b.order, pitcherHand, pf, wxFav, sd, facingPitcherEra)
+          : hitBoardScore(hlog, b.order, pitcherHand, pf, sd, facingPitcherEra);
 
         if (score === null) return; // no hlog yet
 
@@ -2625,7 +2679,7 @@ function propEdgeData(propLine, lean) {
 // Returns array sorted by abs(score - 50) desc (strongest edge first).
 // Each item: { gamePk, name, gameLabel, away, home, score, lean, leanLabel,
 //              line, factors[], homeSP, awaySP, weather, nrfi }
-const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires) => {
+const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires, liveLineups = {}) => {
   const games = [];
   (activeSlate ?? []).forEach(game => {
     const homeSP    = game.pitcher     ?? null;
@@ -2700,11 +2754,36 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
         const awayPct = parseFloat(apiNrfi.awayFirst?.scoredPct) || 30;
         const homePct = parseFloat(apiNrfi.homeFirst?.scoredPct) || 30;
         const avgPct  = (awayPct + homePct) / 2;
-        const histPts = avgPct < 22 ? 10 : avgPct < 28 ? 5 : avgPct < 35 ? 0 : avgPct < 42 ? -5 : -10;
+        const awayPts = awayPct < 20 ? 6 : awayPct < 26 ? 3 : awayPct < 32 ? 0 : awayPct < 40 ? -4 : -7;
+        const homePts = homePct < 20 ? 6 : homePct < 26 ? 3 : homePct < 32 ? 0 : homePct < 40 ? -4 : -7;
+        const histPts = awayPts + homePts;
         score += histPts;
-        factors.push({ label: "Historical Scoring", pts: histPts, max: 10,
+        factors.push({ label: "1st Inning Scoring History", pts: histPts, max: 14,
           value: `${game.away.abbr} scores ${awayPct.toFixed(0)}% / ${game.home.abbr} scores ${homePct.toFixed(0)}% in 1st`,
-          detail: avgPct < 25 ? "Both teams score rarely in 1st" : avgPct > 38 ? "Both teams score often early — YRFI risk" : "Average early-inning scoring" });
+          detail: avgPct < 24 ? "Both teams rarely score in 1st — strong NRFI lean"
+            : avgPct > 38 ? "Both teams frequently score early — YRFI lean"
+            : awayPct > 38 || homePct > 38 ? "One team scores often in 1st — YRFI risk"
+            : "Average first-inning scoring rates" });
+      }
+
+      const lu = liveLineups[game.gamePk];
+      if (lu && (lu.away?.length >= 3 || lu.home?.length >= 3)) {
+        const top3Away = (lu.away ?? []).slice(0, 3);
+        const top3Home = (lu.home ?? []).slice(0, 3);
+        const awayObpVals = top3Away.map(b => parseFloat(b.obp) || 0).filter(v => v > 0);
+        const homeObpVals = top3Home.map(b => parseFloat(b.obp) || 0).filter(v => v > 0);
+        if (awayObpVals.length > 0 || homeObpVals.length > 0) {
+          const allObp = [...awayObpVals, ...homeObpVals];
+          const avgTopOBP = allObp.reduce((a, v) => a + v, 0) / allObp.length;
+          const obpPts = avgTopOBP >= 0.390 ? -10 : avgTopOBP >= 0.360 ? -6 : avgTopOBP >= 0.345 ? -3
+            : avgTopOBP <= 0.290 ? 6 : avgTopOBP <= 0.310 ? 3 : 0;
+          score += obpPts;
+          factors.push({ label: "Top-Order OBP", pts: obpPts, max: 10,
+            value: `Avg top-3 OBP: .${Math.round(avgTopOBP * 1000)}`,
+            detail: avgTopOBP >= 0.360 ? "High-OBP leadoff hitters — YRFI risk in 1st"
+              : avgTopOBP <= 0.300 ? "Low-OBP top order — fewer 1st-inning threats"
+              : "Average top-order on-base ability" });
+        }
       }
       score = Math.round(Math.max(28, Math.min(82, score)));
       const lean = score >= 50 ? "NRFI" : "YRFI";
@@ -2847,9 +2926,10 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
           value: `Home ${homeWhip.toFixed(2)} vs Away ${awayWhip.toFixed(2)}`,
           detail: wDiff > 0.2 ? "Home pitcher has better command" : wDiff < -0.2 ? "Away pitcher is the more efficient one" : "Control is comparable" });
       }
-      // Home field advantage
-      score += 3;
-      factors.push({ label: "Home Field", pts: 3, max: 3, value: game.home.abbr, detail: "Home teams cover run line ~52% historically" });
+      // Home field advantage — variable by park (see HOME_FIELD_ADV)
+      const [, hfSpreadPts] = HOME_FIELD_ADV[game.home?.abbr] ?? DEFAULT_HOME_ADV;
+      score += hfSpreadPts;
+      factors.push({ label: "Home Field", pts: hfSpreadPts, max: 5, value: game.home.abbr, detail: `${game.home.abbr} home advantage — covers run line at above-average rate` });
       // ML implied probability
       const homeMl = odds.homeML ?? game.odds?.homeML;
       if (homeMl) {
@@ -2894,9 +2974,10 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
           value: `${game.home.abbr} ${homeWhip.toFixed(2)} vs ${game.away.abbr} ${awayWhip.toFixed(2)}`,
           detail: wDiff > 0.15 ? "Home SP is the more efficient pitcher" : wDiff < -0.15 ? "Away SP has better command" : "Similar control" });
       }
-      // Home field advantage
-      score += 4;
-      factors.push({ label: "Home Field Advantage", pts: 4, max: 4, value: game.home.abbr, detail: "Home teams win ~53.5% of MLB games historically" });
+      // Home field advantage — variable by park (see HOME_FIELD_ADV)
+      const [hfMlPts] = HOME_FIELD_ADV[game.home?.abbr] ?? DEFAULT_HOME_ADV;
+      score += hfMlPts;
+      factors.push({ label: "Home Field Advantage", pts: hfMlPts, max: 6, value: game.home.abbr, detail: `${game.home.abbr} park-adjusted home advantage` });
       // Market vs model edge
       if (homeMl && awayMl) {
         // Our model score (before this factor) vs market implied
@@ -2958,8 +3039,9 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
         factors.push({ label: "Umpire Tendency", pts: -4, max: 5, value: umpire.name ?? "HP Ump", detail: "Hitter-friendly zone — opens up F5 scoring" });
       }
 
-      score += 2;
-      factors.push({ label: "Home Field", pts: 2, max: 2, value: game.home.abbr, detail: "Slight home edge in early innings" });
+      const [,, hfF5MlPts] = HOME_FIELD_ADV[game.home?.abbr] ?? DEFAULT_HOME_ADV;
+      score += hfF5MlPts;
+      factors.push({ label: "Home Field", pts: hfF5MlPts, max: 3, value: game.home.abbr, detail: `${game.home.abbr} park-adjusted F5 home edge` });
 
       if (marketHomeML && marketAwayML) {
         const modelHome = score / 100;
@@ -3023,8 +3105,9 @@ const computeGameBoard = (type, activeSlate, liveNrfiData, liveWeather, liveOdds
         factors.push({ label: "Umpire Tendency", pts: -4, max: 5, value: umpire.name ?? "HP Ump", detail: "Hitter-friendly zone — more early scoring variance" });
       }
 
-      score += 2;
-      factors.push({ label: "Home Field", pts: 2, max: 2, value: game.home.abbr, detail: "Slight home edge in early innings" });
+      const [,, hfF5RlPts] = HOME_FIELD_ADV[game.home?.abbr] ?? DEFAULT_HOME_ADV;
+      score += hfF5RlPts;
+      factors.push({ label: "Home Field", pts: hfF5RlPts, max: 3, value: game.home.abbr, detail: `${game.home.abbr} park-adjusted F5 home edge` });
 
       if (marketHomeSpreadOdds && marketAwaySpreadOdds) {
         const homeImpl = mlToImplied(marketHomeSpreadOdds);
@@ -3713,6 +3796,7 @@ export default function App() {
   const [pitcherPlatoonSplits, setPitcherPlatoonSplits] = useState({}); // pitcherId → {vsL,vsR} | "loading" | null
   const [liveStatSplits,       setLiveStatSplits]       = useState({}); // `${id}:${group}` → splits obj | "loading" | null
   const [boardTab,             setBoardTab]             = useState("hr"); // "hr" | "hits" | "k" | "outs" | "games"
+  const [boardTop20,           setBoardTop20]           = useState(false);
   const [lockedBoardCandidates, setLockedBoardCandidates] = useState(() => {
     try {
       const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
@@ -3720,7 +3804,14 @@ export default function App() {
       return stored.date === today ? (stored.candidates ?? {}) : {};
     } catch { return {}; }
   });
-  const [gameSubTab,           setGameSubTab]           = useState("nrfi"); // "nrfi" | "total" | "spread" | "ml"
+  const [lockedGameBoardCandidates, setLockedGameBoardCandidates] = useState(() => {
+    try {
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+      const stored = JSON.parse(localStorage.getItem("game_board_locked_snapshot") || "{}");
+      return stored.date === today ? (stored.candidates ?? {}) : {};
+    } catch { return {}; }
+  });
+  const [gameSubTab,           setGameSubTab]           = useState("nrfi"); // "nrfi" | "total" | "spread" | "ml" | "f5ml" | "f5spread"
   const boardPropsFetched = useRef(new Set());                            // guards board-level props pre-fetch
   const [noteSaveState, setNoteSaveState] = useState(null); // null | "saving" | "saved"
   const [copiedPickId, setCopiedPickId] = useState(null);   // id of pick just copied to clipboard
@@ -3746,6 +3837,36 @@ export default function App() {
     });
     return map;
   }, [liveOddsMap, lockedOddsMap, liveSlate]);
+
+  // Blended pitcher stats for game board — 45% season ERA / 55% recent 3-start ERA.
+  // Prevents a starter with a great season ERA but poor recent form from being over-ranked.
+  // Falls back to season-only when fewer than 2 recent starts are available.
+  const blendedPitcherStatsForGameBoard = useMemo(() => {
+    if (!livePitcherStats) return livePitcherStats ?? {};
+    const result = {};
+    Object.entries(livePitcherStats).forEach(([id, stats]) => {
+      const gamelog = liveGameLog?.[id];
+      const last3   = (gamelog?.games ?? []).slice(0, 3);
+      if (last3.length < 2) { result[id] = stats; return; }
+      let totalOuts = 0; let totalER = 0;
+      last3.forEach(g => {
+        const [w, f = "0"] = String(g.ip ?? "0").split(".");
+        totalOuts += parseInt(w) * 3 + parseInt(f);
+        totalER   += (g.er ?? 0);
+      });
+      const recentEra  = totalOuts > 0 ? (totalER * 27) / totalOuts : null;
+      const seasonEra  = parseFloat(stats.era) || null;
+      if (recentEra === null || seasonEra === null) { result[id] = stats; return; }
+      const blendedEra = (seasonEra * 0.45 + recentEra * 0.55);
+      result[id] = {
+        ...stats,
+        era:        blendedEra.toFixed(2),
+        _seasonEra: seasonEra.toFixed(2),
+        _recentEra: recentEra.toFixed(2),
+      };
+    });
+    return result;
+  }, [livePitcherStats, liveGameLog]);
 
   // Fetch weather when a game card is opened
   useEffect(() => {
@@ -4120,6 +4241,10 @@ export default function App() {
     if (s === "In Progress" || s === "Warmup") return "live";
     return "upcoming";
   };
+
+  useEffect(() => {
+    setBoardTop20(false);
+  }, [boardTab]);
 
   useEffect(() => {
     if ((view !== "lab" && view !== "models") || (view === "lab" ? labSubTab : modelsSubTab) !== "f5ml" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
@@ -5231,7 +5356,7 @@ export default function App() {
     const isGameBoard = boardTab === "games";
     const requests = (
       isGameBoard
-        ? computeGameBoard(gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)
+        ? computeGameBoard(gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires)
         : boardTab === "hr"
         ? computeBatterBoard("hr", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
         : boardTab === "hits"
@@ -5299,6 +5424,38 @@ export default function App() {
       const hasNewPitchers = !pitcherLocked && (newEntry.k.length   > 0 || newEntry.outs.length > 0);
       if (!hasNewBatters && !hasNewPitchers) return;
 
+      // ── Persist newly-locked cards to backend for backtesting (fire-and-forget) ──
+      if (!IS_SANDBOX) {
+        const tierFromScore = (s) => (s == null ? "mid" : s >= 75 ? "high" : s >= 55 ? "mid" : "low");
+        const leanFromScore = (s) => ((s ?? 0) >= 55 ? "over" : "under");
+        const bookLineFromCard = (c) => {
+          const v = c.propLine?.books?.DK?.line ?? c.propLine?.books?.FD?.line ?? c.propLine?.books?.CZR?.line
+            ?? c.propLine?.line ?? c.suggestedLine;
+          return v != null && v !== "" && Number.isFinite(Number(v)) ? Number(v) : null;
+        };
+        const enrich = (c, market) => ({
+          ...c,
+          market,
+          lean: leanFromScore(c.score),
+          scoreTier: tierFromScore(c.score),
+          bookLine: bookLineFromCard(c),
+        });
+        const newlyLocked = [];
+        if (hasNewBatters) {
+          newlyLocked.push(...newEntry.hits.map(c => enrich(c, "hits")), ...newEntry.hr.map(c => enrich(c, "hr")));
+        }
+        if (hasNewPitchers) {
+          newlyLocked.push(...newEntry.k.map(c => enrich(c, "k")), ...newEntry.outs.map(c => enrich(c, "outs")));
+        }
+        if (newlyLocked.length > 0) {
+          fetch(`${API_BASE}/api/board-snapshot`, {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({ slateDate: today, cards: newlyLocked }),
+          }).catch(() => {}); // never block or error the lock
+        }
+      }
+
       setLockedBoardCandidates(prev => {
         const updated = { ...prev, [game.gamePk]: newEntry };
         localStorage.setItem("board_locked_snapshot", JSON.stringify({ date: today, candidates: updated }));
@@ -5306,6 +5463,36 @@ export default function App() {
       });
     });
   }, [liveSlate, view, liveLineups, liveHittingLog]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Lock game board candidates when a game goes live — prevents rankings shifting mid-game.
+  useEffect(() => {
+    if (!liveSlate || view !== "board") return;
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+
+    liveSlate.forEach(game => {
+      const phase = getBoardGamePhase(game.gamePk);
+      if (phase === "upcoming") return;
+      if (lockedGameBoardCandidates[game.gamePk]) return;
+
+      const SUB_TABS = ["nrfi", "total", "spread", "ml", "f5ml", "f5spread"];
+      const entry = {};
+      SUB_TABS.forEach(sub => {
+        const all = computeGameBoard(sub, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires);
+        entry[sub] = all.find(c => String(c.gamePk) === String(game.gamePk)) ?? null;
+      });
+
+      if (!Object.values(entry).some(v => v !== null)) return;
+
+      setLockedGameBoardCandidates(prev => {
+        const updated = { ...prev, [game.gamePk]: entry };
+        localStorage.setItem(
+          "game_board_locked_snapshot",
+          JSON.stringify({ date: today, candidates: updated })
+        );
+        return updated;
+      });
+    });
+  }, [liveSlate, view, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (view !== "model" || !topSlatePicks.length) return;
@@ -9602,10 +9789,58 @@ export default function App() {
           // while dynamically handling late scratches without dropping the whole game group.
           const lockedBoardCandidatesForTab = lockedCandidatesByGame
             .flatMap(g => g.candidates.flatMap(c => applySubstitution(c)));
-          // Game board candidates computed on-the-fly for the active sub-tab
-          const gameBoardCandidates = isGameBoard
-            ? computeGameBoard(gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)
-            : [];
+          const shouldApplyTop20 = boardTop20 && (boardTab === "hits" || boardTab === "hr");
+          const evSort = (arr) => {
+            if (!boardTop20 || (boardTab !== "hits" && boardTab !== "hr")) return arr;
+            return [...arr].sort((a, b) => {
+              const evA = computeEVEdge(a, boardTab)?.edge ?? -99;
+              const evB = computeEVEdge(b, boardTab)?.edge ?? -99;
+              return evB - evA;
+            });
+          };
+          const displayLiveCandidates = shouldApplyTop20
+            ? evSort(liveBoardCandidates).slice(0, 20)
+            : liveBoardCandidates;
+          const displayLockedCandidates = shouldApplyTop20
+            ? evSort(lockedBoardCandidatesForTab).slice(0, 20)
+            : lockedBoardCandidatesForTab;
+          const displayLiveCandidatesByGame = (() => {
+            const groups = {};
+            displayLiveCandidates.forEach(c => {
+              if (!groups[c.gamePk]) groups[c.gamePk] = { gameLabel: c.gameLabel, gameTime: c.gameTime, gamePk: c.gamePk, candidates: [] };
+              groups[c.gamePk].candidates.push(c);
+            });
+            return Object.values(groups).sort((a, b) => {
+              const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
+              const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
+              return ta - tb;
+            });
+          })();
+          const displayLockedCandidatesByGame = (() => {
+            const groups = {};
+            displayLockedCandidates.forEach(c => {
+              if (!groups[c.gamePk]) groups[c.gamePk] = { gameLabel: c.gameLabel, gameTime: c.gameTime, gamePk: c.gamePk, candidates: [] };
+              groups[c.gamePk].candidates.push(c);
+            });
+            return Object.values(groups).sort((a, b) => {
+              const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
+              const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
+              return ta - tb;
+            });
+          })();
+          // Game board candidates computed on-the-fly for the active sub-tab,
+          // but swapped with locked snapshots once games go live/final.
+          const gameBoardCandidates = (() => {
+            if (!isGameBoard) return [];
+            const live = computeGameBoard(
+              gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires, liveLineups
+            );
+            return live.map(c => {
+              const locked = lockedGameBoardCandidates[c.gamePk]?.[gameSubTab];
+              const phase = getBoardGamePhase(c.gamePk);
+              return (locked && phase !== "upcoming") ? locked : c;
+            });
+          })();
           const totalPitcherSlots = isPitcherBoard
             ? (activeSlate ?? []).filter(g => g.probablePitchers?.home?.id || g.probablePitchers?.away?.id).length * 2
             : 0;
@@ -9617,6 +9852,29 @@ export default function App() {
 
           const scoreColor = (s) =>
             s >= 70 ? "#22c55e" : s >= 55 ? "#f59e0b" : s >= 40 ? "#ef4444" : "#6b7280";
+
+          const computeEVEdge = (c, type) => {
+            if (!c?.propLine || (type !== "hr" && type !== "hits")) return null;
+            const books = c.propLine.books ?? {};
+            const lean = c.score >= 55 ? "over" : "under";
+            const bookOdds = ["DK", "FD", "CZR", "MGM", "BET365"].map(b => {
+              const entry = books[b];
+              if (!entry) return null;
+              return lean === "over" ? entry.over : entry.under;
+            }).filter(v => v != null && Number.isFinite(Number(v)));
+            if (!bookOdds.length) return null;
+            const bestOdds = bookOdds.reduce((best, v) => (Number(v) > Number(best) ? v : best));
+            const bookImpliedRaw = mlToImplied(Number(bestOdds));
+            if (!bookImpliedRaw) return null;
+            const modelImpliedRaw = c.score / 100;
+            return {
+              edge: Math.round((modelImpliedRaw - bookImpliedRaw) * 100),
+              bestOdds,
+              lean,
+              modelImplied: Math.round(modelImpliedRaw * 100),
+              bookImplied: Math.round(bookImpliedRaw * 100),
+            };
+          };
 
           const boardOutcome = (type, item) => {
             const id = item.id;
@@ -9753,13 +10011,24 @@ export default function App() {
             };
           };
 
+          const getGameBoardCandidatesForSubTab = (sub) => {
+            const live = computeGameBoard(
+              sub, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires, liveLineups
+            );
+            return live.map(c => {
+              const locked = lockedGameBoardCandidates[c.gamePk]?.[sub];
+              const phase = getBoardGamePhase(c.gamePk);
+              return (locked && phase !== "upcoming") ? locked : c;
+            });
+          };
+
           const gameSubtabHitSummary = {
-            nrfi: gameHitSummary("nrfi", computeGameBoard("nrfi", activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)),
-            total: gameHitSummary("total", computeGameBoard("total", activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)),
-            spread: gameHitSummary("spread", computeGameBoard("spread", activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)),
-            ml: gameHitSummary("ml", computeGameBoard("ml", activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)),
-            f5ml: gameHitSummary("f5ml", computeGameBoard("f5ml", activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)),
-            f5spread: gameHitSummary("f5spread", computeGameBoard("f5spread", activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires)),
+            nrfi: gameHitSummary("nrfi", getGameBoardCandidatesForSubTab("nrfi")),
+            total: gameHitSummary("total", getGameBoardCandidatesForSubTab("total")),
+            spread: gameHitSummary("spread", getGameBoardCandidatesForSubTab("spread")),
+            ml: gameHitSummary("ml", getGameBoardCandidatesForSubTab("ml")),
+            f5ml: gameHitSummary("f5ml", getGameBoardCandidatesForSubTab("f5ml")),
+            f5spread: gameHitSummary("f5spread", getGameBoardCandidatesForSubTab("f5spread")),
           };
 
           const displayedGameBoardScore = (item) => {
@@ -9835,6 +10104,25 @@ export default function App() {
                       : boardTab === "k" ? "Ranked by K/9 · umpire · pitch mix · park · recent form"
                       : "Ranked by avg IP · control · recent workload · park"}
                   </span>
+                  {(boardTab === "hits" || boardTab === "hr") && (
+                    <button
+                      onClick={() => setBoardTop20(v => !v)}
+                      style={{
+                        background: boardTop20 ? "rgba(251,191,36,0.15)" : "rgba(255,255,255,0.04)",
+                        border: `1px solid ${boardTop20 ? "#fbbf24" : "#1f2437"}`,
+                        borderRadius: 6,
+                        padding: "3px 9px",
+                        fontSize: 9,
+                        fontWeight: 700,
+                        color: boardTop20 ? "#fbbf24" : "#6b7280",
+                        fontFamily: "monospace",
+                        cursor: "pointer",
+                        flexShrink: 0,
+                      }}
+                    >
+                      TOP 20
+                    </button>
+                  )}
                 </div>
                 <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace" }}>
                   {isGameBoard
@@ -10036,6 +10324,7 @@ export default function App() {
                   // ── Pitcher card (K Props / Outs) ──────────────────────────
                   const boardGameStatus = getBoardGameStatus(c.gamePk);
                   const boardSummaryRequest = buildBoardSummaryRequest(c, boardTab);
+                  const pitcherMetrics = livePitcherStats[c.id] ?? c ?? {};
                   const todayResult = liveBoardResults[c.id] ?? null;
                   const hasResolvedResult = !!todayResult && !todayResult.live;
                   const propLineValue = c.propLine?.line ?? c.suggestedLine;
@@ -10115,6 +10404,12 @@ export default function App() {
                             )}
                             {c.k9 !== "—" && boardTab === "k" && (
                               <span style={{ fontSize: 10, color: parseFloat(c.k9) >= 10.0 ? "#22c55e" : parseFloat(c.k9) >= 8.0 ? "#f59e0b" : "#ef4444", fontFamily: "monospace", fontWeight: 700 }}>{c.k9} K/9</span>
+                            )}
+                            {(pitcherMetrics.swStrPct ?? pitcherMetrics.swStr) && boardTab === "k" && (
+                              <span style={{ fontSize: 9, color: "#818cf8" }}>
+                                SwStr% {parseFloat(pitcherMetrics.swStrPct ?? pitcherMetrics.swStr).toFixed(1)}%
+                                {(pitcherMetrics.chasePct ?? pitcherMetrics.oSwing) ? ` · Chase ${parseFloat(pitcherMetrics.chasePct ?? pitcherMetrics.oSwing).toFixed(1)}%` : ""}
+                              </span>
                             )}
                             {c.whip !== "—" && (
                               <span style={{ fontSize: 10, color: parseFloat(c.whip) <= 1.10 ? "#22c55e" : parseFloat(c.whip) <= 1.35 ? "#f59e0b" : "#ef4444", fontFamily: "monospace" }}>{c.whip} WHIP</span>
@@ -10339,6 +10634,32 @@ export default function App() {
                             </span>
                           )}
                         </div>
+                        {(boardTab === "hr" || boardTab === "hits") && (() => {
+                          const ev = computeEVEdge(c, boardTab);
+                          if (!ev) return null;
+                          const isPositive = ev.edge >= 3;
+                          const isNegative = ev.edge <= -5;
+                          if (!isPositive && !isNegative) return null;
+                          return (
+                            <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 3, flexWrap: "wrap" }}>
+                              <span style={{
+                                fontSize: 8,
+                                fontWeight: 800,
+                                fontFamily: "monospace",
+                                color: isPositive ? "#22c55e" : "#ef4444",
+                                background: isPositive ? "rgba(34,197,94,0.10)" : "rgba(239,68,68,0.10)",
+                                border: `1px solid ${isPositive ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)"}`,
+                                borderRadius: 4,
+                                padding: "1px 6px",
+                              }}>
+                                {isPositive ? `+${ev.edge}% EDGE` : `${ev.edge}% VALUE`}
+                              </span>
+                              <span style={{ fontSize: 8, color: "#6b7280", fontFamily: "monospace" }}>
+                                Model {ev.lean === "over" ? "OVER" : "UNDER"} {ev.modelImplied}% vs book {ev.bookImplied}% ({ev.bestOdds})
+                              </span>
+                            </div>
+                          );
+                        })()}
                         {(() => {
                           const summaryText = getCardSummaryText(boardSummaryRequest);
                           const isPremium = !!aiCardSummaries[`premium:${boardSummaryRequest?.id}`];
@@ -10399,9 +10720,9 @@ export default function App() {
                 const candidateKey = (item) => `${item.id}-${item.gamePk}`;
                 return (
                   <>
-                    {liveCandidatesByGame.length > 0 && (
+                    {displayLiveCandidatesByGame.length > 0 && (
                       <div style={{ marginBottom: hasLocked ? 16 : 0 }}>
-                        {liveCandidatesByGame.map(group => (
+                        {displayLiveCandidatesByGame.map(group => (
                           <div key={group.gamePk} style={{ marginBottom: 12 }}>
                             <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace",
                               letterSpacing: "0.06em", textTransform: "uppercase", padding: "4px 2px 6px",
@@ -10416,14 +10737,14 @@ export default function App() {
                             </div>
                             {group.candidates.map(item => renderBoardCandidateCard(
                               item,
-                              Math.max(0, liveBoardCandidates.findIndex(c => candidateKey(c) === candidateKey(item)))
+                              Math.max(0, displayLiveCandidates.findIndex(c => candidateKey(c) === candidateKey(item)))
                             ))}
                           </div>
                         ))}
                       </div>
                     )}
 
-                    {liveCandidatesByGame.length === 0 && !hasLocked && (
+                    {displayLiveCandidatesByGame.length === 0 && !hasLocked && (
                       <div style={{ textAlign: "center", color: "#4b5563", fontSize: 12, padding: "24px 0" }}>
                         No confirmed lineups yet
                       </div>
@@ -10436,11 +10757,8 @@ export default function App() {
                           display: "flex", alignItems: "center", gap: 6 }}>
                           <span style={{ color: "#a855f7" }}>⊘</span> Locked · in play / final
                         </div>
-                        {lockedCandidatesByGame.map(group => {
+                        {displayLockedCandidatesByGame.map(group => {
                           const phase = getBoardGamePhase(group.gamePk);
-                          // Apply scratch substitution at render-time so game groups reflect live lineup
-                          const substituted = group.candidates.flatMap(c => applySubstitution(c));
-                          if (!substituted.length) return null; // all slots dropped — skip game group
                           return (
                             <div key={group.gamePk} style={{ marginBottom: 12, opacity: phase === "final" ? 0.85 : 1 }}>
                               <div style={{ fontSize: 10, fontWeight: 700, color: "#6b7280", fontFamily: "monospace",
@@ -10452,9 +10770,9 @@ export default function App() {
                                   {phase === "live" ? "● LIVE" : "FINAL"}
                                 </span>
                               </div>
-                              {substituted.map(item => renderBoardCandidateCard(
+                              {group.candidates.map(item => renderBoardCandidateCard(
                                 item,
-                                Math.max(0, lockedBoardCandidatesForTab.findIndex(c => candidateKey(c) === candidateKey(item)))
+                                Math.max(0, displayLockedCandidates.findIndex(c => candidateKey(c) === candidateKey(item)))
                               ))}
                             </div>
                           );

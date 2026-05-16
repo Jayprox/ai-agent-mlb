@@ -58,6 +58,7 @@ app.use("/api/hr-scout", require("./routes/hrScout"));
 app.use("/api/chat", require("./routes/chat"));
 app.use("/api/advisor", require("./routes/advisor"));
 app.use("/api/model", require("./routes/modelF5"));
+app.use("/api/board-snapshot", require("./routes/boardSnapshot"));
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {
@@ -123,6 +124,20 @@ app.get("/api/admin/jobs/resolve-lab-calibration", async (req, res) => {
     return res.json({ ok: true, ...result });
   } catch (err) {
     return res.status(500).json({ error: "resolve-lab-calibration failed", detail: err.message });
+  }
+});
+
+app.get("/api/admin/jobs/resolve-card-snapshots", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    const dateParam = req.query.date ?? undefined;
+    const result = await require("./jobs/resolveCardSnapshotsJob")
+      .resolveCardSnapshots(dateParam);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
