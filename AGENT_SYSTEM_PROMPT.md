@@ -18642,6 +18642,81 @@ Use that exact key in the route handlers.
 
 ---
 
+## HANDOFF NOTE — 2026-05-16 — CODEX TASK 125 COMPLETED (Extract Shared UI Atoms)
+
+**Files changed:** `prop-scout-v7.jsx`
+
+**What changed**
+- Added shared UI helpers/components:
+  - `resultBorderStyle(color)`
+  - `GameStatusBadge`
+  - `RankScoreColumn`
+- Replaced duplicate result-border style blocks in the targeted sections:
+  - model picks / K board card area
+  - Games board cards
+  - pitcher board cards
+  - batter board cards
+  - AI Board cards
+- Replaced duplicate LIVE / FINAL badge JSX with `GameStatusBadge` in the targeted 3 locations
+- Replaced duplicate prop-board rank + score + SIM JSX with `RankScoreColumn`
+- Renamed the inner board-render `scoreColor` helper to `boardScoreColor` to avoid shadowing the outer matchup colorizer
+
+**What did not change**
+- No scoring logic changes
+- No state changes
+- No backend changes
+- No schema changes
+- Visual output intended to stay pixel-identical
+
+**Validation**
+- `npm run build` passed
+
+---
+
+## HANDOFF NOTE — 2026-05-16 — CODEX TASK 126 COMPLETED (Wire Savant Stats into K Board)
+
+**Files changed:**
+- `prop-scout-v7.jsx`
+- `backend/routes/pitcherSplits.js`
+- `backend/routes/batterPower.js`
+
+**What changed**
+- Updated `computePitcherBoard(...)` to accept optional `pitcherArsenal = {}`
+- Inside `computePitcherBoard(...)`, merged Savant pitcher stats from:
+  - `pitcherArsenal[p.id]?.pitcherStats`
+- Normalized Savant field names into the scoring model shape:
+  - `swStrPct`
+  - `oSwingPct -> chasePct`
+  - `fStrikePct`
+- Added `swStrPct` and `chasePct` onto K/Outs candidate objects
+- Updated the intended frontend call sites to pass `pitcherArsenal`:
+  - `buildAiBoardPayload(...)`
+  - AI Board payload builder call site
+  - Board summary hydration IIFE
+  - Board render `boardCandidatesByType`
+- Left the prop-board lock effect `computePitcherBoard(...)` calls unchanged on purpose, per spec
+- Updated pitcher-board card display merge so the existing SwStr% / Chase% row now reads real Savant values with:
+  - `oSwingPct -> chasePct` normalization
+
+**Backend fixes**
+- `backend/routes/pitcherSplits.js`
+  - added `&player_id=${pitcherId}` to the Savant CSV request
+- `backend/routes/batterPower.js`
+  - added `&player_id=${batterId}` to the Savant CSV request
+
+**What stayed unchanged**
+- `kBoardScore(...)` logic itself was not modified
+- No new state
+- No new routes
+- No schema changes
+
+**Validation**
+- `node --check backend/routes/pitcherSplits.js` passed
+- `node --check backend/routes/batterPower.js` passed
+- `npm run build` passed
+
+---
+
 ## BACKLOG TASK 64 — Cache Linescore Responses to Eliminate Duplicate Fetches (936 calls → ~316)
 
 **Priority: High | LOE: Small | File: `backend/routes/` (wherever linescore is fetched — likely `pitcher-splits.js` or similar)**

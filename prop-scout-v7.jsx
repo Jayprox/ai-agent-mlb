@@ -1491,6 +1491,34 @@ const TierBadge = ({ tier, small = true }) => {
   return <LeanBadge label={badge.label} small={small} color={badge.color} title={badge.tooltip} />;
 };
 
+const GameStatusBadge = ({ status }) => {
+  if (status === "LIVE") return (
+    <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
+      <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
+      <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
+    </div>
+  );
+  if (status === "FINAL") return (
+    <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "1px 6px" }}>
+      <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
+    </div>
+  );
+  return null;
+};
+
+const RankScoreColumn = ({ rank, score, scoreColor: sc, simConfidence }) => (
+  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
+    <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", marginTop: 1 }}>{rank}</div>
+    <div style={{ fontSize: 14, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{score}</div>
+    {simConfidence != null && (
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", background: "#141726", border: "1px solid #1f2437", borderRadius: 8, padding: "4px 7px", minWidth: 36 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, fontFamily: "monospace", color: simConfidence >= 65 ? "#34d399" : simConfidence >= 50 ? "#fbbf24" : "#f87171" }}>{simConfidence}%</div>
+        <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>SIM</div>
+      </div>
+    )}
+  </div>
+);
+
 const Card = ({ children, style, onClick }) => (
   <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 14, padding: "14px", marginBottom: 12, ...style }} onClick={onClick}>{children}</div>
 );
@@ -2315,7 +2343,7 @@ const outsBoardScore = (pStats, gamelog, pf) => {
 };
 
 // computePitcherBoard: returns top-20 SP candidates sorted by score.
-const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats) => {
+const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal = {}) => {
   const candidates = [];
   (liveSlate ?? []).forEach(game => {
     [
@@ -2328,7 +2356,16 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
       if (!pStats && !gamelog) return;
       const pf      = PARK_FACTORS[game.home?.abbr] ?? NEUTRAL_PARK;
       const umpire  = liveUmpires[game.gamePk];
-      const merged  = { ...(p ?? {}), ...(pStats ?? {}) };
+      const arsenalStats = pitcherArsenal[p.id]?.pitcherStats ?? null;
+      const merged  = {
+        ...(p ?? {}),
+        ...(pStats ?? {}),
+        ...(arsenalStats ? {
+          swStrPct: arsenalStats.swStrPct ?? null,
+          chasePct: arsenalStats.oSwingPct ?? null,
+          fStrikePct: arsenalStats.fStrikePct ?? null,
+        } : {}),
+      };
       const oppTeamStats = liveTeamStats?.[facingTeam];
       const score   = type === "k"
         ? kBoardScore(merged, gamelog, pf, umpire, oppTeamStats)
@@ -2409,6 +2446,8 @@ const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameLog, liv
             : simOutsConfidence({ avgIP: gamelog?.avgIP ?? "—" }, line);
         })(),
         signals,
+        swStrPct:      merged.swStrPct ?? null,
+        chasePct:      merged.chasePct ?? null,
       });
     });
   });
@@ -2541,10 +2580,10 @@ const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, livePlaye
 function buildAiBoardPayload(
   liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
   liveLineups, liveWeather, liveHittingLog, liveStatSplits,
-  liveNrfiData, liveOddsMap
+  liveNrfiData, liveOddsMap, pitcherArsenal = {}
 ) {
-  const kCandidates = computePitcherBoard("k", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats).slice(0, 8);
-  const outsCandidates = computePitcherBoard("outs", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats).slice(0, 8);
+  const kCandidates = computePitcherBoard("k", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal).slice(0, 8);
+  const outsCandidates = computePitcherBoard("outs", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal).slice(0, 8);
   const hrCandidates = computeBatterBoard("hr", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits).slice(0, 8);
   const hitsCandidates = computeBatterBoard("hits", liveSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits).slice(0, 8);
   const f5mlCandidates = computeGameBoard(
@@ -4278,7 +4317,7 @@ export default function App() {
     const payload = buildAiBoardPayload(
       liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
       liveLineups, liveWeather, liveHittingLog, liveStatSplits,
-      liveNrfiData, effectiveOddsMap
+      liveNrfiData, effectiveOddsMap, pitcherArsenal
     );
     const payloadSig = payload.map(c => `${c.market}:${c.id}`).join("|");
     if (aiBoardPayloadSig.current === payloadSig && aiBoardData !== null) return;
@@ -5069,6 +5108,8 @@ export default function App() {
   // Output: 0–100 where < 35 = pitcher edge, 35–55 = neutral, 56+ = batter edge
 
   const scoreColor = (s) => s >= 55 ? "#ef4444" : s >= 35 ? "#f59e0b" : "#22c55e";
+  const resultBorderStyle = (color) =>
+    color ? { borderLeft: `3px solid ${color}`, paddingLeft: 10 } : {};
 
   const TABS = ["overview", "lineup", "arsenal", "intel", "props", "bullpen", "boxscore"];
 
@@ -5362,8 +5403,8 @@ export default function App() {
         : boardTab === "hits"
         ? computeBatterBoard("hits", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits)
         : boardTab === "k"
-        ? computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
-        : computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats)
+        ? computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal)
+        : computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal)
     )
       .slice(0, 60)  // cover top 60 live candidates (board renders well past rank 20 for multi-game slates)
       .map(c => buildBoardSummaryRequest(c, isGameBoard ? gameSubTab : boardTab));
@@ -5805,12 +5846,9 @@ export default function App() {
             return null;
           })();
           // Only show red border (miss) once game is final — never mid-game
-          const resultBorderColor = isResolved
-            ? (modelHit ? "#22c55e" : (gameStatus === "FINAL" ? "#ef4444" : null))
-            : null;
-          const resultCardStyle = resultBorderColor
-            ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
-            : {};
+          const resultCardStyle = resultBorderStyle(
+            isResolved ? (modelHit ? "#22c55e" : (gameStatus === "FINAL" ? "#ef4444" : null)) : null
+          );
           return (
             <div key={i} style={{ background: "#0f1020", border: `1px solid ${borderColor}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6, ...resultCardStyle }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
@@ -5823,17 +5861,7 @@ export default function App() {
                     <span style={{ fontSize: 9, color: "#6b7280" }}>{p.game}</span>
                     <TierBadge tier="algorithmic" />
                     {p.lineupConfirmed && <span style={{ fontSize: 8, color: "#22c55e", fontWeight: 700 }}>✓ LINEUP</span>}
-                    {gameStatus === "LIVE" && (
-                      <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
-                        <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
-                        <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
-                      </div>
-                    )}
-                    {gameStatus === "FINAL" && (
-                      <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "1px 6px" }}>
-                        <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
-                      </div>
-                    )}
+                    <GameStatusBadge status={gameStatus} />
                     {isResolved && modelHit && (
                       <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>✓ HIT</span>
                     )}
@@ -9675,8 +9703,8 @@ export default function App() {
           const boardCandidatesByType = {
             hr:   computeBatterBoard("hr", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
             hits: computeBatterBoard("hits", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
-            k:    computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats),
-            outs: computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats),
+            k:    computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal),
+            outs: computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal),
           };
           const liveBoardCandidates = (boardCandidatesByType[boardTab] ?? []).filter(c =>
             getBoardGamePhase(c.gamePk) === "upcoming"
@@ -9790,6 +9818,28 @@ export default function App() {
           const lockedBoardCandidatesForTab = lockedCandidatesByGame
             .flatMap(g => g.candidates.flatMap(c => applySubstitution(c)));
           const shouldApplyTop20 = boardTop20 && (boardTab === "hits" || boardTab === "hr");
+          const computeEVEdge = (c, type) => {
+            if (!c?.propLine || (type !== "hr" && type !== "hits")) return null;
+            const books = c.propLine.books ?? {};
+            const lean = c.score >= 55 ? "over" : "under";
+            const bookOdds = ["DK", "FD", "CZR", "MGM", "BET365"].map(b => {
+              const entry = books[b];
+              if (!entry) return null;
+              return lean === "over" ? entry.over : entry.under;
+            }).filter(v => v != null && Number.isFinite(Number(v)));
+            if (!bookOdds.length) return null;
+            const bestOdds = bookOdds.reduce((best, v) => (Number(v) > Number(best) ? v : best));
+            const bookImpliedRaw = mlToImplied(Number(bestOdds));
+            if (!bookImpliedRaw) return null;
+            const modelImpliedRaw = c.score / 100;
+            return {
+              edge: Math.round((modelImpliedRaw - bookImpliedRaw) * 100),
+              bestOdds,
+              lean,
+              modelImplied: Math.round(modelImpliedRaw * 100),
+              bookImplied: Math.round(bookImpliedRaw * 100),
+            };
+          };
           const evSort = (arr) => {
             if (!boardTop20 || (boardTab !== "hits" && boardTab !== "hr")) return arr;
             return [...arr].sort((a, b) => {
@@ -9798,12 +9848,24 @@ export default function App() {
               return evB - evA;
             });
           };
-          const displayLiveCandidates = shouldApplyTop20
-            ? evSort(liveBoardCandidates).slice(0, 20)
-            : liveBoardCandidates;
-          const displayLockedCandidates = shouldApplyTop20
-            ? evSort(lockedBoardCandidatesForTab).slice(0, 20)
-            : lockedBoardCandidatesForTab;
+          // Top 20 mode ranks ALL candidates (live + locked) together, takes the global
+          // top 20, then splits for display. This ensures a locked player ranked #10
+          // pre-game stays #10 after their game goes live/final, and the board never
+          // shows more than 20 cards total when Top 20 is active.
+          const [displayLiveCandidates, displayLockedCandidates, allDisplayCandidates] = (() => {
+            const sortedAll = [...liveBoardCandidates, ...lockedBoardCandidatesForTab]
+              .sort((a, b) => b.score - a.score);
+            if (!shouldApplyTop20) {
+              return [liveBoardCandidates, lockedBoardCandidatesForTab, sortedAll];
+            }
+            // EV-aware global sort → take top 20 → split into upcoming vs locked
+            const top20 = evSort([...liveBoardCandidates, ...lockedBoardCandidatesForTab]).slice(0, 20);
+            return [
+              top20.filter(c => getBoardGamePhase(c.gamePk) === "upcoming"),
+              top20.filter(c => getBoardGamePhase(c.gamePk) !== "upcoming"),
+              top20,
+            ];
+          })();
           const displayLiveCandidatesByGame = (() => {
             const groups = {};
             displayLiveCandidates.forEach(c => {
@@ -9850,31 +9912,8 @@ export default function App() {
           const loadedBatters = liveBoardCandidates.length;
           const lockedCount = lockedCandidatesByGame.reduce((sum, g) => sum + g.candidates.length, 0);
 
-          const scoreColor = (s) =>
+          const boardScoreColor = (s) =>
             s >= 70 ? "#22c55e" : s >= 55 ? "#f59e0b" : s >= 40 ? "#ef4444" : "#6b7280";
-
-          const computeEVEdge = (c, type) => {
-            if (!c?.propLine || (type !== "hr" && type !== "hits")) return null;
-            const books = c.propLine.books ?? {};
-            const lean = c.score >= 55 ? "over" : "under";
-            const bookOdds = ["DK", "FD", "CZR", "MGM", "BET365"].map(b => {
-              const entry = books[b];
-              if (!entry) return null;
-              return lean === "over" ? entry.over : entry.under;
-            }).filter(v => v != null && Number.isFinite(Number(v)));
-            if (!bookOdds.length) return null;
-            const bestOdds = bookOdds.reduce((best, v) => (Number(v) > Number(best) ? v : best));
-            const bookImpliedRaw = mlToImplied(Number(bestOdds));
-            if (!bookImpliedRaw) return null;
-            const modelImpliedRaw = c.score / 100;
-            return {
-              edge: Math.round((modelImpliedRaw - bookImpliedRaw) * 100),
-              bestOdds,
-              lean,
-              modelImplied: Math.round(modelImpliedRaw * 100),
-              bookImplied: Math.round(bookImpliedRaw * 100),
-            };
-          };
 
           const boardOutcome = (type, item) => {
             const id = item.id;
@@ -9904,18 +9943,17 @@ export default function App() {
           const lockedCandidatesForType = (type) =>
             Object.values(lockedBoardCandidates).flatMap(g => g[type] ?? []);
 
-          const hitSummary = (type) => {
-            const items = lockedCandidatesForType(type);
+          // Shared: resolves an array of board candidates through an outcome function
+          // and returns { hits, total } or null (if no items or none resolved yet).
+          const summarizeOutcomes = (items, outcomeFn) => {
             if (!items.length) return null;
-            const resolved = items
-              .map(item => boardOutcome(type, item))
-              .filter(v => v !== null);
+            const resolved = items.map(outcomeFn).filter(v => v !== null);
             if (!resolved.length) return null;
-            return {
-              hits: resolved.filter(Boolean).length,
-              total: items.length,
-            };
+            return { hits: resolved.filter(Boolean).length, total: items.length };
           };
+
+          const hitSummary = (type) =>
+            summarizeOutcomes(lockedCandidatesForType(type), item => boardOutcome(type, item));
 
           const tabHitSummary = {
             hr:   hitSummary("hr"),
@@ -10000,16 +10038,8 @@ export default function App() {
             return null;
           };
 
-          const gameHitSummary = (type, items) => {
-            if (!items.length) return null;
-            const resolved = items
-              .map(item => gameBoardOutcome(type, item))
-              .filter(v => v !== null);
-            return {
-              hits: resolved.filter(Boolean).length,
-              total: items.length,
-            };
-          };
+          const gameHitSummary = (type, items) =>
+            summarizeOutcomes(items, item => gameBoardOutcome(type, item));
 
           const getGameBoardCandidatesForSubTab = (sub) => {
             const live = computeGameBoard(
@@ -10147,7 +10177,7 @@ export default function App() {
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {gameBoardCandidates.map((c, i) => {
                       const displayScore = displayedGameBoardScore(c);
-                      const sc = scoreColor(displayScore);
+                      const sc = boardScoreColor(displayScore);
                       const lc = leanColor(c.lean, c.leanAbbr);
                       const boardSummaryRequest = buildBoardSummaryRequest(c, gameSubTab);
                       const gameStatus = getBoardGameStatus(c.gamePk);
@@ -10158,10 +10188,7 @@ export default function App() {
                       const gameHit = (gameSubTab === "nrfi" || gameSubTab === "total" || gameSubTab === "spread" || gameSubTab === "ml" || gameSubTab === "f5ml" || gameSubTab === "f5spread")
                         ? gameBoardOutcome(gameSubTab, c)
                         : null;
-                      const resultBorderColor = gameHit === null ? null : (gameHit ? "#22c55e" : "#ef4444");
-                      const resultCardStyle = resultBorderColor
-                        ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
-                        : {};
+                      const resultCardStyle = resultBorderStyle(gameHit === null ? null : (gameHit ? "#22c55e" : "#ef4444"));
                       return (
                         <Card key={c.gamePk} style={{ cursor: "pointer", padding: "10px 12px", ...resultCardStyle }}
                           onClick={() => setWhyModal({ c, type: gameSubTab, rank: i + 1 })}>
@@ -10176,6 +10203,9 @@ export default function App() {
                               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 3 }}>
                                 <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{c.away?.abbr ?? "?"} @ {c.home?.abbr ?? "?"}</span>
                                 <TierBadge tier="algorithmic" />
+                                {c.gameTime && (
+                                  <span style={{ fontSize: 9, color: "#38bdf8", fontFamily: "monospace" }}>{formatLocalTime(c.gameTime)}</span>
+                                )}
                                 {gameStatus && (
                                   <span style={{ fontSize: 8, fontWeight: 800, color: gameStatus === "LIVE" ? "#22c55e" : "#6b7280", background: gameStatus === "LIVE" ? "rgba(34,197,94,0.12)" : "#1e2030", border: `1px solid ${gameStatus === "LIVE" ? "rgba(34,197,94,0.35)" : "#374151"}`, borderRadius: 4, padding: "1px 5px" }}>{gameStatus}</span>
                                 )}
@@ -10318,13 +10348,20 @@ export default function App() {
                 </Card>
               ) : !isGameBoard && (() => {
                 const renderBoardCandidateCard = (c, i) => {
-                const sc = scoreColor(c.score);
+                const sc = boardScoreColor(c.score);
 
                 if (isPitcherBoard) {
                   // ── Pitcher card (K Props / Outs) ──────────────────────────
                   const boardGameStatus = getBoardGameStatus(c.gamePk);
                   const boardSummaryRequest = buildBoardSummaryRequest(c, boardTab);
-                  const pitcherMetrics = livePitcherStats[c.id] ?? c ?? {};
+                  const pitcherMetrics = {
+                    ...(livePitcherStats[c.id] ?? {}),
+                    ...c,
+                    ...(pitcherArsenal[c.id]?.pitcherStats ? {
+                      swStrPct: pitcherArsenal[c.id].pitcherStats.swStrPct,
+                      chasePct: pitcherArsenal[c.id].pitcherStats.oSwingPct,
+                    } : {}),
+                  };
                   const todayResult = liveBoardResults[c.id] ?? null;
                   const hasResolvedResult = !!todayResult && !todayResult.live;
                   const propLineValue = c.propLine?.line ?? c.suggestedLine;
@@ -10335,32 +10372,13 @@ export default function App() {
                       ? (boardLean === "UNDER" ? todayResult.k < propLineValue : todayResult.k > propLineValue)
                       : (boardLean === "UNDER" ? todayResult.outs < propLineValue : todayResult.outs > propLineValue)
                   );
-                  const resultBorderColor = hasResolvedResult ? (pitcherHit ? "#22c55e" : "#ef4444") : null;
-                  const resultCardStyle = resultBorderColor
-                    ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
-                    : {};
+                  const resultCardStyle = resultBorderStyle(hasResolvedResult ? (pitcherHit ? "#22c55e" : "#ef4444") : null);
                   const propBadgeLine = propLineValue !== null && propLineValue !== undefined ? `${propLineValue}` : "—";
                   return (
                     <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                         {/* Rank + score */}
-                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>
-                          <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280", marginTop: 1 }}>{i + 1}</div>
-                          <div style={{ fontSize: 14, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</div>
-                          {c.simConfidence != null && (
-                            <div style={{
-                              display: "flex", flexDirection: "column", alignItems: "center",
-                              background: "#141726", border: "1px solid #1f2437", borderRadius: 8,
-                              padding: "4px 7px", minWidth: 36
-                            }}>
-                              <div style={{
-                                fontSize: 12, fontWeight: 800, fontFamily: "monospace",
-                                color: c.simConfidence >= 65 ? "#34d399" : c.simConfidence >= 50 ? "#fbbf24" : "#f87171"
-                              }}>{c.simConfidence}%</div>
-                              <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>SIM</div>
-                            </div>
-                          )}
-                        </div>
+                        <RankScoreColumn rank={i + 1} score={c.score} scoreColor={sc} simConfidence={c.simConfidence} />
                         {/* Main info */}
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -10368,17 +10386,7 @@ export default function App() {
                             <TierBadge tier="algorithmic" />
                             <span style={{ fontSize: 9, fontWeight: 700, color: "#000", background: "#374151", borderRadius: 4, padding: "1px 5px" }}>{c.team}</span>
                             <span style={{ fontSize: 9, color: "#9ca3af" }}>{c.hand}HP</span>
-                            {boardGameStatus === "LIVE" && (
-                              <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
-                                <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
-                                <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
-                              </div>
-                            )}
-                            {boardGameStatus === "FINAL" && (
-                              <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "1px 6px" }}>
-                                <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
-                              </div>
-                            )}
+                            <GameStatusBadge status={boardGameStatus} />
                             {hasResolvedResult && pitcherHit && (
                               <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 4, padding: "1px 6px" }}>
                                 ✓ {boardTab === "k" ? `${todayResult.k}K` : `${todayResult.outs} outs`}
@@ -10518,33 +10526,16 @@ export default function App() {
                 const gotHR       = hasResult && todayResult.hr > 0;
                 const gotHit      = hasResult && todayResult.h > 0 && !gotHR;
                 const ohFer       = hasResult && todayResult.h === 0;
-                const resultBorderColor = isHrBoard
-                  ? (gotHR ? "#fbbf24" : (boardGameStatus === "FINAL" ? "#ef4444" : null))
-                  : (gotHR ? "#fbbf24" : (gotHit ? "#22c55e" : (ohFer ? "#ef4444" : null)));
-                const resultCardStyle   = resultBorderColor
-                  ? { borderLeft: `3px solid ${resultBorderColor}`, paddingLeft: 10 }
-                  : {};
+                const resultCardStyle = resultBorderStyle(
+                  isHrBoard
+                    ? (gotHR ? "#fbbf24" : (boardGameStatus === "FINAL" ? "#ef4444" : null))
+                    : (gotHR ? "#fbbf24" : (gotHit ? "#22c55e" : (ohFer ? "#ef4444" : null)))
+                );
                 return (
                   <Card key={`${c.id}-${c.gamePk}`} style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                       {/* Rank */}
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0, marginTop: 1 }}>
-                        <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280" }}>{i + 1}</div>
-                        <div style={{ fontSize: 14, fontWeight: 900, color: sc, fontFamily: "monospace", lineHeight: 1 }}>{c.score}</div>
-                        {c.simConfidence != null && (
-                          <div style={{
-                            display: "flex", flexDirection: "column", alignItems: "center",
-                            background: "#141726", border: "1px solid #1f2437", borderRadius: 8,
-                            padding: "4px 7px", minWidth: 36
-                          }}>
-                            <div style={{
-                              fontSize: 12, fontWeight: 800, fontFamily: "monospace",
-                              color: c.simConfidence >= 65 ? "#34d399" : c.simConfidence >= 50 ? "#fbbf24" : "#f87171"
-                            }}>{c.simConfidence}%</div>
-                            <div style={{ fontSize: 7, color: "#4b5563", marginTop: 1 }}>SIM</div>
-                          </div>
-                        )}
-                      </div>
+                      <RankScoreColumn rank={i + 1} score={c.score} scoreColor={sc} simConfidence={c.simConfidence} />
 
                       {/* Main info */}
                       <div style={{ flex: 1, minWidth: 0 }}>
@@ -10557,17 +10548,7 @@ export default function App() {
                               <span style={{ fontSize: 8, fontWeight: 700, color: "#fbbf24", fontFamily: "monospace", letterSpacing: "0.05em" }}>↔ SUB</span>
                             </div>
                           )}
-                          {boardGameStatus === "LIVE" && (
-                            <div style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 5, padding: "1px 6px" }}>
-                              <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444", boxShadow: "0 0 5px #ef4444", animation: "pulse 1.2s infinite" }} />
-                              <span style={{ fontSize: 8, fontWeight: 700, color: "#ef4444", fontFamily: "monospace", letterSpacing: "0.05em" }}>LIVE</span>
-                            </div>
-                          )}
-                          {boardGameStatus === "FINAL" && (
-                            <div style={{ background: "rgba(107,114,128,0.15)", border: "1px solid rgba(107,114,128,0.3)", borderRadius: 5, padding: "1px 6px" }}>
-                              <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", fontFamily: "monospace", letterSpacing: "0.05em" }}>FINAL</span>
-                            </div>
-                          )}
+                          <GameStatusBadge status={boardGameStatus} />
                           {boardGameStatus !== "LIVE" && boardGameStatus !== "FINAL" && c.lineupState === "confirmed" && (
                             <div style={{ background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 5, padding: "1px 6px" }}>
                               <span style={{ fontSize: 8, fontWeight: 700, color: "#22c55e", fontFamily: "monospace", letterSpacing: "0.05em" }}>✓ CONFIRMED</span>
@@ -10737,7 +10718,7 @@ export default function App() {
                             </div>
                             {group.candidates.map(item => renderBoardCandidateCard(
                               item,
-                              Math.max(0, displayLiveCandidates.findIndex(c => candidateKey(c) === candidateKey(item)))
+                              Math.max(0, allDisplayCandidates.findIndex(c => candidateKey(c) === candidateKey(item)))
                             ))}
                           </div>
                         ))}
@@ -10766,13 +10747,18 @@ export default function App() {
                                 borderBottom: "1px solid rgba(255,255,255,0.06)", marginBottom: 6,
                                 display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                                 <span>{group.gameLabel}</span>
-                                <span style={{ color: phase === "live" ? "#22c55e" : "#6b7280" }}>
-                                  {phase === "live" ? "● LIVE" : "FINAL"}
-                                </span>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                  {group.gameTime && (
+                                    <span style={{ color: "#6b7280" }}>{formatLocalTime(group.gameTime)}</span>
+                                  )}
+                                  <span style={{ color: phase === "live" ? "#22c55e" : "#6b7280" }}>
+                                    {phase === "live" ? "● LIVE" : "FINAL"}
+                                  </span>
+                                </div>
                               </div>
                               {group.candidates.map(item => renderBoardCandidateCard(
                                 item,
-                                Math.max(0, displayLockedCandidates.findIndex(c => candidateKey(c) === candidateKey(item)))
+                                Math.max(0, allDisplayCandidates.findIndex(c => candidateKey(c) === candidateKey(item)))
                               ))}
                             </div>
                           );
@@ -10952,9 +10938,10 @@ export default function App() {
                     const aiColor = c.aiScore >= 75 ? "#34d399" : c.aiScore >= 55 ? "#fbbf24" : "#f87171";
                     const aiGrade = getAiBoardGrade(c);
                     const resultBorderColor = aiGrade === true ? "#22c55e" : aiGrade === false ? "#ef4444" : null;
-                    const resultCardStyle = resultBorderColor
-                      ? { borderLeft: `3px solid ${resultBorderColor}`, borderColor: resultBorderColor, paddingLeft: 10 }
-                      : {};
+                    const resultCardStyle = {
+                      ...resultBorderStyle(resultBorderColor),
+                      ...(resultBorderColor ? { borderColor: resultBorderColor } : {}),
+                    };
                     return (
                       <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px", ...resultCardStyle }}>
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
@@ -11147,9 +11134,10 @@ export default function App() {
             const simPct    = c.simConfidence != null ? `${c.simConfidence}%` : "—";
             const bookPct   = c.impliedProb  != null ? `${Math.round(c.impliedProb * 100)}%` : "—";
             const resultBorderColor = grade === true ? "#22c55e" : grade === false ? "#ef4444" : null;
-            const cardStyle = resultBorderColor
-              ? { borderLeft: `3px solid ${resultBorderColor}`, borderColor: resultBorderColor, paddingLeft: 10 }
-              : {};
+            const cardStyle = {
+              ...resultBorderStyle(resultBorderColor),
+              ...(resultBorderColor ? { borderColor: resultBorderColor } : {}),
+            };
 
             return (
               <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px", ...cardStyle }}>

@@ -46,6 +46,7 @@ async function fetchPitcherVsHand(pitcherId, hand, year) {
     `&hfSea=${year}%7C`,
     `&player_type=pitcher`,
     `&pitchers_lookup%5B%5D=${pitcherId}`,
+    `&player_id=${pitcherId}`,
     `&stand=${hand}`,
     `&type=details`,
     `&min_pitches=0`,

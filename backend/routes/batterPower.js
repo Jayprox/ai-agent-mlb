@@ -47,6 +47,7 @@ async function fetchBatterPowerProfile(batterId) {
     `&hfSea=${SEASON}%7C`,
     `&player_type=batter`,
     `&batters_lookup%5B%5D=${batterId}`,
+    `&player_id=${batterId}`,
     `&min_pitches=0`,
     `&min_results=0`,
     `&min_pas=10`,

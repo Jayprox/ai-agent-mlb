@@ -6817,3 +6817,75 @@ Toggle chip labeled **"TOP 20"** on the Hits and HR board tabs that limits the d
 - `npm run build` passed
 
 *Updated 2026-05-16 — Session 124 complete · CODEX TASKS 122–124 implemented*
+
+---
+
+## 🗒 Session 125 — Codex: Shared UI Atoms Refactor
+
+**Files changed this session:** `prop-scout-v7.jsx`
+
+**Changes:**
+- Added shared helpers/components:
+  - `resultBorderStyle(color)`
+  - `GameStatusBadge`
+  - `RankScoreColumn`
+- Replaced the targeted duplicated result-border style blocks with `resultBorderStyle(...)`
+- Replaced the repeated LIVE / FINAL badge JSX with `GameStatusBadge`
+- Replaced the repeated prop-board rank + score + SIM column JSX with `RankScoreColumn`
+- Renamed the inner board render `scoreColor` helper to `boardScoreColor` to avoid confusing shadowing of the outer matchup colorizer
+
+**Scope:**
+- Pure refactor only
+- No scoring changes
+- No state changes
+- No backend changes
+- No schema changes
+
+**Validation:**
+- `npm run build` passed
+
+*Updated 2026-05-16 — Session 125 complete · CODEX TASK 125 implemented*
+
+---
+
+## 🗒 Session 126 — Codex: Savant K-Board Wiring Fix
+
+**Files changed this session:**
+- `prop-scout-v7.jsx`
+- `backend/routes/pitcherSplits.js`
+- `backend/routes/batterPower.js`
+
+**Frontend changes:**
+- `computePitcherBoard(...)` now accepts optional `pitcherArsenal = {}`
+- Merged Savant pitcher stats from `pitcherArsenal[p.id]?.pitcherStats`
+- Normalized:
+  - `swStrPct`
+  - `oSwingPct -> chasePct`
+  - `fStrikePct`
+- Added `swStrPct` and `chasePct` to pitcher candidates
+- Updated the intended call sites to pass `pitcherArsenal`:
+  - board render `boardCandidatesByType`
+  - board summary hydration
+  - `buildAiBoardPayload(...)`
+  - AI Board payload call site
+- Left the prop-board lock effect call sites unchanged, per spec
+- Updated pitcher-card metric merging so the existing SwStr% / Chase% display line now shows real Savant values
+
+**Backend changes:**
+- `pitcherSplits.js`
+  - added `&player_id=${pitcherId}` to the Savant CSV request
+- `batterPower.js`
+  - added `&player_id=${batterId}` to the Savant CSV request
+
+**Scope / non-changes:**
+- `kBoardScore(...)` itself unchanged
+- no new state
+- no new routes
+- no schema changes
+
+**Validation:**
+- `node --check backend/routes/pitcherSplits.js` passed
+- `node --check backend/routes/batterPower.js` passed
+- `npm run build` passed
+
+*Updated 2026-05-16 — Session 126 complete · CODEX TASK 126 implemented*
