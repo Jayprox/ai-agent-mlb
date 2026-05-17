@@ -3,16 +3,20 @@ const crypto = require("crypto");
 const Anthropic = require("@anthropic-ai/sdk");
 const OpenAI = require("openai");
 const cache = require("../services/cache");
+const db = require("../services/db");
 
 const router = express.Router();
 
-const SUMMARY_TTL = 6 * 60 * 60 * 1000; // 6h
+const SUMMARY_TTL   = 6 * 60 * 60 * 1000; // 6h in-memory cache
 const SUMMARY_MODEL = "claude-haiku-4-5-20251001";
 const FALLBACK_MODEL = "gpt-4o-mini";
 const PREMIUM_MODEL  = "gpt-4o";
 
+// Cards below this score get deterministic fallback — no AI call.
+const AI_SCORE_THRESHOLD = 70;
+
 let _anthropic = null;
-let _openai = null;
+let _openai    = null;
 
 function getAnthropic() {
   if (!_anthropic) {
@@ -47,7 +51,6 @@ function fallbackSummary(card) {
   const caution = card?.caution ? String(card.caution).trim() : "";
 
   if (tier === "low") {
-    // Lead with what's working against this card
     if (negatives.length >= 2) return `${negatives[0]}; ${negatives[1]}.`;
     if (negatives.length === 1) return caution ? `${negatives[0]}. ${caution}.` : `${negatives[0]}.`;
     return caution || `${card?.market ?? "Matchup"} shows limited edge from the current factor mix.`;
@@ -64,6 +67,86 @@ function fallbackSummary(card) {
   return caution || `${card?.market ?? "Matchup"} leans ${card?.lean ?? "neutral"} from the current factor mix.`;
 }
 
+// Stable key for DB persistence: player + market + lean, date-scoped
+function dbCardKey(card) {
+  const name   = String(card.name   ?? "").toLowerCase().replace(/\s+/g, "_");
+  const market = String(card.market ?? "").toLowerCase();
+  const lean   = String(card.lean   ?? "").toLowerCase();
+  return `${name}:${market}:${lean}`;
+}
+
+function todayDate() {
+  return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+}
+
+// DB persistence: ensure migration table exists
+async function ensureSummaryTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS card_summaries (
+      id         SERIAL      PRIMARY KEY,
+      slate_date DATE        NOT NULL,
+      card_key   TEXT        NOT NULL,
+      summary    TEXT        NOT NULL,
+      is_premium BOOLEAN     NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await db.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cs_key_date_premium
+      ON card_summaries(slate_date, card_key, is_premium)
+  `);
+}
+
+let _tableReady = false;
+async function getTableReady() {
+  if (_tableReady || !db.isConnected()) return;
+  try {
+    await ensureSummaryTable();
+    _tableReady = true;
+  } catch (e) {
+    console.warn("  ⚠ card_summaries table init failed:", e.message);
+  }
+}
+
+async function dbGetSummaries(cardKeys, isPremium, slateDate) {
+  if (!db.isConnected() || !cardKeys.length) return {};
+  try {
+    await getTableReady();
+    const res = await db.query(
+      `SELECT card_key, summary FROM card_summaries
+       WHERE slate_date = $1 AND is_premium = $2 AND card_key = ANY($3)`,
+      [slateDate, isPremium, cardKeys]
+    );
+    const out = {};
+    for (const row of (res?.rows ?? [])) out[row.card_key] = row.summary;
+    return out;
+  } catch (e) {
+    console.warn("  ⚠ card_summaries DB read failed:", e.message);
+    return {};
+  }
+}
+
+async function dbSaveSummaries(entries, isPremium, slateDate) {
+  // entries: [{ cardKey, summary }]
+  if (!db.isConnected() || !entries.length) return;
+  try {
+    await getTableReady();
+    const values = entries.map((_, i) => {
+      const base = i * 4;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
+    }).join(", ");
+    const params = entries.flatMap(({ cardKey, summary }) => [slateDate, cardKey, summary, isPremium]);
+    await db.query(
+      `INSERT INTO card_summaries (slate_date, card_key, summary, is_premium)
+       VALUES ${values}
+       ON CONFLICT (slate_date, card_key, is_premium) DO NOTHING`,
+      params
+    );
+  } catch (e) {
+    console.warn("  ⚠ card_summaries DB write failed:", e.message);
+  }
+}
+
 // Shared card payload shape for all AI calls
 function cardPayload(card) {
   return {
@@ -71,7 +154,7 @@ function cardPayload(card) {
     market:       card.market,
     lean:         card.lean,
     score:        card.score ?? null,
-    scoreTier:    card.scoreTier ?? "mid",   // "high" | "mid" | "low"
+    scoreTier:    card.scoreTier ?? "mid",
     positives:    card.positives ?? [],
     negatives:    card.negatives ?? [],
     caution:      card.caution ?? null,
@@ -151,10 +234,24 @@ const GPT4O_SYSTEM =
   "Sentence length: 18–30 words. No emojis, no bullet points. " +
   "Return strict JSON only: {\"summaries\":[{\"id\":\"...\",\"text\":\"...\"}]}";
 
-/** Enough output headroom so JSON is not truncated mid-batch (was causing fallback text for tail cards). */
+/**
+ * Output token budget per batch.
+ * Each card produces 12–22 words (~30 tokens) + JSON structure overhead (~20 tokens/card).
+ * Cap at 4096 to stay well under the 10K TPM limit even across concurrent requests.
+ */
 function maxOutputTokensForBatch(cardCount, premium) {
-  const per = premium ? 200 : 160;
-  return Math.min(8192, Math.max(1024, 350 + Math.max(1, cardCount) * per));
+  const perCard = premium ? 120 : 80;
+  return Math.min(4096, Math.max(256, 100 + Math.max(1, cardCount) * perCard));
+}
+
+/** Returns true if err is an Anthropic 429 rate-limit error */
+function isRateLimit(err) {
+  return (
+    err?.status === 429 ||
+    err?.error?.type === "rate_limit_error" ||
+    String(err?.message ?? "").includes("rate_limit_error") ||
+    String(err?.message ?? "").includes("rate limit")
+  );
 }
 
 async function generateWithAnthropic(cards) {
@@ -164,14 +261,8 @@ async function generateWithAnthropic(cards) {
     max_tokens: maxOutputTokensForBatch(cards.length, false),
     temperature: 0.2,
     system: HAIKU_SYSTEM,
-    messages: [
-      {
-        role: "user",
-        content: JSON.stringify({ cards: cards.map(cardPayload) }),
-      },
-    ],
+    messages: [{ role: "user", content: JSON.stringify({ cards: cards.map(cardPayload) }) }],
   });
-
   const text = message.content?.find((part) => part.type === "text")?.text ?? "";
   return safeJsonParse(text);
 }
@@ -185,10 +276,7 @@ async function generateWithOpenAI(cards) {
     temperature: 0.2,
     messages: [
       { role: "system", content: GPT4O_MINI_SYSTEM },
-      {
-        role: "user",
-        content: JSON.stringify({ cards: cards.map(cardPayload) }),
-      },
+      { role: "user", content: JSON.stringify({ cards: cards.map(cardPayload) }) },
     ],
   });
   return safeJsonParse(message.choices?.[0]?.message?.content ?? "");
@@ -203,19 +291,28 @@ async function generateWithGPT4o(cards) {
     temperature: 0.3,
     messages: [
       { role: "system", content: GPT4O_SYSTEM },
-      {
-        role: "user",
-        content: JSON.stringify({ cards: cards.map(cardPayload) }),
-      },
+      { role: "user", content: JSON.stringify({ cards: cards.map(cardPayload) }) },
     ],
   });
-  const parsed = safeJsonParse(message.choices?.[0]?.message?.content ?? "");
-  return parsed;
+  return safeJsonParse(message.choices?.[0]?.message?.content ?? "");
 }
 
 async function generateSummaries(cards, premium = false) {
   if (premium && process.env.OPENAI_API_KEY) return generateWithGPT4o(cards);
-  if (process.env.ANTHROPIC_API_KEY) return generateWithAnthropic(cards);
+
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      return await generateWithAnthropic(cards);
+    } catch (err) {
+      if (isRateLimit(err)) {
+        console.warn(`  ⚠ card-summary: Anthropic 429 — falling back to OpenAI`);
+        // fall through to OpenAI below
+      } else {
+        throw err;
+      }
+    }
+  }
+
   if (process.env.OPENAI_API_KEY) return generateWithOpenAI(cards);
   return {
     summaries: cards.map((card) => ({ id: card.id, text: fallbackSummary(card) })),
@@ -227,61 +324,94 @@ router.post("/", async (req, res) => {
   const isPremium  = req.body?.premium === true;
   if (!inputCards.length) return res.status(400).json({ error: "cards[] required" });
 
+  const slateDate = todayDate();
   const summaries = {};
-  const uncached = [];
 
+  // ── Step 1: Score gate — below threshold gets deterministic fallback immediately ──
+  const aiEligible = [];
   inputCards.forEach((card) => {
     if (!card?.id) return;
+    const score = parseFloat(card.score ?? 0);
+    if (score < AI_SCORE_THRESHOLD) {
+      summaries[card.id] = fallbackSummary(card);
+    } else {
+      aiEligible.push(card);
+    }
+  });
+
+  if (!aiEligible.length) return res.json({ summaries });
+
+  // ── Step 2: In-memory cache check ──
+  const uncachedMemory = [];
+  aiEligible.forEach((card) => {
     const payload = {
-      market:    card.market ?? "",
-      lean:      card.lean ?? "",
-      score:     card.score ?? null,
+      market: card.market ?? "", lean: card.lean ?? "", score: card.score ?? null,
       scoreTier: card.scoreTier ?? "mid",
       positives: Array.isArray(card.positives) ? card.positives.slice(0, 3) : [],
       negatives: Array.isArray(card.negatives) ? card.negatives.slice(0, 2) : [],
-      caution:   card.caution ?? null,
-      matchup:   card.matchup ?? null,
-      signals:   Array.isArray(card.signals) ? card.signals.slice(0, 4) : [],
-      name:      card.name ?? null,
-      hand:      card.hand ?? null,
-      facingTeam: card.facingTeam ?? null,
-      premium:   isPremium,
+      caution: card.caution ?? null, matchup: card.matchup ?? null,
+      signals: Array.isArray(card.signals) ? card.signals.slice(0, 4) : [],
+      name: card.name ?? null, hand: card.hand ?? null,
+      facingTeam: card.facingTeam ?? null, premium: isPremium,
     };
-    const hash = crypto.createHash("md5").update(JSON.stringify(payload)).digest("hex");
+    const hash     = crypto.createHash("md5").update(JSON.stringify(payload)).digest("hex");
     const cacheKey = `card-summary:${hash}`;
-    const cached = cache.get(cacheKey);
+    const cached   = cache.get(cacheKey);
     if (cached) {
       summaries[card.id] = cached;
-      return;
+    } else {
+      uncachedMemory.push({ ...card, _cacheKey: cacheKey, _cardKey: dbCardKey(card) });
     }
-    uncached.push({ ...card, _cacheKey: cacheKey });
   });
 
-  if (!uncached.length) return res.json({ summaries });
+  if (!uncachedMemory.length) return res.json({ summaries });
 
-  const SUMMARY_CHUNK = 10; // large single calls were truncated → many cards fell back to semicolon glue
+  // ── Step 3: DB cache check ──
+  const cardKeys   = uncachedMemory.map((c) => c._cardKey);
+  const dbHits     = await dbGetSummaries(cardKeys, isPremium, slateDate);
+  const uncachedDb = [];
+
+  uncachedMemory.forEach((card) => {
+    const dbText = dbHits[card._cardKey];
+    if (dbText) {
+      summaries[card.id] = dbText;
+      cache.set(card._cacheKey, dbText, SUMMARY_TTL); // warm in-memory cache
+    } else {
+      uncachedDb.push(card);
+    }
+  });
+
+  if (!uncachedDb.length) return res.json({ summaries });
+
+  // ── Step 4: AI generation for remaining cards ──
+  const SUMMARY_CHUNK = 10;
 
   try {
-    for (let offset = 0; offset < uncached.length; offset += SUMMARY_CHUNK) {
-      const slice = uncached.slice(offset, offset + SUMMARY_CHUNK);
+    for (let offset = 0; offset < uncachedDb.length; offset += SUMMARY_CHUNK) {
+      const slice     = uncachedDb.slice(offset, offset + SUMMARY_CHUNK);
       const generated = await generateSummaries(slice, isPremium);
-      const byId = new Map(
+      const byId      = new Map(
         Array.isArray(generated?.summaries)
           ? generated.summaries.map((item) => [item?.id, String(item?.text ?? "").trim()])
           : []
       );
 
+      const toSave = [];
       slice.forEach((card) => {
         const text = byId.get(card.id) || fallbackSummary(card);
         summaries[card.id] = text;
         cache.set(card._cacheKey, text, SUMMARY_TTL);
+        if (byId.has(card.id)) toSave.push({ cardKey: card._cardKey, summary: text });
       });
+
+      // Persist AI-generated summaries to DB (fire-and-forget)
+      dbSaveSummaries(toSave, isPremium, slateDate).catch(() => {});
     }
 
     return res.json({ summaries });
   } catch (err) {
     console.warn(`  ⚠ card-summary failed: ${err.message}`);
-    uncached.forEach((card) => {
+    uncachedDb.forEach((card) => {
       if (summaries[card.id] == null) summaries[card.id] = fallbackSummary(card);
     });
     return res.json({ summaries, fallback: true });
