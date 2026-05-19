@@ -77,6 +77,50 @@ router.post("/", async (req, res) => {
   return res.json({ ok: true, inserted, skipped });
 });
 
+// GET /api/board-snapshot/stats?days=7|30|0
+// Aggregated read-only performance stats for Research Mode.
+router.get("/stats", async (req, res) => {
+  const daysRaw = Number.parseInt(String(req.query.days ?? "0"), 10);
+  const days = Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : 0;
+
+  if (!isConnected()) {
+    return res.json({ days: 0, rows: [] });
+  }
+
+  try {
+    const result = await query(
+      `SELECT
+          market,
+          score_tier,
+          COUNT(*)                                       AS total,
+          COUNT(*) FILTER (WHERE result_hit IS NOT NULL) AS resolved,
+          COUNT(*) FILTER (WHERE result_hit = true)      AS hits,
+          COUNT(*) FILTER (WHERE result_hit = false)     AS misses
+       FROM board_card_snapshots
+       WHERE
+         ($1::int = 0 OR slate_date >= CURRENT_DATE - ($1::int || ' days')::interval)
+       GROUP BY market, score_tier
+       ORDER BY market, score_tier`,
+      [days]
+    );
+
+    return res.json({
+      days,
+      rows: (result.rows ?? []).map((row) => ({
+        market: row.market,
+        scoreTier: row.score_tier,
+        total: Number(row.total) || 0,
+        resolved: Number(row.resolved) || 0,
+        hits: Number(row.hits) || 0,
+        misses: Number(row.misses) || 0,
+      })),
+    });
+  } catch (err) {
+    console.warn(`  ⚠ board-snapshot stats failed: ${err.message}`);
+    return res.json({ days, rows: [] });
+  }
+});
+
 // GET /api/board-snapshot/:date
 // Returns all snapshots for a slate date, grouped by market.
 router.get("/:date", async (req, res) => {

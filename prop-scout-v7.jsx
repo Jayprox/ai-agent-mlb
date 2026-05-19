@@ -418,6 +418,27 @@ const fallbackCardSummary = ({ positives = [], caution = null, lean = "", market
   return caution || `${market || "This matchup"} leans ${String(lean || "neutral").toLowerCase()} from the current factor mix.`;
 };
 
+function buildPerfMatrix(rows) {
+  const MARKETS = ["hr", "hits", "k", "outs"];
+  const TIERS = ["high", "mid", "low"];
+  const matrix = {};
+  for (const market of MARKETS) {
+    matrix[market] = {};
+    for (const tier of TIERS) {
+      matrix[market][tier] = { total: 0, resolved: 0, hits: 0, misses: 0 };
+    }
+  }
+  for (const row of rows ?? []) {
+    const cell = matrix[row.market]?.[row.scoreTier];
+    if (!cell) continue;
+    cell.total += Number(row.total) || 0;
+    cell.resolved += Number(row.resolved) || 0;
+    cell.hits += Number(row.hits) || 0;
+    cell.misses += Number(row.misses) || 0;
+  }
+  return matrix;
+}
+
 
 const buildBoardSummaryRequest = (c, type) => {
   const factors = c?.factors ?? generateWhyFactors(c, type);
@@ -2431,6 +2452,10 @@ export default function App() {
   const [researchMode, setResearchMode]   = useState(false);
   const [logoClicks,   setLogoClicks]     = useState(0);
   const [slateDate,    setSlateDate]      = useState(null); // null = today
+  const [historicalSnapshot, setHistoricalSnapshot] = useState(null);
+  const [historicalSnapshotLoading, setHistoricalSnapshotLoading] = useState(false);
+  const [perfStats,    setPerfStats]      = useState(null);
+  const [perfDays,     setPerfDays]       = useState(30);
   const [liveLineups, setLiveLineups] = useState({});
   const [liveUmpires, setLiveUmpires] = useState({});
   const [livePitcherStats, setLivePitcherStats] = useState({});
@@ -2567,6 +2592,42 @@ export default function App() {
       .catch(err => console.error("Schedule fetch failed:", err))
       .finally(() => setSlateLoading(false));
   }, [slateDate]);
+
+  useEffect(() => {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    if (!slateDate || view !== "board" || slateDate >= today) {
+      setHistoricalSnapshot(null);
+      setHistoricalSnapshotLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setHistoricalSnapshot(null);
+    setHistoricalSnapshotLoading(true);
+
+    apiFetch(`/api/board-snapshot/${slateDate}`)
+      .then(data => {
+        if (cancelled) return;
+        setHistoricalSnapshot({ date: slateDate, ...data });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setHistoricalSnapshot({ date: slateDate, hits: [], hr: [], k: [], outs: [] });
+      })
+      .finally(() => {
+        if (!cancelled) setHistoricalSnapshotLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [slateDate, view]);
+
+  useEffect(() => {
+    if (!researchMode || view !== "research-perf") return;
+    setPerfStats(null);
+    apiFetch(`/api/board-snapshot/stats?days=${perfDays}`)
+      .then(data => setPerfStats(data))
+      .catch(() => setPerfStats({ days: perfDays, rows: [] }));
+  }, [researchMode, view, perfDays]);
 
   // Auto-refresh schedule every 5 min to keep game statuses current for board locking.
   // Merges status fields into existing liveSlate without wiping other state.
@@ -4746,6 +4807,60 @@ export default function App() {
           </div>
         </div>
 
+        {researchMode && (view === "slate" || view === "research-perf") && (
+          <div style={{ display: "flex", flexDirection: isNarrowPhone ? "column" : "row", alignItems: isNarrowPhone ? "stretch" : "center", gap: 8, background: "rgba(167,139,250,0.08)", border: "1px solid rgba(167,139,250,0.25)", borderRadius: 10, padding: "8px 12px", marginBottom: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 9, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace", letterSpacing: "0.08em", flexShrink: 0 }}>📅 RESEARCH</span>
+              <button
+                onClick={() => setView("slate")}
+                style={{ background: view === "slate" ? "#a78bfa" : "#1a1c2e", border: `1px solid ${view === "slate" ? "#a78bfa" : "#2d3148"}`, borderRadius: 6, padding: "4px 10px", fontSize: 10, color: view === "slate" ? "#000" : "#f9fafb", cursor: "pointer", fontFamily: "monospace", fontWeight: 700 }}
+              >
+                Slate
+              </button>
+              <button
+                onClick={() => setView("research-perf")}
+                style={{ background: view === "research-perf" ? "#a78bfa" : "#1a1c2e", border: `1px solid ${view === "research-perf" ? "#a78bfa" : "#2d3148"}`, borderRadius: 6, padding: "4px 10px", fontSize: 10, color: view === "research-perf" ? "#000" : "#f9fafb", cursor: "pointer", fontFamily: "monospace", fontWeight: 700 }}
+              >
+                📊 Performance
+              </button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+              <button
+                onClick={() => {
+                  const base = slateDate ? new Date(slateDate + "T12:00:00") : new Date();
+                  base.setDate(base.getDate() - 1);
+                  setSlateDate(base.toISOString().slice(0, 10));
+                }}
+                style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 10px", fontSize: 13, color: "#f9fafb", cursor: "pointer" }}
+              >
+                ◀
+              </button>
+              <input
+                type="date"
+                value={slateDate ?? new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" })}
+                onChange={e => setSlateDate(e.target.value)}
+                style={{ flex: 1, background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 8px", fontSize: 11, color: "#f9fafb", fontFamily: "monospace", colorScheme: "dark" }}
+              />
+              <button
+                onClick={() => {
+                  const base = slateDate ? new Date(slateDate + "T12:00:00") : new Date();
+                  base.setDate(base.getDate() + 1);
+                  setSlateDate(base.toISOString().slice(0, 10));
+                }}
+                style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 10px", fontSize: 13, color: "#f9fafb", cursor: "pointer" }}
+              >
+                ▶
+              </button>
+              <button
+                onClick={() => { setSlateDate(null); setResearchMode(false); setLogoClicks(0); setView("slate"); }}
+                style={{ background: "transparent", border: "none", fontSize: 11, color: "#6b7280", cursor: "pointer", fontFamily: "monospace", flexShrink: 0 }}
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ════════════════════════════════════
             SLATE VIEW
         ════════════════════════════════════ */}
@@ -5022,36 +5137,6 @@ export default function App() {
             );
           })()}
 
-          {/* ── Research Mode: date navigation bar (7-click logo unlock) ── */}
-          {researchMode && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(167,139,250,0.08)", border: "1px solid rgba(167,139,250,0.25)", borderRadius: 10, padding: "8px 12px", marginBottom: 10 }}>
-              <span style={{ fontSize: 9, fontWeight: 700, color: "#a78bfa", fontFamily: "monospace", letterSpacing: "0.08em", flexShrink: 0 }}>📅 RESEARCH</span>
-              <button
-                onClick={() => {
-                  const base = slateDate ? new Date(slateDate + "T12:00:00") : new Date();
-                  base.setDate(base.getDate() - 1);
-                  setSlateDate(base.toISOString().slice(0, 10));
-                }}
-                style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 10px", fontSize: 13, color: "#f9fafb", cursor: "pointer" }}>◀</button>
-              <input
-                type="date"
-                value={slateDate ?? new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" })}
-                onChange={e => setSlateDate(e.target.value)}
-                style={{ flex: 1, background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 8px", fontSize: 11, color: "#f9fafb", fontFamily: "monospace", colorScheme: "dark" }}
-              />
-              <button
-                onClick={() => {
-                  const base = slateDate ? new Date(slateDate + "T12:00:00") : new Date();
-                  base.setDate(base.getDate() + 1);
-                  setSlateDate(base.toISOString().slice(0, 10));
-                }}
-                style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "4px 10px", fontSize: 13, color: "#f9fafb", cursor: "pointer" }}>▶</button>
-              <button
-                onClick={() => { setSlateDate(null); setResearchMode(false); setLogoClicks(0); }}
-                style={{ background: "transparent", border: "none", fontSize: 11, color: "#6b7280", cursor: "pointer", fontFamily: "monospace", flexShrink: 0 }}>✕</button>
-            </div>
-          )}
-
           <SLabel>{slateDate ? `Slate — ${slateDate}` : "Today's Slate"} — {activeSlate.length} Games{!IS_STATS_SANDBOX && !slateLoading && liveSlate ? " · LIVE" : !IS_STATS_SANDBOX && slateLoading ? " · Loading…" : ""}</SLabel>
           {slateLoading && !liveSlate && (
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 0" }}>
@@ -5070,6 +5155,155 @@ export default function App() {
             ))}
           </div>
         </>)}
+
+        {view === "research-perf" && researchMode && (() => {
+          const MARKET_LABELS = {
+            hr: { label: "Home Runs", icon: "🏠" },
+            hits: { label: "Hits", icon: "🎯" },
+            k: { label: "Strikeouts", icon: "🔥" },
+            outs: { label: "Outs Recorded", icon: "🛑" },
+          };
+          const TIER_LABELS = {
+            high: "HIGH (75+)",
+            mid: "MID (55–74)",
+            low: "LOW (<55)",
+          };
+          const marketOrder = ["hr", "hits", "k", "outs"];
+          const tierOrder = ["high", "mid", "low"];
+          const matrix = buildPerfMatrix(perfStats?.rows ?? []);
+          const visibleMarkets = marketOrder.filter((market) =>
+            tierOrder.some((tier) => (matrix[market]?.[tier]?.total ?? 0) > 0)
+          );
+          const overall = (perfStats?.rows ?? []).reduce((acc, row) => {
+            acc.total += Number(row.total) || 0;
+            acc.resolved += Number(row.resolved) || 0;
+            acc.hits += Number(row.hits) || 0;
+            acc.misses += Number(row.misses) || 0;
+            return acc;
+          }, { total: 0, resolved: 0, hits: 0, misses: 0 });
+          const overallHitRate = overall.resolved > 0 ? (overall.hits / overall.resolved) * 100 : null;
+          const pillStyle = (active) => ({
+            background: active ? "#a78bfa" : "#161827",
+            border: `1px solid ${active ? "#a78bfa" : "#1f2437"}`,
+            borderRadius: 999,
+            padding: "6px 12px",
+            fontSize: 10,
+            color: active ? "#000" : "#9ca3af",
+            fontFamily: "monospace",
+            fontWeight: 700,
+            cursor: "pointer",
+          });
+          const fmtPct = (hits, resolved) => (resolved > 0 ? `${((hits / resolved) * 100).toFixed(1)}%` : "—");
+          const barColor = (hitRate) => {
+            if (hitRate == null) return "#374151";
+            if (hitRate >= 60) return "#22c55e";
+            if (hitRate >= 45) return "#f59e0b";
+            return "#ef4444";
+          };
+
+          return (
+            <div style={{ border: "1px solid rgba(167,139,250,0.25)", background: "rgba(167,139,250,0.04)", borderRadius: 14, padding: "14px 14px 16px", marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontSize: 10, color: "#a78bfa", letterSpacing: "0.08em", fontWeight: 800 }}>📊 PERFORMANCE</div>
+                  <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 3 }}>Historical board-card hit rates by market and score tier.</div>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button onClick={() => setPerfDays(7)} style={pillStyle(perfDays === 7)}>Last 7 days</button>
+                  <button onClick={() => setPerfDays(30)} style={pillStyle(perfDays === 30)}>Last 30 days</button>
+                  <button onClick={() => setPerfDays(0)} style={pillStyle(perfDays === 0)}>All Time</button>
+                </div>
+              </div>
+
+              {perfStats === null && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 0" }}>
+                  <div style={{ width: 18, height: 18, border: "2px solid #1f2437", borderTop: "2px solid #a78bfa", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />
+                  <span style={{ fontSize: 12, color: "#9ca3af" }}>Loading performance data…</span>
+                </div>
+              )}
+
+              {perfStats !== null && visibleMarkets.length === 0 && (
+                <div style={{ background: "#0f1020", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 10, padding: "14px 12px", color: "#9ca3af", fontSize: 11, lineHeight: 1.5 }}>
+                  <div>No resolved picks found for this date range.</div>
+                  <div>Snapshots are saved from the date board-snapshot persistence was deployed.</div>
+                </div>
+              )}
+
+              {perfStats !== null && visibleMarkets.length > 0 && (
+                <div style={{ display: "grid", gap: 12 }}>
+                  {visibleMarkets.map((market) => {
+                    const marketRows = tierOrder.map((tier) => ({ tier, ...matrix[market][tier] }));
+                    const marketTotals = marketRows.reduce((acc, row) => {
+                      acc.total += row.total;
+                      acc.resolved += row.resolved;
+                      acc.hits += row.hits;
+                      acc.misses += row.misses;
+                      return acc;
+                    }, { total: 0, resolved: 0, hits: 0, misses: 0 });
+                    const marketHitRate = marketTotals.resolved > 0 ? (marketTotals.hits / marketTotals.resolved) * 100 : null;
+
+                    return (
+                      <div key={market} style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, overflow: "hidden", background: "#0f1020" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "10px 12px", background: "rgba(255,255,255,0.04)", borderBottom: "1px solid rgba(255,255,255,0.06)", flexWrap: "wrap" }}>
+                          <div style={{ fontSize: 12, fontWeight: 800, color: "#f9fafb" }}>{MARKET_LABELS[market].icon} {MARKET_LABELS[market].label}</div>
+                          <div style={{ fontSize: 10, color: "#9ca3af", display: "flex", gap: 12, flexWrap: "wrap" }}>
+                            <span>Total: {marketTotals.total}</span>
+                            <span>Resolved: {marketTotals.resolved}</span>
+                            <span>Hit Rate: {marketHitRate != null ? `${marketHitRate.toFixed(1)}%` : "—"}</span>
+                          </div>
+                        </div>
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                                <th style={{ textAlign: "left", padding: "9px 12px", fontSize: 9, color: "#6b7280", fontWeight: 800 }}>Tier</th>
+                                <th style={{ textAlign: "right", padding: "9px 12px", fontSize: 9, color: "#6b7280", fontWeight: 800 }}>Picks</th>
+                                <th style={{ textAlign: "right", padding: "9px 12px", fontSize: 9, color: "#6b7280", fontWeight: 800 }}>Resolved</th>
+                                <th style={{ textAlign: "right", padding: "9px 12px", fontSize: 9, color: "#6b7280", fontWeight: 800 }}>Hits</th>
+                                <th style={{ textAlign: "right", padding: "9px 12px", fontSize: 9, color: "#6b7280", fontWeight: 800 }}>Misses</th>
+                                <th style={{ textAlign: "right", padding: "9px 12px", fontSize: 9, color: "#6b7280", fontWeight: 800 }}>Hit %</th>
+                                <th style={{ textAlign: "left", padding: "9px 12px", fontSize: 9, color: "#6b7280", fontWeight: 800, minWidth: 140 }}>Bar</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {marketRows.map((row) => {
+                                const hasPicks = row.total > 0;
+                                const hitRate = row.resolved > 0 ? (row.hits / row.resolved) * 100 : null;
+                                return (
+                                  <tr key={row.tier} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                                    <td style={{ padding: "10px 12px", fontSize: 11, color: "#f3f4f6", fontWeight: 700 }}>{TIER_LABELS[row.tier]}</td>
+                                    <td style={{ padding: "10px 12px", fontSize: 11, color: "#d1d5db", textAlign: "right" }}>{hasPicks ? row.total : "—"}</td>
+                                    <td style={{ padding: "10px 12px", fontSize: 11, color: "#d1d5db", textAlign: "right" }}>{hasPicks ? row.resolved : "—"}</td>
+                                    <td style={{ padding: "10px 12px", fontSize: 11, color: "#22c55e", textAlign: "right" }}>{hasPicks ? row.hits : "—"}</td>
+                                    <td style={{ padding: "10px 12px", fontSize: 11, color: "#ef4444", textAlign: "right" }}>{hasPicks ? row.misses : "—"}</td>
+                                    <td style={{ padding: "10px 12px", fontSize: 11, color: "#f9fafb", textAlign: "right" }}>{hasPicks ? fmtPct(row.hits, row.resolved) : "—"}</td>
+                                    <td style={{ padding: "10px 12px" }}>
+                                      {hasPicks ? (
+                                        <div style={{ width: "100%", height: 10, borderRadius: 999, background: "#111827", border: "1px solid rgba(255,255,255,0.05)", overflow: "hidden" }}>
+                                          <div style={{ width: `${Math.max(0, Math.min(100, hitRate ?? 0))}%`, height: "100%", background: barColor(hitRate) }} />
+                                        </div>
+                                      ) : (
+                                        <span style={{ fontSize: 11, color: "#6b7280" }}>—</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <div style={{ background: "rgba(167,139,250,0.08)", border: "1px solid rgba(167,139,250,0.16)", borderRadius: 10, padding: "10px 12px", fontSize: 11, color: "#d1d5db" }}>
+                    Overall (resolved picks only): {overall.total} picked · {overall.resolved} resolved · {overall.hits} hits · {overallHitRate != null ? `${overallHitRate.toFixed(1)}% hit rate` : "—"}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* ════════════════════════════════════
             MODEL VIEW
@@ -8325,6 +8559,188 @@ export default function App() {
         {view === "board" && (() => {
           const isGameBoard    = boardTab === "games";
           const isPitcherBoard = !isGameBoard && (boardTab === "k" || boardTab === "outs");
+          const todayHonolulu = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+          const isHistoricalBoard = !!(researchMode && slateDate && slateDate < todayHonolulu);
+
+          if (isHistoricalBoard) {
+            const historyRowsByTab = historicalSnapshot ?? { hits: [], hr: [], k: [], outs: [] };
+            const marketOrder = ["hr", "hits", "k", "outs"];
+            const totalHistoricalCards = marketOrder.reduce((sum, market) => sum + ((historyRowsByTab[market] ?? []).length), 0);
+            const historicalSummary = marketOrder.map((market) => {
+              const cards = historyRowsByTab[market] ?? [];
+              const resolved = cards.filter(c => c.resultHit !== null && c.resultHit !== undefined);
+              const hits = resolved.filter(c => c.resultHit === true).length;
+              const pct = resolved.length > 0 ? Math.round((hits / resolved.length) * 100) : null;
+              return { market, hits, resolved: resolved.length, pct };
+            });
+            const marketLabels = { hr: "HR", hits: "Hits", k: "K", outs: "Outs" };
+            const boardScoreColor = (s) =>
+              s >= 70 ? "#22c55e" : s >= 55 ? "#f59e0b" : s >= 40 ? "#ef4444" : "#6b7280";
+            const historicalCards = isGameBoard ? [] : (historyRowsByTab[boardTab] ?? []);
+            const historicalRankByKey = historicalCards.reduce((acc, card, idx) => {
+              acc[`${card.id}-${card.gamePk}`] = idx + 1;
+              return acc;
+            }, {});
+            const groupedHistoricalCards = (() => {
+              const groups = {};
+              historicalCards.forEach(c => {
+                if (!groups[c.gamePk]) {
+                  groups[c.gamePk] = {
+                    gamePk: c.gamePk,
+                    gameLabel: c.gameLabel ?? `${c.awayTeam ?? "?"} @ ${c.homeTeam ?? "?"}`,
+                    gameTime: c.gameTime ?? null,
+                    candidates: [],
+                  };
+                }
+                groups[c.gamePk].candidates.push(c);
+              });
+              return Object.values(groups).sort((a, b) => {
+                const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
+                const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
+                return ta - tb;
+              });
+            })();
+            const historicalTodayResult = (card) => {
+              if (card.resultHit === null || card.resultHit === undefined || card.actualStat == null) return null;
+              if (boardTab === "k") return { k: Number(card.actualStat) || 0, live: false };
+              if (boardTab === "outs") return { outs: Number(card.actualStat) || 0, live: false };
+              if (boardTab === "hits") return { h: Number(card.actualStat) || 0, hr: 0, ab: 3, live: false };
+              if (boardTab === "hr") {
+                const hr = Number(card.actualStat) || 0;
+                return { hr, h: hr > 0 ? 1 : 0, ab: 4, live: false };
+              }
+              return null;
+            };
+            const renderHistoricalBoardCandidateCard = (c, i) => {
+              const sc = boardScoreColor(c.score ?? 0);
+              const boardSummaryRequest = buildBoardSummaryRequest(c, boardTab);
+              const summaryText = getCardSummaryText(boardSummaryRequest);
+              const isPremium = !!aiCardSummaries[`premium:${boardSummaryRequest?.id}`];
+              const todayResult = historicalTodayResult(c);
+
+              if (isPitcherBoard) {
+                const pitcherMetrics = { ...c };
+                return (
+                  <PitcherBoardCard
+                    key={`${c.id}-${c.gamePk}`}
+                    c={c}
+                    rank={i + 1}
+                    boardTab={boardTab}
+                    sc={sc}
+                    boardGameStatus="FINAL"
+                    todayResult={todayResult}
+                    pitcherMetrics={pitcherMetrics}
+                    summaryText={summaryText}
+                    isPremium={isPremium}
+                    preferredBook={preferredBook}
+                    onCardClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}
+                  />
+                );
+              }
+
+              return (
+                <BatterBoardCard
+                  key={`${c.id}-${c.gamePk}`}
+                  c={c}
+                  rank={i + 1}
+                  boardTab={boardTab}
+                  sc={sc}
+                  boardGameStatus="FINAL"
+                  todayResult={todayResult}
+                  evEdge={null}
+                  summaryText={summaryText}
+                  isPremium={isPremium}
+                  preferredBook={preferredBook}
+                  onCardClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}
+                />
+              );
+            };
+
+            return (
+              <div>
+                <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                  {[["hr", "⚾ HR"], ["hits", "🎯 Hits"], ["k", "⚡ K"], ["outs", "📋 Outs"], ["games", "🎲 Games"]].map(([type, label]) => (
+                    <button key={type} onClick={() => setBoardTab(type)}
+                      style={{ position: "relative", flex: 1, background: boardTab === type ? "#fbbf24" : "#161827",
+                        border: `1px solid ${boardTab === type ? "#fbbf24" : "#1f2437"}`,
+                        borderRadius: 8, padding: "7px", fontSize: 10, fontFamily: "monospace",
+                        fontWeight: 700, color: boardTab === type ? "#000" : "#9ca3af", cursor: "pointer" }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flexWrap: "wrap" }}>
+                    <TierBadge tier="algorithmic" />
+                    <span style={{ fontSize: 12, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>📅 History — {slateDate}</span>
+                  </div>
+                  <span style={{ fontSize: 9, color: "#4b5563", fontFamily: "monospace" }}>{totalHistoricalCards} cards snapshotted</span>
+                </div>
+
+                {historicalSnapshotLoading && (
+                  <Card>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 0", justifyContent: "center" }}>
+                      <div style={{ width: 18, height: 18, border: "2px solid #1f2437", borderTop: "2px solid #fbbf24", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />
+                      <span style={{ fontSize: 12, color: "#6b7280" }}>Loading snapshot for {slateDate}…</span>
+                    </div>
+                  </Card>
+                )}
+
+                {!historicalSnapshotLoading && (
+                  <>
+                    <div style={{ fontSize: 10, color: "#9ca3af", fontFamily: "monospace", marginBottom: 10, lineHeight: 1.5 }}>
+                      {historicalSummary.map((entry, idx) => (
+                        <span key={entry.market}>
+                          {marketLabels[entry.market]}: {entry.resolved > 0 ? `${entry.hits}/${entry.resolved} hit (${entry.pct}%)` : "—"}
+                          {idx < historicalSummary.length - 1 ? "  ·  " : ""}
+                        </span>
+                      ))}
+                    </div>
+
+                    {isGameBoard && (
+                      <Card>
+                        <div style={{ textAlign: "center", padding: "24px 0", color: "#6b7280", fontSize: 11 }}>
+                          No data available for "Games" tab in history.
+                        </div>
+                      </Card>
+                    )}
+
+                    {!isGameBoard && totalHistoricalCards === 0 && (
+                      <Card>
+                        <div style={{ textAlign: "center", padding: "24px 0", color: "#6b7280", fontSize: 11, lineHeight: 1.6 }}>
+                          <div>No board snapshot found for {slateDate}.</div>
+                          <div>Snapshots are saved starting from the date this feature was deployed.</div>
+                        </div>
+                      </Card>
+                    )}
+
+                    {!isGameBoard && totalHistoricalCards > 0 && historicalCards.length === 0 && (
+                      <Card>
+                        <div style={{ textAlign: "center", padding: "24px 0", color: "#6b7280", fontSize: 11 }}>
+                          No {boardTab.toUpperCase()} snapshot cards found for {slateDate}.
+                        </div>
+                      </Card>
+                    )}
+
+                    {!isGameBoard && historicalCards.length > 0 && (
+                      <div>
+                        {groupedHistoricalCards.map(group => (
+                          <BoardGameGroup key={group.gamePk} gameLabel={group.gameLabel} gameTime={group.gameTime} phase="final">
+                            {group.candidates.map((item) => renderHistoricalBoardCandidateCard(
+                              item,
+                              (historicalRankByKey[`${item.id}-${item.gamePk}`] ?? 1) - 1
+                            ))}
+                          </BoardGameGroup>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          }
+
           const boardCandidatesByType = {
             hr:   computeBatterBoard("hr", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
             hits: computeBatterBoard("hits", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),

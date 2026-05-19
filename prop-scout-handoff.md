@@ -6,7 +6,7 @@
 
 ## What Is Prop Scout?
 
-A personal MLB sports betting research app that compresses pre-game prop research from hours to minutes. Responsive React app (max-width 960px, 2-column layout on tablet/desktop) with a dark Discord-style card UI. The entire frontend is a single JSX file — intentional, keeps it portable.
+A personal MLB sports betting research app that compresses pre-game prop research from hours to minutes. Responsive React app (max-width 960px, 2-column layout on tablet/desktop) with a dark Discord-style card UI. The main app shell still lives in `prop-scout-v7.jsx`, but the pure scoring/board/shared-presentational logic has now been extracted into `src/` modules with Vitest coverage.
 
 ---
 
@@ -91,27 +91,56 @@ The footer auto-describes which sources are live. All flags `false` = full live 
 
 ```
 ai-agent-mlb/
-├── prop-scout-v7.jsx       ← CURRENT frontend (single JSX file)
+├── prop-scout-v7.jsx       ← CURRENT main app shell (state/hooks/render)
 ├── main.jsx                ← Vite entry point (renders App)
 ├── index.html              ← Vite HTML shell
-├── vite.config.js          ← Vite config + /api proxy to localhost:3001
-├── package.json            ← Frontend deps: react, react-dom, vite
+├── vite.config.js          ← Vite config + /api proxy to localhost:3001 + test block
+├── vitest.config.js        ← Vitest config
+├── package.json            ← Frontend deps + Vitest scripts/dev deps
+├── src/
+│   ├── constants.js        ← Shared pure constants (park factors, HFA, umpire stats, model tier)
+│   ├── utils.js            ← Shared pure utils (odds helpers, border styles, summaries, scratch normalization)
+│   ├── test-setup.js       ← Vitest jest-dom setup
+│   ├── board/
+│   │   ├── index.js        ← Board compute layer + AI payload builder
+│   │   └── index.test.js
+│   ├── components/
+│   │   ├── shared.jsx      ← Shared presentational primitives
+│   │   └── shared.test.jsx
+│   └── scoring/
+│       ├── batter.js       ← `hrBoardScore`, `hitBoardScore`
+│       ├── pitcher.js      ← `kBoardScore`, `outsBoardScore`
+│       ├── sim.js          ← Monte Carlo SIM confidence layer
+│       ├── batter.test.js
+│       ├── pitcher.test.js
+│       └── sim.test.js
 ├── .env                    ← API keys (gitignored)
 ├── .gitignore
 ├── prop-scout-handoff.md   ← This file
 ├── backend/
 │   ├── server.js           ← Express app, port 3001, open CORS
+│   ├── migrations/
+│   │   ├── 001_init.sql
+│   │   ├── 002_picks_users_lab.sql
+│   │   ├── 003_picks_rebuild.sql
+│   │   ├── 004_gamelog_snapshots.sql
+│   │   ├── 005_board_card_snapshots.sql
+│   │   └── 006_card_summaries.sql
 │   ├── package.json        ← Backend deps: express, axios, cors, dotenv
 │   ├── services/
 │   │   ├── mlbApi.js       ← axios instance for statsapi.mlb.com
 │   │   └── cache.js        ← In-memory TTL cache
+│   ├── jobs/
+│   │   ├── scheduler.js                ← cron wiring
+│   │   └── resolveCardSnapshotsJob.js  ← resolves locked board-card snapshots to hit/miss
 │   └── routes/
 │       ├── schedule.js     ← GET /api/schedule?date=YYYY-MM-DD
 │       ├── lineups.js      ← GET /api/lineups/:gamePk
 │       ├── players.js      ← GET /api/players/:playerId/stats
 │       ├── umpires.js      ← GET /api/umpires/:gamePk
 │       ├── arsenal.js      ← GET /api/arsenal/:pitcherId (Baseball Savant)
-│       └── splits.js       ← GET /api/splits/:batterId  (Baseball Savant)
+│       ├── splits.js       ← GET /api/splits/:batterId  (Baseball Savant)
+│       └── boardSnapshot.js← POST/GET board-card snapshot persistence
 └── checkpoints/
     ├── v6-odds-api/        ← Snapshot at Odds API milestone
     └── v7-multibook-odds/  ← Snapshot at multi-book table milestone (current)
@@ -123,15 +152,16 @@ ai-agent-mlb/
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Frontend | React 18, single JSX file | No component splitting — intentional |
+| Frontend | React 18 | Main app shell still in `prop-scout-v7.jsx`; pure logic extracted into `src/` modules |
 | Styling | Inline styles only | No CSS framework |
 | Build tool | Vite 5 | Dev server on :5173, proxies /api → :3001 |
+| Testing | Vitest + Testing Library | 100+ unit/component/integration tests for extracted pure modules |
 | Weather | Open-Meteo | Free, no key. `IS_SANDBOX = false` to enable |
 | Odds | The Odds API | Key in `.env`. `IS_ODDS_SANDBOX = false` to enable |
 | MLB Stats | MLB Stats API (statsapi.mlb.com) | Free, no key. CORS-blocked from browser → backend proxy |
-| Backend | Node/Express on port 3001 | 4 routes, TTL cache, open CORS |
+| Backend | Node/Express on port 3001 | Expanded route set, admin job endpoints, scheduler, snapshot jobs |
 | Arsenal | Baseball Savant/Statcast | Pending — CSV-based, lowest urgency |
-| Database | PostgreSQL | Planned, not started |
+| Database | PostgreSQL | Migrations + snapshot infrastructure are implemented; Railway/env wiring still matters |
 
 ---
 
@@ -260,6 +290,123 @@ The mock SLATE array is always present as a fallback scaffold. Live data overlay
 `activeSlate`: live schedule or mock SLATE, controlled by `IS_STATS_SANDBOX`.
 
 `getGameOdds(g)`: merges live Odds API data over mock odds using `"AwayTeamFullName|HomeTeamFullName"` key.
+
+---
+
+## Current State — May 2026
+
+The codebase is no longer "all logic in one file." The refactor is partially complete:
+
+- `prop-scout-v7.jsx` now holds app state, effects, event handlers, and render logic
+- Shared constants/utilities live in `src/constants.js` and `src/utils.js`
+- Board scoring lives in `src/scoring/`
+- Monte Carlo SIM confidence functions live in `src/scoring/sim.js`
+- Shared presentational primitives live in `src/components/shared.jsx`
+- Board compute/payload logic lives in `src/board/index.js`
+- Vitest coverage is in place for constants, utils, scoring, sim, board compute, and shared components
+
+This means a new session should not assume the old "single-file frontend" architecture anymore, even though `prop-scout-v7.jsx` is still the main top-level app file.
+
+---
+
+## Recent Codex Refactor Work (Tasks 127–132)
+
+These six refactor tasks were completed after the older handoff sections below were written:
+
+### Task 127 — Reusability Cleanup
+- Final `resultBorderStyle()` conversion completed in `renderEdgeCard`
+- Shared `summarizeOutcomes(items, outcomeFn)` helper added
+- `hitSummary` and `gameHitSummary` now delegate to that helper
+- Minor behavior fix: unresolved game-board tabs no longer show misleading `0/N` hit badges before any games resolve
+
+### Task 128 — Phase 1 Split + Vitest
+- Added Vitest, jsdom, Testing Library, and test scripts
+- Created `src/constants.js` and `src/utils.js`
+- Moved:
+  - `PARK_FACTORS`
+  - `NEUTRAL_PARK`
+  - `HOME_FIELD_ADV`
+  - `DEFAULT_HOME_ADV`
+  - `MODEL_TIER`
+  - `mlToImplied`
+  - `formatLocalTime`
+  - `resultBorderStyle`
+  - `summarizeOutcomes`
+- Added tests for constants/utils
+
+### Task 129 — Phase 2 Scoring Leaves
+- Created `src/scoring/batter.js` with `hrBoardScore`, `hitBoardScore`
+- Created `src/scoring/pitcher.js` with `kBoardScore`, `outsBoardScore`
+- Added focused scoring tests
+
+### Task 130 — Phase 3 Shared UI Primitives
+- Created `src/components/shared.jsx`
+- Moved:
+  - `LeanBadge`
+  - `TIER_BADGES`
+  - `TierBadge`
+  - `GameStatusBadge`
+  - `RankScoreColumn`
+  - `Card`
+  - `Divider`
+- Added shared component tests
+
+### Task 131 — Phase 4a Simulation Layer
+- Created `src/scoring/sim.js`
+- Moved:
+  - `sampleStdNormal`
+  - `sampleNormal`
+  - `sampleCorrelated`
+  - `simKConfidence`
+  - `simOutsConfidence`
+  - `simHRConfidence`
+  - `simHitsConfidence`
+  - `simF5MLConfidence`
+- Added stochastic/directional tests around SIM confidence outputs
+
+### Task 132 — Phase 4b Board Compute Layer
+- Created `src/board/index.js`
+- Moved:
+  - `computePitcherBoard`
+  - `computeBatterBoard`
+  - `computeGameBoard`
+  - `buildAiBoardPayload`
+- Promoted shared board dependencies:
+  - `UMPIRE_STATS` → `src/constants.js`
+  - `normalizeScratchName`, `vigStrip`, `propEdgeData` → `src/utils.js`
+- Added integration-style board tests
+
+**Verification status after Task 132:**
+- `npm run test` passes with **101 tests**
+- `npm run build` passes
+- `npm run dev` boots cleanly (backend proxy noise is expected if `localhost:3001` is not running)
+
+---
+
+## Board Card Snapshots (Task 118 / Task AC) — Current Status
+
+This work is implemented in the repo now.
+
+### Backend pieces present
+- Migration: `backend/migrations/005_board_card_snapshots.sql`
+- Route: `backend/routes/boardSnapshot.js`
+- Resolver job: `backend/jobs/resolveCardSnapshotsJob.js`
+- Scheduler wiring: `backend/jobs/scheduler.js`
+- Admin endpoint: `GET /api/admin/jobs/resolve-card-snapshots`
+- `ADMIN_SECRET` example env entry: `backend/.env.example`
+
+### Frontend wiring present
+- Board lock effect posts newly locked cards to `POST /api/board-snapshot`
+- This is fire-and-forget and does not block UI lock behavior
+
+### What the feature does
+- Persists locked Board cards (`hits`, `hr`, `k`, `outs`) at game-lock time
+- Stores full card payload + locked line + lean + score tier for backtesting
+- Nightly resolver job grades snapshots to `result_hit` / `actual_stat` after games go final
+
+### Important note
+- This snapshot system is for player-prop board cards only
+- It does **not** currently cover game-board markets (`nrfi`, `total`, `ml`, `spread`, `f5ml`, `f5spread`)
 
 ---
 

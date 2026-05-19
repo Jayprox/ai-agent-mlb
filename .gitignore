@@ -22,3 +22,6 @@ backend/data/notes.json
 # Lock files (generated, not needed in repo)
 package-lock.json
 backend/package-lock.json
+
+# Vite/Vitest internal timestamp cache files (machine-specific, never commit)
+*.timestamp-*.mjs
