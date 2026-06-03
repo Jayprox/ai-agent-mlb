@@ -2,6 +2,7 @@ const express = require("express");
 const router  = express.Router();
 const axios   = require("axios");
 const cache   = require("../services/cache");
+const db      = require("../services/db");
 
 const SEASON     = new Date().getFullYear();
 const SAVANT_TTL = 6 * 60 * 60 * 1000; // 6 hours
@@ -312,6 +313,25 @@ async function buildArsenalPayload(pitcherId, year = SEASON) {
 
   const cached = cache.get(cacheKey);
   if (cached) return { result: cached, cacheHit: true };
+
+  if (db.isConnected()) {
+    try {
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+      const snap = await db.query(
+        `SELECT arsenal FROM pitcher_savant_snapshots
+         WHERE player_id = $1 AND slate_date = $2 AND arsenal IS NOT NULL`,
+        [parseInt(pitcherId, 10), today]
+      );
+      if (snap?.rows?.[0]?.arsenal) {
+        const result = snap.rows[0].arsenal;
+        cache.set(cacheKey, result, SAVANT_TTL);
+        console.log(`  ✓ Arsenal DB hit  pitcherId=${pitcherId}`);
+        return { result, cacheHit: true };
+      }
+    } catch (err) {
+      console.warn(`  ⚠ Arsenal DB read failed  pitcherId=${pitcherId}: ${err.message}`);
+    }
+  }
 
   let arsenal = null;
   let pitcherStats = null;

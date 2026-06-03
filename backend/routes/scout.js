@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const OpenAI = require("openai");
+const Anthropic = require("@anthropic-ai/sdk");
 const mlb = require("../services/mlbApi");
 const requireAuth = require("../middleware/auth");
 const { query, isConnected } = require("../services/db");
@@ -52,12 +53,21 @@ const STADIUMS = {
 };
 
 let _client = null;
+let _anthropic = null;
 function getClient() {
   if (!_client) {
     if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set");
     _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   }
   return _client;
+}
+
+function getAnthropic() {
+  if (!_anthropic) {
+    if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY not set");
+    _anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return _anthropic;
 }
 
 function todayHonolulu() {
@@ -310,6 +320,66 @@ function safeJsonParse(text) {
   if (!trimmed) return {};
   return JSON.parse(trimmed.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, ""));
 }
+
+router.post("/build-slate", async (req, res) => {
+  const picks = Array.isArray(req.body?.picks) ? req.body.picks.slice(0, 25) : [];
+  if (!picks.length) return res.status(400).json({ error: "picks[] required" });
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.json(picks.map((pick) => ({
+      id: pick.id,
+      shortReason: null,
+      confidenceStatement: null,
+      keyRisk: null,
+    })));
+  }
+
+  try {
+    const client = getAnthropic();
+    const message = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 3000,
+      temperature: 0.25,
+      system:
+        "You are Scout, a sharp sports bettor who focuses on finding high-confidence straight bets. " +
+        "For each pick below, write: 1. shortReason (2–3 sentences): the primary reasons this bet has an edge. " +
+        "Use specific stats and matchup context from the factors provided. " +
+        "2. confidenceStatement (1 sentence): why the model and odds align here. " +
+        "3. keyRisk (1 sentence): the single most important risk to know before placing this bet. " +
+        "Be direct, specific, and data-driven. Avoid generic language. Reference actual numbers. " +
+        "Return strict JSON only: [{\"id\":\"...\",\"shortReason\":\"...\",\"confidenceStatement\":\"...\",\"keyRisk\":\"...\"}]",
+      messages: [{
+        role: "user",
+        content: `Picks:\n${JSON.stringify(picks, null, 2)}`,
+      }],
+    });
+
+    const text = message.content?.find((part) => part.type === "text")?.text ?? "[]";
+    const parsed = safeJsonParse(text);
+    const rows = Array.isArray(parsed) ? parsed : [];
+    const byId = new Map(rows.map((row) => [row?.id, {
+      id: row?.id,
+      shortReason: row?.shortReason ?? null,
+      confidenceStatement: row?.confidenceStatement ?? null,
+      keyRisk: row?.keyRisk ?? null,
+    }]));
+
+    return res.json(picks.map((pick) => byId.get(pick.id) ?? ({
+      id: pick.id,
+      shortReason: null,
+      confidenceStatement: null,
+      keyRisk: null,
+    })));
+  } catch (err) {
+    console.warn(`  ⚠ scout build-slate failed: ${err.message}`);
+    return res.json(picks.map((pick) => ({
+      id: pick.id,
+      shortReason: null,
+      confidenceStatement: null,
+      keyRisk: null,
+    })));
+  }
+});
 
 async function ensureScoutTables() {
   if (!isConnected()) return;

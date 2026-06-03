@@ -213,3 +213,34 @@ router.get("/", async (req, res) => {
 });
 
 module.exports = router;
+
+// Exported for slate-bundle aggregation.
+// Returns the "Away|Home"-keyed odds map, fetching from Odds API if cache is cold.
+// Non-fatal: returns null if ODDS_API_KEY is missing or the fetch fails.
+module.exports.getOddsMap = async function getOddsMap() {
+  const cacheKey = "odds:mlb:today";
+  const hit = cache.get(cacheKey);
+  if (hit) return hit.map ?? null;
+
+  const apiKey = process.env.ODDS_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const response = await axios.get(
+      "https://api.the-odds-api.com/v4/sports/baseball_mlb/odds",
+      {
+        params: { apiKey, regions: "us", markets: FALLBACK_MARKETS, oddsFormat: "american", dateFormat: "iso" },
+        timeout: 12000,
+      }
+    );
+    const result = buildOddsPayload(response.data, {
+      remaining: response.headers["x-requests-remaining"] ?? null,
+      used:      response.headers["x-requests-used"]      ?? null,
+      fetchedAt: new Date().toISOString(),
+    });
+    cache.set(cacheKey, result, TTL_MS);
+    return result.map ?? null;
+  } catch {
+    return null;
+  }
+};

@@ -4,6 +4,13 @@ const Anthropic = require("@anthropic-ai/sdk");
 const OpenAI = require("openai");
 const cache = require("../services/cache");
 const db = require("../services/db");
+const {
+  dbCardKey,
+  legacyDbCardKey,
+  normalizeLean,
+  normalizeMarket,
+  todayHonolulu,
+} = require("../lib/cardSummaryKeys");
 
 const router = express.Router();
 
@@ -67,16 +74,12 @@ function fallbackSummary(card) {
   return caution || `${card?.market ?? "Matchup"} leans ${card?.lean ?? "neutral"} from the current factor mix.`;
 }
 
-// Stable key for DB persistence: player + market + lean, date-scoped
-function dbCardKey(card) {
-  const name   = String(card.name   ?? "").toLowerCase().replace(/\s+/g, "_");
-  const market = String(card.market ?? "").toLowerCase();
-  const lean   = String(card.lean   ?? "").toLowerCase();
-  return `${name}:${market}:${lean}`;
-}
-
-function todayDate() {
-  return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+function cardForKey(card) {
+  return {
+    ...card,
+    market: normalizeMarket(card?.market),
+    lean: normalizeLean(card?.lean),
+  };
 }
 
 // DB persistence: ensure migration table exists
@@ -108,17 +111,32 @@ async function getTableReady() {
   }
 }
 
-async function dbGetSummaries(cardKeys, isPremium, slateDate) {
-  if (!db.isConnected() || !cardKeys.length) return {};
+async function dbGetSummaries(cards, isPremium, slateDate) {
+  if (!db.isConnected() || !cards.length) return {};
+  const keyByCard = new Map();
+  const allKeys = [];
+  for (const card of cards) {
+    const canon = dbCardKey(cardForKey(card));
+    const legacy = legacyDbCardKey(card);
+    keyByCard.set(card.id, { canon, legacy });
+    allKeys.push(canon, legacy);
+  }
+  const uniqueKeys = [...new Set(allKeys.filter(Boolean))];
+  if (!uniqueKeys.length) return {};
   try {
     await getTableReady();
     const res = await db.query(
       `SELECT card_key, summary FROM card_summaries
        WHERE slate_date = $1 AND is_premium = $2 AND card_key = ANY($3)`,
-      [slateDate, isPremium, cardKeys]
+      [slateDate, isPremium, uniqueKeys]
     );
+    const byKey = {};
+    for (const row of (res?.rows ?? [])) byKey[row.card_key] = row.summary;
     const out = {};
-    for (const row of (res?.rows ?? [])) out[row.card_key] = row.summary;
+    for (const card of cards) {
+      const { canon, legacy } = keyByCard.get(card.id) ?? {};
+      out[canon] = byKey[canon] ?? byKey[legacy] ?? null;
+    }
     return out;
   } catch (e) {
     console.warn("  ⚠ card_summaries DB read failed:", e.message);
@@ -244,12 +262,15 @@ function maxOutputTokensForBatch(cardCount, premium) {
   return Math.min(4096, Math.max(256, 100 + Math.max(1, cardCount) * perCard));
 }
 
-/** Returns true if err is an Anthropic 429 rate-limit error */
+/** Returns true if err is an Anthropic 429 rate-limit or 529 overloaded error */
 function isRateLimit(err) {
   return (
     err?.status === 429 ||
+    err?.status === 529 ||
     err?.error?.type === "rate_limit_error" ||
+    err?.error?.type === "overloaded_error" ||
     String(err?.message ?? "").includes("rate_limit_error") ||
+    String(err?.message ?? "").includes("overloaded_error") ||
     String(err?.message ?? "").includes("rate limit")
   );
 }
@@ -305,7 +326,7 @@ async function generateSummaries(cards, premium = false) {
       return await generateWithAnthropic(cards);
     } catch (err) {
       if (isRateLimit(err)) {
-        console.warn(`  ⚠ card-summary: Anthropic 429 — falling back to OpenAI`);
+        console.warn(`  ⚠ card-summary: Anthropic ${err?.status ?? "overloaded"} — falling back to OpenAI`);
         // fall through to OpenAI below
       } else {
         throw err;
@@ -324,7 +345,7 @@ router.post("/", async (req, res) => {
   const isPremium  = req.body?.premium === true;
   if (!inputCards.length) return res.status(400).json({ error: "cards[] required" });
 
-  const slateDate = todayDate();
+  const slateDate = todayHonolulu();
   const summaries = {};
 
   // ── Step 1: Score gate — below threshold gets deterministic fallback immediately ──
@@ -345,7 +366,7 @@ router.post("/", async (req, res) => {
   const uncachedMemory = [];
   aiEligible.forEach((card) => {
     const payload = {
-      market: card.market ?? "", lean: card.lean ?? "", score: card.score ?? null,
+      market: normalizeMarket(card.market), lean: normalizeLean(card.lean), score: card.score ?? null,
       scoreTier: card.scoreTier ?? "mid",
       positives: Array.isArray(card.positives) ? card.positives.slice(0, 3) : [],
       negatives: Array.isArray(card.negatives) ? card.negatives.slice(0, 2) : [],
@@ -360,15 +381,14 @@ router.post("/", async (req, res) => {
     if (cached) {
       summaries[card.id] = cached;
     } else {
-      uncachedMemory.push({ ...card, _cacheKey: cacheKey, _cardKey: dbCardKey(card) });
+      uncachedMemory.push({ ...card, _cacheKey: cacheKey, _cardKey: dbCardKey(cardForKey(card)) });
     }
   });
 
   if (!uncachedMemory.length) return res.json({ summaries });
 
   // ── Step 3: DB cache check ──
-  const cardKeys   = uncachedMemory.map((c) => c._cardKey);
-  const dbHits     = await dbGetSummaries(cardKeys, isPremium, slateDate);
+  const dbHits     = await dbGetSummaries(uncachedMemory, isPremium, slateDate);
   const uncachedDb = [];
 
   uncachedMemory.forEach((card) => {

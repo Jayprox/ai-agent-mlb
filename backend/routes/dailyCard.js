@@ -398,4 +398,38 @@ router.get("/", async (req, res) => {
   }
 });
 
-module.exports = { router, regenerateDailyCard, generateDailyCard, readDailyCardSnapshot };
+/**
+ * Job-safe Daily Card generation (midnight / admin). Skips if today's card already exists
+ * or the daily OpenAI cap is exhausted.
+ */
+async function tryGenerateDailyCardForJob() {
+  const today = todayHonolulu();
+  const existing = await readDailyCardSnapshot(today);
+  if (existing?.card && String(existing.card).trim() && existing.status === "ready") {
+    console.log(`  · dailyCard: already ready for ${today}, skipping`);
+    return { ok: true, skipped: true, reason: "already_ready", date: today };
+  }
+  if (!process.env.OPENAI_API_KEY) {
+    console.warn("  ⚠ dailyCard: OPENAI_API_KEY not set, skipping");
+    return { ok: false, skipped: true, reason: "OPENAI_API_KEY not set", date: today };
+  }
+  const cap = capStatus();
+  if (cap.remaining <= 0) {
+    console.warn(`  ⚠ dailyCard: daily cap reached (${cap.calls}/${DAILY_CAP}), skipping`);
+    return { ok: false, skipped: true, reason: "daily_cap_reached", date: today, cap };
+  }
+  try {
+    const result = await generateDailyCard();
+    return { ok: true, skipped: false, date: today, gamesAnalyzed: result.gamesAnalyzed };
+  } catch (err) {
+    return { ok: false, skipped: false, date: today, error: err.message };
+  }
+}
+
+module.exports = {
+  router,
+  regenerateDailyCard,
+  generateDailyCard,
+  readDailyCardSnapshot,
+  tryGenerateDailyCardForJob,
+};

@@ -257,10 +257,33 @@ async function buildGameBullpen(gamePk) {
   const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  // Reuse the same gameMeta cache key as nrfi.js — if NRFI already fetched it, this is free
   const GAME_META_TTL_MS = 4 * 60 * 60 * 1000;
   const metaCacheKey = `gameMeta:${gamePk}`;
+  const numericPk = parseInt(gamePk, 10);
+
   let gameMeta = cache.get(metaCacheKey);
+
+  if (!gameMeta && isConnected()) {
+    try {
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+      const snap = await query(
+        "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+        [today]
+      );
+      const games = snap?.rows?.[0]?.games ?? [];
+      const game = games.find(g => g.gamePk === numericPk || g.id === numericPk);
+      if (game?.away?.id && game?.home?.id) {
+        gameMeta = {
+          gameDate: (game.gameTime ?? game.time ?? today).slice(0, 10),
+          away: { id: game.away.id, name: game.away.name ?? "" },
+          home: { id: game.home.id, name: game.home.name ?? "" },
+        };
+        cache.set(metaCacheKey, gameMeta, GAME_META_TTL_MS);
+      }
+    } catch (err) {
+      console.warn(`  ⚠ bullpen buildGameBullpen DB read failed for ${gamePk}: ${err.message}`);
+    }
+  }
 
   if (!gameMeta) {
     const { data } = await mlb.get("/schedule", {

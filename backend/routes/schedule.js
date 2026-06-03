@@ -126,6 +126,7 @@ async function buildSchedulePayload(date) {
 // Returns today's MLB slate with probable pitchers.
 // Falls back to today's date if no `date` param supplied.
 router.get("/", async (req, res) => {
+  try {
   // Use Hawaii Time — matches the user's local day so "today's games" aligns
   // with what they see on their clock. Hawaii (UTC−10) is the furthest west,
   // so it never rolls into a new calendar day mid-slate.
@@ -155,18 +156,18 @@ router.get("/", async (req, res) => {
     }
   }
 
-  try {
-    const transformed = await buildSchedulePayload(date);
+  const transformed = await buildSchedulePayload(date);
 
-    // Shorter cache when games are live so statuses stay fresh for board locking
-    const hasLive     = transformed.some(g => g.status === "In Progress" || g.status === "Warmup");
-    const hasPitchers = transformed.some(g => g.probablePitchers?.home || g.probablePitchers?.away);
-    const ttl = hasLive ? SCHEDULE_TTL_LIVE : hasPitchers ? SCHEDULE_TTL : SCHEDULE_TTL_NOPITCHERS;
-    cache.set(cacheKey, transformed, ttl);
-    res.setHeader("X-Cache", "MISS");
-    res.json(transformed);
+  // Shorter cache when games are live so statuses stay fresh for board locking
+  const hasLive     = transformed.some(g => g.status === "In Progress" || g.status === "Warmup");
+  const hasPitchers = transformed.some(g => g.probablePitchers?.home || g.probablePitchers?.away);
+  const ttl = hasLive ? SCHEDULE_TTL_LIVE : hasPitchers ? SCHEDULE_TTL : SCHEDULE_TTL_NOPITCHERS;
+  cache.set(cacheKey, transformed, ttl);
+  res.setHeader("X-Cache", "MISS");
+  return res.json(transformed);
   } catch (err) {
-    res.status(502).json({ error: "MLB API unavailable", detail: err.message });
+    console.warn(`Schedule fetch failed: ${err.message}`);
+    return res.status(502).json({ error: "Schedule unavailable", detail: err.message });
   }
 });
 

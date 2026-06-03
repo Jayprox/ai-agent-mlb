@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mlToImplied, resultBorderStyle, summarizeOutcomes } from "./utils.js";
+import { mlToImplied, resultBorderStyle, summarizeOutcomes, kellyFraction } from "./utils.js";
 
 describe("mlToImplied", () => {
   it("converts negative American odds to implied probability", () => {
@@ -53,5 +53,19 @@ describe("summarizeOutcomes", () => {
     const result = summarizeOutcomes(items, v => v === 2 ? true : null);
     expect(result.hits).toBe(1);
     expect(result.total).toBe(3);
+  });
+});
+
+describe("kellyFraction", () => {
+  it("returns positive fraction for +EV bet", () => {
+    expect(kellyFraction(0.65, -110)).toBeGreaterThan(0);
+  });
+
+  it("returns 0 for -EV bet", () => {
+    expect(kellyFraction(0.45, -110)).toBe(0);
+  });
+
+  it("clamps to 0.30 maximum", () => {
+    expect(kellyFraction(0.99, +500)).toBe(0.30);
   });
 });

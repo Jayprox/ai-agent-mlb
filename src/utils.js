@@ -51,3 +51,12 @@ export function propEdgeData(propLine, lean) {
   }
   return { bookOdds: null, impliedProb: null };
 }
+
+export function kellyFraction(modelProb, americanOdds) {
+  const n = parseInt(americanOdds, 10);
+  if (isNaN(n) || modelProb <= 0) return 0;
+  const b = n > 0 ? n / 100 : 100 / Math.abs(n);
+  const q = 1 - modelProb;
+  const f = (modelProb * b - q) / b;
+  return Math.min(0.30, Math.max(0, f));
+}

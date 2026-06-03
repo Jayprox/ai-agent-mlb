@@ -1,4 +1,7 @@
 const { Pool } = require("pg");
+const { bootstrapDatabaseEnv, pgSslOption } = require("../lib/bootstrapEnv");
+
+bootstrapDatabaseEnv();
 
 let pool = null;
 
@@ -8,7 +11,7 @@ if (process.env.DATABASE_URL) {
     connectionTimeoutMillis: 2500,
     query_timeout: 2500,
     statement_timeout: 5000,
-    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+    ssl: pgSslOption(process.env.DATABASE_URL),
   });
   pool.on("error", (err) => console.error("DB pool error:", err.message));
   console.log("  ✓ PostgreSQL connected");

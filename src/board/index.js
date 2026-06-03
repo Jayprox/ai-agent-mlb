@@ -120,9 +120,10 @@ export const computePitcherBoard = (type, liveSlate, livePitcherStats, liveGameL
             ?? propLine?.books?.FD?.line
             ?? propLine?.books?.CZR?.line
             ?? suggestedLine;
+          const seed = `${type}:${p.id}:${game.gamePk}:${line}`;
           return type === "k"
-            ? simKConfidence({ avgK3, k9: merged.kPer9 ?? merged.k9 ?? 0, avgIP: gamelog?.avgIP ?? "—", parkFactor: pf.k, umpireRating: umpire?.rating ?? null }, line)
-            : simOutsConfidence({ avgIP: gamelog?.avgIP ?? "—" }, line);
+            ? simKConfidence({ avgK3, k9: merged.kPer9 ?? merged.k9 ?? 0, avgIP: gamelog?.avgIP ?? "—", parkFactor: pf.k, umpireRating: umpire?.rating ?? null }, line, 500, seed)
+            : simOutsConfidence({ avgIP: gamelog?.avgIP ?? "—" }, line, 500, seed);
         })(),
         signals,
         swStrPct: merged.swStrPct ?? null,
@@ -202,9 +203,10 @@ export const computeBatterBoard = (type, liveSlate, liveLineups, liveWeather, li
               ?? propLine?.books?.FD?.line
               ?? propLine?.books?.CZR?.line
               ?? (type === "hr" ? 0.5 : 1.5);
+            const seed = `${type}:${b.id}:${game.gamePk}:${line}`;
             return type === "hr"
-              ? simHRConfidence({ hr: hlog?.hr ?? 0, slg: hlog?.slg ?? "0", parkFactor: pf.hr, windFav: wxFav, matchup: { batterVsHand: sd ? (pitcherHand === "L" ? sd.vsL : sd.vsR) : null }, order: b.order }, line)
-              : simHitsConfidence({ avg: hlog?.avg ?? "0", parkFactor: pf.hit, matchup: { batterVsHand: sd ? (pitcherHand === "L" ? sd.vsL : sd.vsR) : null }, order: b.order }, line);
+              ? simHRConfidence({ hr: hlog?.hr ?? 0, slg: hlog?.slg ?? "0", parkFactor: pf.hr, windFav: wxFav, matchup: { batterVsHand: sd ? (pitcherHand === "L" ? sd.vsL : sd.vsR) : null }, order: b.order }, line, 500, seed)
+              : simHitsConfidence({ avg: hlog?.avg ?? "0", parkFactor: pf.hit, matchup: { batterVsHand: sd ? (pitcherHand === "L" ? sd.vsL : sd.vsR) : null }, order: b.order }, line, 500, seed);
           })(),
           matchup: {
             batterHand: b.hand ?? null,
@@ -303,7 +305,7 @@ export function buildAiBoardPayload(
   };
 
   const mapGameCandidate = (g, market) => {
-    const simConf = simF5MLConfidence(g.homeEra, g.awayEra, g.parkFactor, g.umpireRating, g.lean);
+    const simConf = simF5MLConfidence(g.homeEra, g.awayEra, g.parkFactor, g.umpireRating, g.lean, 500, `f5ml:${g.gamePk}:${g.lean}`);
 
     const f5Key = `${g.away.name}|${g.home.name}`;
     const f5Odds = liveOddsMap?.[f5Key];

@@ -2,6 +2,7 @@ const express = require("express");
 const router  = require("express").Router();
 const axios   = require("axios");
 const cache   = require("../services/cache");
+const db      = require("../services/db");
 
 const SEASON   = new Date().getFullYear();
 const TTL           = 6 * 60 * 60 * 1000; // 6 hours
@@ -99,6 +100,26 @@ router.get("/:pitcherId", async (req, res) => {
     return res.json(cached);
   }
 
+  if (db.isConnected()) {
+    try {
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+      const snap = await db.query(
+        `SELECT splits FROM pitcher_savant_snapshots
+         WHERE player_id = $1 AND slate_date = $2 AND splits IS NOT NULL`,
+        [parseInt(pitcherId, 10), today]
+      );
+      if (snap?.rows?.[0]?.splits) {
+        const result = snap.rows[0].splits;
+        cache.set(cacheKey, result, TTL);
+        res.setHeader("X-Cache", "HIT");
+        console.log(`  ✓ Pitcher splits DB hit  pitcherId=${pitcherId}`);
+        return res.json(result);
+      }
+    } catch (err) {
+      console.warn(`  ⚠ Pitcher splits DB read failed  pitcherId=${pitcherId}: ${err.message}`);
+    }
+  }
+
   const yearsToTry = [year, year - 1];
 
   for (const candidateYear of yearsToTry) {
@@ -126,3 +147,20 @@ router.get("/:pitcherId", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.buildPitcherSplitsForJob = async (pitcherId, year = SEASON) => {
+  const yearsToTry = [year, year - 1];
+  for (const candidateYear of yearsToTry) {
+    try {
+      const [vsL, vsR] = await Promise.all([
+        fetchPitcherVsHand(pitcherId, "L", candidateYear).catch(() => null),
+        fetchPitcherVsHand(pitcherId, "R", candidateYear).catch(() => null),
+      ]);
+      if (vsL || vsR) {
+        return { pitcherId: parseInt(pitcherId), season: candidateYear, vsL, vsR };
+      }
+    } catch {
+      // try next year
+    }
+  }
+  return null;
+};

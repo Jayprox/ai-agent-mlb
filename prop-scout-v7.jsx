@@ -15,6 +15,7 @@ import {
   normalizeScratchName,
   vigStrip,
   propEdgeData,
+  kellyFraction,
 } from "./src/utils.js";
 import { hrBoardScore, hitBoardScore } from "./src/scoring/batter.js";
 import { LeanBadge, TierBadge, GameStatusBadge, RankScoreColumn, Card, Divider } from "./src/components/shared.jsx";
@@ -30,6 +31,7 @@ import GameBoardCard from "./src/components/GameBoardCard.jsx";
 import EdgeCard from "./src/components/EdgeCard.jsx";
 import BoardGameGroup from "./src/components/BoardGameGroup.jsx";
 import TabHitBadge from "./src/components/TabHitBadge.jsx";
+import ScoutPickCard from "./src/components/ScoutPickCard.jsx";
 
 // ─────────────────────────────────────────────
 // STADIUM DATA — coordinates + orientation
@@ -411,6 +413,42 @@ const topCautionSummaryLine = (factors = []) => {
   return cautionFactor ? String(cautionFactor.detail ?? cautionFactor.label ?? "").trim() : null;
 };
 
+/** Normalize GET /api/ai-board/edges rows for AI Board + Predict display. */
+function normalizeAiBoardEdge(raw) {
+  const inner = raw?._candidate && typeof raw._candidate === "object" ? raw._candidate : {};
+  const merged = { ...inner, ...raw };
+  return {
+    ...merged,
+    id: raw.id,
+    entityId: raw.entityId ?? inner.id ?? raw.id,
+    market: raw.market,
+    name: merged.name ?? raw.playerName ?? null,
+    playerName: raw.playerName ?? merged.name ?? null,
+    team: merged.team ?? raw.team,
+    gameLabel: merged.gameLabel ?? raw.gameLabel,
+    gamePk: merged.gamePk ?? raw.gamePk ?? null,
+    gameTime: merged.gameTime ?? raw.gameTime ?? null,
+    score: merged.score ?? raw.score,
+    simConfidence: merged.simConfidence ?? raw.simConfidence,
+    bookLine: raw.bookLine ?? merged.bookLine ?? null,
+    lean: raw.lean ?? merged.lean ?? (merged.score >= 55 ? "OVER" : "UNDER"),
+    bookOdds: raw.bookOdds ?? merged.bookOdds,
+    edge: raw.edge ?? null,
+    aiScore: raw.aiScore,
+    aiReason: raw.aiReason ?? null,
+    propLine: merged.propLine ?? raw.propLine,
+    suggestedLine: merged.suggestedLine ?? raw.suggestedLine,
+    signals: merged.signals ?? raw.signals ?? [],
+    stats: raw.stats ?? {},
+    leanLabel: merged.leanLabel ?? raw.leanLabel,
+    odds: merged.odds ?? raw.odds,
+    homeSP: merged.homeSP,
+    awaySP: merged.awaySP,
+    home: merged.home,
+    away: merged.away,
+  };
+}
+
 const fallbackCardSummary = ({ positives = [], caution = null, lean = "", market = "" }) => {
   const top = positives.filter(Boolean).slice(0, 2);
   if (top.length >= 2) return caution ? `${top[0]}; ${top[1]}. ${caution}.` : `${top[0]}; ${top[1]}.`;
@@ -437,6 +475,195 @@ function buildPerfMatrix(rows) {
     cell.misses += Number(row.misses) || 0;
   }
   return matrix;
+}
+
+function buildScoutCandidates({
+  liveSlate, liveLineups, liveWeather, livePlayerProps,
+  livePitcherStats, liveGameLog, liveUmpires, liveTeamStats,
+  liveHittingLog, liveStatSplits, pitcherArsenal,
+  liveNrfiData, liveOddsMap,
+}) {
+  const candidates = [];
+
+  const kCards = computePitcherBoard("k", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal);
+  const outCards = computePitcherBoard("outs", liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal);
+  const totalGames = computeGameBoard("total", liveSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires, liveLineups);
+  const spreadGames = computeGameBoard("spread", liveSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires, liveLineups);
+  const mlGames = computeGameBoard("ml", liveSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires, liveLineups);
+  const f5mlGames = computeGameBoard("f5ml", liveSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires, liveLineups);
+  const f5spreadGames = computeGameBoard("f5spread", liveSlate, liveNrfiData, liveWeather, liveOddsMap, livePitcherStats, liveUmpires, liveLineups);
+
+  const mapPropFactors = (c, market) => {
+    const facts = [];
+    if (c.avgK3 != null)    facts.push(`Avg ${market === "k" ? "Ks" : "IP×3"} last 3 starts: ${c.avgK3}`);
+    const k9 = parseFloat(c.k9);
+    if (!isNaN(k9) && k9 > 0) facts.push(`K/9: ${k9.toFixed(1)}`);
+    const era = parseFloat(c.era);
+    if (!isNaN(era))        facts.push(`ERA: ${era.toFixed(2)}`);
+    const whip = parseFloat(c.whip);
+    if (!isNaN(whip))       facts.push(`WHIP: ${whip.toFixed(2)}`);
+    if (c.avgIP && c.avgIP !== "—") facts.push(`Avg IP: ${c.avgIP}`);
+    if (c.umpire)           facts.push(`Umpire: ${c.umpire}${c.umpireRating != null ? ` (K rate: ${c.umpireRating})` : ""}`);
+    if (c.swStrPct != null) facts.push(`Whiff rate: ${(c.swStrPct * 100).toFixed(1)}%`);
+    if (c.chasePct != null) facts.push(`Chase rate: ${(c.chasePct * 100).toFixed(1)}%`);
+    // append any model signals (e.g. opp K%)
+    (c.signals ?? []).forEach(s => facts.push(s));
+    return facts.slice(0, 6);
+  };
+
+  for (const c of kCards) {
+    const lean = c.score >= 55 ? "OVER" : "UNDER";
+    const { bookOdds, impliedProb } = propEdgeData(c.propLine ?? null, lean);
+    if (!bookOdds || impliedProb == null) continue;
+    if (c.score < 62 || (c.simConfidence ?? 0) < 55) continue;
+    const modelProb = (c.simConfidence ?? 50) / 100;
+    if (modelProb <= impliedProb) continue;
+    const kelly = kellyFraction(modelProb, bookOdds);
+    if (kelly <= 0) continue;
+    candidates.push({
+      id: `${c.id}-k`,
+      entityId: c.id,
+      gamePk: c.gamePk,
+      market: "k",
+      playerName: c.name,
+      gameLabel: c.gameLabel,
+      lean,
+      bookLine: c.bookLine ?? c.propLine?.line ?? c.suggestedLine ?? null,
+      bookOdds,
+      score: c.score,
+      simConfidence: c.simConfidence,
+      impliedProb,
+      modelProb,
+      kellyFraction: kelly,
+      factors: mapPropFactors(c, "k"),
+      risks: [],
+    });
+  }
+
+  for (const c of outCards) {
+    const lean = c.score >= 55 ? "OVER" : "UNDER";
+    const { bookOdds, impliedProb } = propEdgeData(c.propLine ?? null, lean);
+    if (!bookOdds || impliedProb == null) continue;
+    if (c.score < 62 || (c.simConfidence ?? 0) < 55) continue;
+    const modelProb = (c.simConfidence ?? 50) / 100;
+    if (modelProb <= impliedProb) continue;
+    const kelly = kellyFraction(modelProb, bookOdds);
+    if (kelly <= 0) continue;
+    candidates.push({
+      id: `${c.id}-outs`,
+      entityId: c.id,
+      gamePk: c.gamePk,
+      market: "outs",
+      playerName: c.name,
+      gameLabel: c.gameLabel,
+      lean,
+      bookLine: c.bookLine ?? c.propLine?.line ?? c.suggestedLine ?? null,
+      bookOdds,
+      score: c.score,
+      simConfidence: c.simConfidence,
+      impliedProb,
+      modelProb,
+      kellyFraction: kelly,
+      factors: mapPropFactors(c, "outs"),
+      risks: [],
+    });
+  }
+
+  const gameDisplayScore = (g) => g.score ?? 0;
+  const gameLists = [
+    [totalGames, "total"],
+    [spreadGames, "spread"],
+    [mlGames, "ml"],
+    [f5mlGames, "f5ml"],
+    [f5spreadGames, "f5spread"],
+  ];
+
+  for (const [gameList, market] of gameLists) {
+    for (const g of gameList) {
+      const dispScore = gameDisplayScore(g);
+      if (dispScore < 55) continue;
+      const oddsField = market === "total"
+        ? (g.lean === "OVER" ? g.odds?.overOdds : g.odds?.underOdds)
+        : market === "spread"
+        ? (g.lean === "HOME" ? g.odds?.homeSpreadOdds : g.odds?.awaySpreadOdds)
+        : market === "ml"
+        ? (g.lean === "HOME" ? g.odds?.homeML : g.odds?.awayML)
+        : market === "f5ml"
+        ? (g.lean === "HOME" ? (g.odds?.f5HomeML ?? g.odds?.homeML) : (g.odds?.f5AwayML ?? g.odds?.awayML))
+        : (g.lean === "HOME"
+          ? (g.odds?.f5HomeSpreadOdds ?? g.odds?.homeSpreadOdds)
+          : (g.odds?.f5AwaySpreadOdds ?? g.odds?.awaySpreadOdds));
+      const bookOdds = oddsField != null ? parseInt(oddsField, 10) : null;
+      const impliedProb = bookOdds != null ? mlToImplied(bookOdds) : null;
+      if (!bookOdds || impliedProb == null) continue;
+      const modelProb = Math.min(0.90, Math.max(0.50, dispScore / 100));
+      if (modelProb <= impliedProb) continue;
+      const kelly = kellyFraction(modelProb, bookOdds);
+      if (kelly <= 0) continue;
+      candidates.push({
+        id: `${g.gamePk}-${market}`,
+        entityId: g.gamePk,
+        gamePk: g.gamePk,
+        market,
+        playerName: null,
+        gameLabel: g.gameLabel ?? `${g.away?.abbr ?? "?"} @ ${g.home?.abbr ?? "?"}`,
+        lean: g.lean,
+        leanLabel: g.leanLabel ?? g.lean,
+        bookLine: g.bookLine ?? g.line ?? null,
+        bookOdds,
+        score: dispScore,
+        simConfidence: null,
+        impliedProb,
+        modelProb,
+        kellyFraction: kelly,
+        factors: (g.factors ?? []).map((s) => s.detail ?? s.label).filter(Boolean).slice(0, 4),
+        risks: [],
+      });
+    }
+  }
+
+  return candidates.sort((a, b) => b.kellyFraction - a.kellyFraction);
+}
+
+function scoutMath(picks, unitSize, dailyGoal) {
+  if (!picks.length) {
+    return {
+      picksCount: 0,
+      totalRisked: 0,
+      hitsAt625: 0,
+      net625: 0,
+      breakEvenHits: 0,
+      breakEvenPct: 0,
+      dailyGoal,
+    };
+  }
+  const payouts = picks.map((p) => {
+    const odds = p.bookOdds ?? -110;
+    const winAmt = odds > 0 ? (unitSize * odds / 100) : (unitSize * 100 / Math.abs(odds));
+    return { win: winAmt, lose: unitSize };
+  });
+  const totalRisked = unitSize * picks.length;
+  const avgWin = payouts.reduce((s, p) => s + p.win, 0) / picks.length;
+  const hitsAt625 = Math.round(picks.length * 0.625);
+  const net625 = payouts.slice(0, hitsAt625).reduce((s, p) => s + p.win, 0)
+    - payouts.slice(hitsAt625).reduce((s, p) => s + p.lose, 0);
+  const breakEvenHits = totalRisked / (avgWin + unitSize);
+  return {
+    picksCount: picks.length,
+    totalRisked,
+    hitsAt625,
+    net625: Math.round(net625 * 100) / 100,
+    breakEvenHits: Math.round(breakEvenHits * 10) / 10,
+    breakEvenPct: picks.length ? Math.round((breakEvenHits / picks.length) * 100) : 0,
+    dailyGoal,
+  };
+}
+
+function picksNeeded(dailyGoal, unitSize, avgOdds = -110) {
+  const b = avgOdds > 0 ? avgOdds / 100 : 100 / Math.abs(avgOdds);
+  const evPerUnit = 0.625 * b - 0.375;
+  if (evPerUnit <= 0) return 10;
+  return Math.ceil(dailyGoal / (unitSize * evPerUnit));
 }
 
 
@@ -484,17 +711,8 @@ const buildBoardSummaryRequest = (c, type) => {
 
   return {
     id: `board:${type}:${c?.id ?? c?.gamePk}:${score ?? "na"}`,
-    market:
-      type === "hr" ? "HR Board"
-      : type === "hits" ? "Hits Board"
-      : type === "k" ? "K Board"
-      : type === "outs" ? "Outs Board"
-      : type === "nrfi" ? "NRFI"
-      : type === "total" ? "Totals"
-      : type === "spread" ? "Run Line"
-      : type === "ml" ? "Moneyline"
-      : type === "f5ml" ? "F5 Moneyline"
-      : "F5 Run Line",
+    // Canonical market slug — must match backend card_summaries card_key (Phase A)
+    market: type,
     lean:      c?.leanAbbr ?? c?.lean ?? "",
     positives,
     negatives,
@@ -1623,7 +1841,11 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
         </div>
       </div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <LeanBadge label={game.weather.roof ? "DOME" : `${game.weather.temp}°`} positive={game.weather.hrFavorable} small />
+        {(() => {
+          const wx = game.weather ?? {};
+          const wxLabel = wx.roof ? "DOME" : wx.temp != null && wx.temp !== "" ? `${wx.temp}°` : null;
+          return wxLabel ? <LeanBadge label={wxLabel} positive={!!wx.hrFavorable} small /> : null;
+        })()}
         {game.nrfi?.lean === "NRFI" && (game.nrfi?.confidence ?? 0) >= 62 && <LeanBadge label="NRFI" positive={true} small />}
         {lineMove === "over"  && <LeanBadge label="↑ OVER"  positive={true}  small />}
         {lineMove === "under" && <LeanBadge label="↓ UNDER" positive={false} small />}
@@ -1632,7 +1854,7 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
             ⚠ SP IL
           </span>
         )}
-        {topProp && (() => {
+        {topProp?.lean && (() => {
           const lastName = bestBet
             ? bestBet.label.split(" ")[0]
             : game.pitcher.name?.split(" ").slice(-1)[0] ?? "";
@@ -2423,6 +2645,22 @@ export default function App() {
     } catch { return null; }
   });
   const [aiBoardLoading, setAiBoardLoading] = useState(false);
+  const [aiBoardEdgesMeta, setAiBoardEdgesMeta] = useState({ fallback: false, generatedAt: null });
+  const [boardDailySnapshot, setBoardDailySnapshot] = useState(null);
+  const [boardSnapshotLoading, setBoardSnapshotLoading] = useState(false);
+
+  const boardSnapshotCoversToday = useCallback(() => {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    return !!(boardDailySnapshot?.date === today && boardDailySnapshot?.empty !== true);
+  }, [boardDailySnapshot]);
+
+  /** Snapshot rows for a market (may be []). Null only when no shared snapshot for today. */
+  const getBoardMarketSnapshot = useCallback((market) => {
+    if (!boardSnapshotCoversToday()) return null;
+    const snapshotCards = boardDailySnapshot[market];
+    return Array.isArray(snapshotCards) ? snapshotCards : [];
+  }, [boardDailySnapshot, boardSnapshotCoversToday]);
+
   const [aiBoardTab, setAiBoardTab] = useState("all");
   const [showLabTrackRecord, setShowLabTrackRecord] = useState(true);
   const [tab, setTab] = useState("overview");
@@ -2448,6 +2686,7 @@ export default function App() {
   const [arsenalSide, setArsenalSide] = useState("home");  // "home" | "away"
   // Live Stats API state
   const [liveSlate, setLiveSlate] = useState(null);
+  const [scheduleError, setScheduleError] = useState(null);
   const [slateLoading, setSlateLoading] = useState(false);
   const [researchMode, setResearchMode]   = useState(false);
   const [logoClicks,   setLogoClicks]     = useState(0);
@@ -2456,6 +2695,11 @@ export default function App() {
   const [historicalSnapshotLoading, setHistoricalSnapshotLoading] = useState(false);
   const [perfStats,    setPerfStats]      = useState(null);
   const [perfDays,     setPerfDays]       = useState(30);
+  const [scoutGoal, setScoutGoal] = useState(50);
+  const [scoutUnit, setScoutUnit] = useState(25);
+  const [scoutSlate, setScoutSlate] = useState(null);
+  const [scoutSlateLoading, setScoutSlateLoading] = useState(false);
+  const [scoutSlateError, setScoutSlateError] = useState(null);
   const [liveLineups, setLiveLineups] = useState({});
   const [liveUmpires, setLiveUmpires] = useState({});
   const [livePitcherStats, setLivePitcherStats] = useState({});
@@ -2582,14 +2826,27 @@ export default function App() {
   useEffect(() => {
     if (IS_STATS_SANDBOX) return;
     setSlateLoading(true);
+    setScheduleError(null);
     setLiveSlate(null);
     const url = slateDate ? `/api/schedule?date=${slateDate}` : "/api/schedule";
     apiFetch(url)
       .then(games => {
-        setLiveSlate(games);
-        if (games.length > 0) setSelectedId(games[0].gamePk);
+        setLiveSlate(Array.isArray(games) ? games : []);
+        if (games?.length > 0) setSelectedId(games[0].gamePk);
       })
-      .catch(err => console.error("Schedule fetch failed:", err))
+      .catch(err => {
+        console.error("Schedule fetch failed:", err);
+        const msg = err.message ?? "Schedule unavailable";
+        const friendly = /failed to fetch|networkerror|load failed/i.test(msg)
+          ? "Cannot reach API — is the backend running? (npm start on port 3001)"
+          : msg.startsWith("HTTP ")
+          ? msg.includes("502")
+            ? "Schedule service temporarily unavailable — retry in a moment"
+            : `${msg} — check that npm start is running on port 3001`
+          : msg;
+        setScheduleError(friendly);
+        setLiveSlate(null);
+      })
       .finally(() => setSlateLoading(false));
   }, [slateDate]);
 
@@ -2620,6 +2877,52 @@ export default function App() {
 
     return () => { cancelled = true; };
   }, [slateDate, view]);
+
+  useEffect(() => {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const isHistoricalBoard = !!(slateDate && slateDate < today);
+    if (view !== "board" || isHistoricalBoard) {
+      setBoardSnapshotLoading(false);
+      return;
+    }
+    if ((boardDailySnapshot?.date === today && boardDailySnapshot?.empty !== true) || boardSnapshotLoading) return;
+
+    let cancelled = false;
+    setBoardSnapshotLoading(true);
+
+    apiFetch(`/api/board/snapshot?date=${today}`)
+      .then(data => {
+        if (cancelled) return;
+        if (data && !data.empty) setBoardDailySnapshot({ ...data, date: today });
+        else setBoardDailySnapshot({ date: today, empty: true, reason: data?.reason ?? "no_snapshot" });
+      })
+      .catch(() => {
+        if (!cancelled) setBoardDailySnapshot({ date: today, empty: true, reason: "fetch_failed" });
+      })
+      .finally(() => {
+        if (!cancelled) setBoardSnapshotLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [view, slateDate]);
+
+  // Poll until today's shared board snapshot exists (midnight / 10 AM HI jobs)
+  useEffect(() => {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const isHistoricalBoard = !!(slateDate && slateDate < today);
+    if (view !== "board" || isHistoricalBoard || boardSnapshotCoversToday()) return;
+
+    const poll = () => {
+      apiFetch(`/api/board/snapshot?date=${today}`)
+        .then(data => {
+          if (data && !data.empty) setBoardDailySnapshot({ ...data, date: today });
+        })
+        .catch(() => {});
+    };
+
+    const interval = setInterval(poll, 90_000);
+    return () => clearInterval(interval);
+  }, [view, slateDate, boardDailySnapshot]);
 
   useEffect(() => {
     if (!researchMode || view !== "research-perf") return;
@@ -2933,6 +3236,8 @@ export default function App() {
     setAiBoardData(null);
     aiBoardPayloadSig.current = "";
     setAiBoardTab("all");
+    setScoutSlate(null);
+    setScoutSlateError(null);
     setLastRefreshed(new Date());
     setTimeout(() => setIsRefreshing(false), 2000);
   };
@@ -2973,6 +3278,90 @@ export default function App() {
     setBoardTop20(false);
   }, [boardTab]);
 
+  const handleBuildScoutSlate = async ({ force = false } = {}) => {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const slateKey = slateDate ?? today;
+    const cacheKey = "scout_slate_v1";
+
+    if (!force) {
+      try {
+        const cached = JSON.parse(localStorage.getItem(cacheKey) || "null");
+        if (
+          cached?.date === slateKey &&
+          Number(cached?.goal) === Number(scoutGoal) &&
+          Number(cached?.unit) === Number(scoutUnit) &&
+          Array.isArray(cached?.picks)
+        ) {
+          setScoutSlate(cached);
+          setScoutSlateError(null);
+          return;
+        }
+      } catch {}
+    }
+
+    setScoutSlateLoading(true);
+    setScoutSlateError(null);
+    try {
+      const allCandidates = buildScoutCandidates({
+        liveSlate,
+        liveLineups,
+        liveWeather,
+        livePlayerProps,
+        livePitcherStats,
+        liveGameLog,
+        liveUmpires,
+        liveTeamStats,
+        liveHittingLog,
+        liveStatSplits,
+        pitcherArsenal,
+        liveNrfiData,
+        liveOddsMap: effectiveOddsMap,
+      });
+
+      const needed = picksNeeded(scoutGoal, scoutUnit);
+      const picks = allCandidates.slice(0, Math.min(needed, 20));
+
+      if (!picks.length) {
+        const emptySlate = {
+          date: slateKey,
+          goal: scoutGoal,
+          unit: scoutUnit,
+          createdAt: new Date().toISOString(),
+          picks: [],
+          math: scoutMath([], scoutUnit, scoutGoal),
+        };
+        setScoutSlate(emptySlate);
+        localStorage.setItem(cacheKey, JSON.stringify(emptySlate));
+        return;
+      }
+
+      const data = await apiMutate("/api/scout/build-slate", "POST", { picks });
+      // Backend returns a plain array; guard against both shapes
+      const reasoning = Array.isArray(data) ? data : (Array.isArray(data?.picks) ? data.picks : []);
+      const reasoningMap = Object.fromEntries(reasoning.map((p) => [p.id, p]));
+      const mergedPicks = picks.map((p) => ({
+        ...p,
+        shortReason: reasoningMap[p.id]?.shortReason ?? null,
+        confidenceStatement: reasoningMap[p.id]?.confidenceStatement ?? null,
+        keyRisk: reasoningMap[p.id]?.keyRisk ?? null,
+      }));
+      const builtSlate = {
+        date: slateKey,
+        goal: scoutGoal,
+        unit: scoutUnit,
+        createdAt: new Date().toISOString(),
+        picks: mergedPicks,
+        math: scoutMath(mergedPicks, scoutUnit, scoutGoal),
+      };
+      setScoutSlate(builtSlate);
+      localStorage.setItem(cacheKey, JSON.stringify(builtSlate));
+    } catch (err) {
+      setScoutSlateError(err?.message ?? "Failed to build Scout slate.");
+    } finally {
+      setScoutSlateLoading(false);
+    }
+  };
+
   useEffect(() => {
     if ((view !== "lab" && view !== "models") || (view === "lab" ? labSubTab : modelsSubTab) !== "f5ml" || !currentUser || !isScoutUser || labData !== null || labLoading) return;
     fetchLabData();
@@ -2998,97 +3387,52 @@ export default function App() {
     fetchLabCalibration();
   }, [view, currentUser, isScoutUser, labCalibration, labCalibrationLoading]);
 
+  // Shared daily AI edges — one GET for all users (no POST /api/ai-board/score on tab open)
   useEffect(() => {
-    if ((view !== "ai-board" && view !== "predict") || !currentUser || !isScoutUser) return;
-    if (aiBoardLoading) return;
-    if (!liveSlate?.length) return;
-    const payload = buildAiBoardPayload(
-      liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats,
-      liveLineups, liveWeather, liveHittingLog, liveStatSplits,
-      liveNrfiData, effectiveOddsMap, pitcherArsenal
-    );
-    const payloadSig = payload.map(c => `${c.market}:${c.id}`).join("|");
-    if (aiBoardPayloadSig.current === payloadSig && aiBoardData !== null) return;
-    aiBoardPayloadSig.current = payloadSig;
-    setAiBoardLoading(true);
-    if (!payload.length) {
-      setAiBoardData(prev => (Array.isArray(prev) && prev.length === 0 ? prev : []));
-      setAiBoardLoading(false);
-      return;
-    }
-    const postPayload = payload.map(({ _candidate, ...rest }) => rest);
-    apiMutate("/api/ai-board/score", "POST", { candidates: postPayload })
-      .then((data) => {
-        const scored = payload.map((c) => ({
-          ...c._candidate,
-          id: c.id,
-          entityId: c.entityId,
-          market: c.market,
-          bookLine: c.bookLine,
-          aiScore: data?.scores?.[c.id]?.aiScore ?? fallbackAiScore(c),
-          aiReason: data?.scores?.[c.id]?.aiReason ?? null,
-        }));
-        scored.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
-        setAiBoardData(scored);
+    if ((view !== "ai-board" && view !== "predict" && view !== "chat") || !currentUser || !isScoutUser) return;
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const dateParam = slateDate && slateDate <= today ? slateDate : today;
 
-        // Seed Tier 1 summaries from aiReason (already generated by Haiku during scoring)
+    let cancelled = false;
+    setAiBoardLoading(true);
+
+    apiFetch(`/api/ai-board/edges?date=${encodeURIComponent(dateParam)}`)
+      .then((data) => {
+        if (cancelled) return;
+        const edges = (Array.isArray(data?.edges) ? data.edges : []).map(normalizeAiBoardEdge);
+        edges.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
+        setAiBoardEdgesMeta({
+          fallback: !!data?.fallback,
+          generatedAt: data?.generatedAt ?? null,
+          slateDate: data?.slateDate ?? dateParam,
+        });
+        setAiBoardData(edges);
         setAiCardSummaries(prev => {
           const updates = {};
-          scored.forEach(c => {
+          edges.forEach(c => {
             if (c.aiReason && !prev[c.id]) updates[c.id] = c.aiReason;
           });
           return Object.keys(updates).length ? { ...prev, ...updates } : prev;
         });
-
-        // Trigger Tier 2 (GPT-4o) for high-confidence cards (aiScore ≥ 75)
-        const highConfidence = scored.filter(c => (c.aiScore ?? 0) >= 75);
-        if (highConfidence.length) {
-          const premiumRequests = highConfidence.map(c =>
-            buildBoardSummaryRequest(
-              {
-                ...c,
-                score: c.aiScore,
-                signals: Array.isArray(c.signals) ? c.signals : [],
-                avgK3: c.avgK3 ?? c.stats?.avgK3 ?? null,
-                avgIP: c.avgIP ?? c.stats?.avgIP ?? null,
-                era: c.era ?? c.stats?.era ?? null,
-                whip: c.whip ?? c.stats?.whip ?? null,
-                oppKPct: c.oppKPct ?? c.stats?.oppKPct ?? null,
-              },
-              c.market
-            )
-          );
-          hydrateCardSummaries(premiumRequests, { premium: true });
+        if (dateParam === today && edges.length > 0) {
+          setLockedAiBoardSnapshot(prev => {
+            if (prev !== null) return prev;
+            localStorage.setItem("ai_board_snapshot", JSON.stringify({ date: today, data: edges }));
+            return edges;
+          });
         }
-
-        setLockedAiBoardSnapshot(prev => {
-          if (prev !== null) return prev; // already locked — don't overwrite
-          const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
-          localStorage.setItem("ai_board_snapshot", JSON.stringify({ date: today, data: scored }));
-          return scored;
-        });
       })
       .catch(() => {
-        const scored = payload.map((c) => ({
-          ...c._candidate,
-          id: c.id,
-          entityId: c.entityId,
-          market: c.market,
-          bookLine: c.bookLine,
-          aiScore: Math.round((c.score ?? 50) * 0.6 + (c.simConfidence ?? 50) * 0.4),
-          aiReason: null,
-        }));
-        scored.sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
-        setAiBoardData(scored);
-        setLockedAiBoardSnapshot(prev => {
-          if (prev !== null) return prev;
-          const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
-          localStorage.setItem("ai_board_snapshot", JSON.stringify({ date: today, data: scored }));
-          return scored;
-        });
+        if (cancelled) return;
+        setAiBoardData([]);
+        setAiBoardEdgesMeta({ fallback: true, generatedAt: null, slateDate: dateParam });
       })
-      .finally(() => setAiBoardLoading(false));
-  }, [view, currentUser, isScoutUser, liveSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, liveLineups, liveWeather, liveHittingLog, liveStatSplits, aiBoardLoading]); // eslint-disable-line react-hooks/exhaustive-deps
+      .finally(() => {
+        if (!cancelled) setAiBoardLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [view, currentUser, isScoutUser, slateDate]);
 
   useEffect(() => {
     if (!currentUser || !isScoutUser || !labData?.games?.length || !labData?.date) return;
@@ -3648,9 +3992,9 @@ export default function App() {
   }, []);
 
 
-  // Active slate: live schedule games when backend is on, mock SLATE otherwise
-  const activeSlate = (!IS_STATS_SANDBOX && liveSlate)
-    ? liveSlate.map(sg => {
+  // Active slate: live API for everyone when backend is on — never mix mock SLATE with production users
+  const activeSlate = !IS_STATS_SANDBOX
+    ? (liveSlate ?? []).map(sg => {
         const built = buildLiveGame(sg);
         if (liveWeather[sg.gamePk])  built.weather = liveWeather[sg.gamePk];
         if (liveNrfiData[sg.gamePk]) built.nrfi = { ...built.nrfi, ...liveNrfiData[sg.gamePk] };
@@ -4078,9 +4422,28 @@ export default function App() {
       ?? fallbackCardSummary(request);
   }, [aiCardSummaries]);
 
+  /** Single source of truth: snapshot fields first, then shared DB-backed cache, then fallback. */
+  const resolveCardSummaryText = useCallback((c, request, { allowPremium = true } = {}) => {
+    const fromSnapshot = c?._boardSummary ?? c?.aiSummary ?? null;
+    if (fromSnapshot) return fromSnapshot;
+    if (!request?.id) return null;
+    if (allowPremium) {
+      const premium = aiCardSummaries[`premium:${request.id}`];
+      if (premium) return premium;
+    }
+    return aiCardSummaries[request.id] ?? fallbackCardSummary(request);
+  }, [aiCardSummaries]);
+
   useEffect(() => {
     if (view !== "board") return;
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const isHistoricalBoard = !!(slateDate && slateDate < today);
+    if (isHistoricalBoard) return;
+    // Shared daily snapshot is authoritative for all tabs — no per-client POST /api/card-summary
+    if (boardSnapshotCoversToday()) return;
     const isGameBoard = boardTab === "games";
+    const snapshotCards = isGameBoard ? getBoardMarketSnapshot(gameSubTab) : getBoardMarketSnapshot(boardTab);
+    if (Array.isArray(snapshotCards)) return;
     const requests = (
       isGameBoard
         ? computeGameBoard(gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires)
@@ -4106,18 +4469,16 @@ export default function App() {
     let cancelled = false;
     void (async () => {
       await hydrateCardSummaries(allRequests);
-      if (cancelled) return;
-      const premiumRequests = allRequests.filter(r => (r.score ?? 0) >= 75);
-      if (premiumRequests.length) await hydrateCardSummaries(premiumRequests, { premium: true });
     })();
     return () => { cancelled = true; };
-  }, [view, boardTab, gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires, liveLineups, livePlayerProps, liveHittingLog, liveStatSplits, liveGameLog, liveTeamStats, lockedBoardCandidates, hydrateCardSummaries]);
+  }, [view, boardTab, gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, livePitcherStats, liveUmpires, liveLineups, livePlayerProps, liveHittingLog, liveStatSplits, liveGameLog, liveTeamStats, lockedBoardCandidates, hydrateCardSummaries, boardDailySnapshot, slateDate, getBoardMarketSnapshot, boardSnapshotCoversToday]);
 
   // Lock board candidates when a game goes live — prevents survivorship bias in result tracking.
   // Re-runs when hitting logs arrive so batter tabs (Hits/HR) aren't stored empty.
   // Uses activeSlate (enriched with game.pitcher/awayPitcher) so platoon hands are correct.
   useEffect(() => {
     if (!liveSlate || view !== "board") return;
+    if (boardSnapshotCoversToday()) return;
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
 
     liveSlate.forEach(game => {
@@ -4189,11 +4550,12 @@ export default function App() {
         return updated;
       });
     });
-  }, [liveSlate, view, liveLineups, liveHittingLog]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [liveSlate, view, liveLineups, liveHittingLog, boardSnapshotCoversToday]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Lock game board candidates when a game goes live — prevents rankings shifting mid-game.
   useEffect(() => {
     if (!liveSlate || view !== "board") return;
+    if (boardSnapshotCoversToday()) return;
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
 
     liveSlate.forEach(game => {
@@ -4787,6 +5149,25 @@ export default function App() {
             )}
             {isScoutUser && (
               <button
+                onClick={() => setView("scout")}
+                style={{
+                  background: view === "scout" ? "#22c55e" : "#161827",
+                  border: `1px solid ${view === "scout" ? "#22c55e" : "#1f2437"}`,
+                  borderRadius: 8,
+                  padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+                  fontSize: isNarrowPhone ? 9 : 10,
+                  color: view === "scout" ? "#000" : "#9ca3af",
+                  fontFamily: "monospace",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  textTransform: "uppercase",
+                }}
+              >
+                🎯 Scout
+              </button>
+            )}
+            {isScoutUser && (
+              <button
                 onClick={() => setView("predict")}
                 style={{
                   background: view === "predict" ? "#fbbf24" : "#161827",
@@ -5137,13 +5518,43 @@ export default function App() {
             );
           })()}
 
-          <SLabel>{slateDate ? `Slate — ${slateDate}` : "Today's Slate"} — {activeSlate.length} Games{!IS_STATS_SANDBOX && !slateLoading && liveSlate ? " · LIVE" : !IS_STATS_SANDBOX && slateLoading ? " · Loading…" : ""}</SLabel>
-          {slateLoading && !liveSlate && (
+          <SLabel>{slateDate ? `Slate — ${slateDate}` : "Today's Slate"} — {activeSlate.length} Games{!IS_STATS_SANDBOX && !slateLoading && liveSlate?.length ? " · LIVE" : !IS_STATS_SANDBOX && slateLoading ? " · Loading…" : ""}</SLabel>
+          {slateLoading && liveSlate === null && (
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 0" }}>
               <div style={{ width: 18, height: 18, border: "2px solid #1f2437", borderTop: "2px solid #22c55e", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />
               <span style={{ fontSize: 12, color: "#6b7280" }}>Fetching today's slate…</span>
               <style>{`@keyframes spin { to { transform: rotate(360deg); } } @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }`}</style>
             </div>
+          )}
+          {!IS_STATS_SANDBOX && !slateLoading && liveSlate === null && scheduleError && (
+            <Card>
+              <div style={{ padding: "16px 0", fontSize: 11, color: "#ef4444", lineHeight: 1.5 }}>
+                Could not load today&apos;s schedule: {scheduleError}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+                  setSlateLoading(true);
+                  setScheduleError(null);
+                  apiFetch(slateDate ? `/api/schedule?date=${slateDate}` : "/api/schedule")
+                    .then(games => {
+                      setLiveSlate(Array.isArray(games) ? games : []);
+                      if (games?.length > 0) setSelectedId(games[0].gamePk);
+                    })
+                    .catch(err => setScheduleError(err.message ?? "Schedule unavailable"))
+                    .finally(() => setSlateLoading(false));
+                }}
+                style={{ fontSize: 10, fontWeight: 700, color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontFamily: "monospace" }}
+              >
+                Retry
+              </button>
+            </Card>
+          )}
+          {!IS_STATS_SANDBOX && !slateLoading && Array.isArray(liveSlate) && liveSlate.length === 0 && !scheduleError && (
+            <Card>
+              <div style={{ padding: "16px 0", fontSize: 11, color: "#6b7280" }}>No games on the slate for this date.</div>
+            </Card>
           )}
           <div style={windowWidth > 640 ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } : {}}>
             {activeSlate.map(g => (
@@ -8614,8 +9025,8 @@ export default function App() {
             const renderHistoricalBoardCandidateCard = (c, i) => {
               const sc = boardScoreColor(c.score ?? 0);
               const boardSummaryRequest = buildBoardSummaryRequest(c, boardTab);
-              const summaryText = getCardSummaryText(boardSummaryRequest);
-              const isPremium = !!aiCardSummaries[`premium:${boardSummaryRequest?.id}`];
+              const summaryText = resolveCardSummaryText(c, boardSummaryRequest, { allowPremium: false });
+              const isPremium = false;
               const todayResult = historicalTodayResult(c);
 
               if (isPitcherBoard) {
@@ -8741,18 +9152,82 @@ export default function App() {
             );
           }
 
-          const boardCandidatesByType = {
+          const useSharedBoard = boardSnapshotCoversToday();
+          const allowLiveBoardFallback = IS_STATS_SANDBOX || import.meta.env.DEV;
+          const boardTabButtons = (
+            <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+              {[["hr", "⚾ HR"], ["hits", "🎯 Hits"], ["k", "⚡ K"], ["outs", "📋 Outs"], ["games", "🎲 Games"]].map(([type, label]) => (
+                <button key={type} onClick={() => setBoardTab(type)}
+                  style={{ position: "relative", flex: 1, background: boardTab === type ? "#fbbf24" : "#161827",
+                    border: `1px solid ${boardTab === type ? "#fbbf24" : "#1f2437"}`,
+                    borderRadius: 8, padding: "7px", fontSize: 10, fontFamily: "monospace",
+                    fontWeight: 700, color: boardTab === type ? "#000" : "#9ca3af", cursor: "pointer" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          );
+
+          const formatBoardSnapshotTime = (iso) => {
+            if (!iso) return null;
+            try {
+              return new Date(iso).toLocaleString("en-US", {
+                timeZone: "Pacific/Honolulu",
+                month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+              });
+            } catch { return null; }
+          };
+
+          if (!useSharedBoard && !allowLiveBoardFallback) {
+            if (boardSnapshotLoading) {
+              return (
+                <div>
+                  {boardTabButtons}
+                  <Card>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "20px 0", justifyContent: "center" }}>
+                      <div style={{ width: 18, height: 18, border: "2px solid #1f2437", borderTop: "2px solid #fbbf24", borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />
+                      <span style={{ fontSize: 12, color: "#6b7280" }}>Loading shared board…</span>
+                    </div>
+                  </Card>
+                </div>
+              );
+            }
+            return (
+              <div>
+                {boardTabButtons}
+                <Card>
+                  <div style={{ textAlign: "center", padding: "28px 16px", color: "#9ca3af", fontSize: 11, lineHeight: 1.6 }}>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", marginBottom: 8 }}>Shared board is being built</div>
+                    <div>Every user sees the same scores, SIM %, and card text once the daily snapshot is ready.</div>
+                    <div style={{ marginTop: 8, color: "#6b7280" }}>
+                      Runs at midnight and refreshes at 10 AM Hawaii time. This page rechecks every 90 seconds.
+                    </div>
+                  </div>
+                </Card>
+              </div>
+            );
+          }
+
+          const snapshotPropCandidates = getBoardMarketSnapshot(boardTab);
+          const snapshotGameCandidates = getBoardMarketSnapshot(gameSubTab);
+          const boardCandidatesByType = useSharedBoard ? {
+            hr:   getBoardMarketSnapshot("hr") ?? [],
+            hits: getBoardMarketSnapshot("hits") ?? [],
+            k:    getBoardMarketSnapshot("k") ?? [],
+            outs: getBoardMarketSnapshot("outs") ?? [],
+          } : {
             hr:   computeBatterBoard("hr", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
             hits: computeBatterBoard("hits", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
             k:    computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal),
             outs: computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal),
           };
-          const liveBoardCandidates = (boardCandidatesByType[boardTab] ?? []).filter(c =>
+          const allPropBoardCandidates = boardCandidatesByType[boardTab] ?? [];
+          const liveBoardCandidates = allPropBoardCandidates.filter(c =>
             getBoardGamePhase(c.gamePk) === "upcoming"
           );
-          const liveCandidatesByGame = (() => {
+          const groupBoardCandidates = (candidates) => {
             const groups = {};
-            liveBoardCandidates.forEach(c => {
+            candidates.forEach(c => {
               if (!groups[c.gamePk]) groups[c.gamePk] = { gameLabel: c.gameLabel, gameTime: c.gameTime, gamePk: c.gamePk, candidates: [] };
               groups[c.gamePk].candidates.push(c);
             });
@@ -8761,21 +9236,24 @@ export default function App() {
               const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
               return ta - tb;
             });
-          })();
-          const lockedCandidatesByGame = (() => {
-            const groups = {};
-            Object.entries(lockedBoardCandidates).forEach(([gamePk, entry]) => {
-              const candidates = (entry[boardTab] ?? []);
-              if (!candidates.length) return;
-              const first = candidates[0];
-              groups[gamePk] = { gameLabel: first?.gameLabel ?? gamePk, gameTime: first?.gameTime ?? null, gamePk, candidates };
-            });
-            return Object.values(groups).sort((a, b) => {
-              const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
-              const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
-              return ta - tb;
-            });
-          })();
+          };
+          const liveCandidatesByGame = groupBoardCandidates(liveBoardCandidates);
+          const lockedCandidatesByGame = useSharedBoard
+            ? groupBoardCandidates(allPropBoardCandidates.filter(c => getBoardGamePhase(c.gamePk) !== "upcoming"))
+            : (() => {
+                const groups = {};
+                Object.entries(lockedBoardCandidates).forEach(([gamePk, entry]) => {
+                  const candidates = (entry[boardTab] ?? []);
+                  if (!candidates.length) return;
+                  const first = candidates[0];
+                  groups[gamePk] = { gameLabel: first?.gameLabel ?? gamePk, gameTime: first?.gameTime ?? null, gamePk, candidates };
+                });
+                return Object.values(groups).sort((a, b) => {
+                  const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
+                  const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
+                  return ta - tb;
+                });
+              })();
           // ── Scratch substitution for locked batter candidates ───────────────────
           // Called at render-time for each locked batter candidate.
           // • Player still in lineup      → keep as-is
@@ -8856,8 +9334,9 @@ export default function App() {
           // Apply substitutions to each game's locked candidates at render-time.
           // This keeps the localStorage snapshot clean (original locked data)
           // while dynamically handling late scratches without dropping the whole game group.
-          const lockedBoardCandidatesForTab = lockedCandidatesByGame
-            .flatMap(g => g.candidates.flatMap(c => applySubstitution(c)));
+          const lockedBoardCandidatesForTab = useSharedBoard
+            ? lockedCandidatesByGame.flatMap(g => g.candidates)
+            : lockedCandidatesByGame.flatMap(g => g.candidates.flatMap(c => applySubstitution(c)));
           const shouldApplyTop20 = boardTop20 && (boardTab === "hits" || boardTab === "hr");
           const computeEVEdge = (c, type) => {
             if (!c?.propLine || (type !== "hr" && type !== "hits")) return null;
@@ -8907,34 +9386,13 @@ export default function App() {
               top20,
             ];
           })();
-          const displayLiveCandidatesByGame = (() => {
-            const groups = {};
-            displayLiveCandidates.forEach(c => {
-              if (!groups[c.gamePk]) groups[c.gamePk] = { gameLabel: c.gameLabel, gameTime: c.gameTime, gamePk: c.gamePk, candidates: [] };
-              groups[c.gamePk].candidates.push(c);
-            });
-            return Object.values(groups).sort((a, b) => {
-              const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
-              const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
-              return ta - tb;
-            });
-          })();
-          const displayLockedCandidatesByGame = (() => {
-            const groups = {};
-            displayLockedCandidates.forEach(c => {
-              if (!groups[c.gamePk]) groups[c.gamePk] = { gameLabel: c.gameLabel, gameTime: c.gameTime, gamePk: c.gamePk, candidates: [] };
-              groups[c.gamePk].candidates.push(c);
-            });
-            return Object.values(groups).sort((a, b) => {
-              const ta = a.gameTime ? Date.parse(a.gameTime) : Infinity;
-              const tb = b.gameTime ? Date.parse(b.gameTime) : Infinity;
-              return ta - tb;
-            });
-          })();
+          const displayLiveCandidatesByGame = groupBoardCandidates(displayLiveCandidates);
+          const displayLockedCandidatesByGame = groupBoardCandidates(displayLockedCandidates);
           // Game board candidates computed on-the-fly for the active sub-tab,
           // but swapped with locked snapshots once games go live/final.
           const gameBoardCandidates = (() => {
             if (!isGameBoard) return [];
+            if (useSharedBoard) return snapshotGameCandidates ?? [];
             const live = computeGameBoard(
               gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires, liveLineups
             );
@@ -8950,7 +9408,7 @@ export default function App() {
           const totalBatters = isPitcherBoard
             ? totalPitcherSlots
             : Object.values(liveLineups).flatMap(lu => [...(lu.away ?? []), ...(lu.home ?? [])]).length;
-          const loadedBatters = liveBoardCandidates.length;
+          const loadedBatters = useSharedBoard ? allPropBoardCandidates.length : liveBoardCandidates.length;
           const lockedCount = lockedCandidatesByGame.reduce((sum, g) => sum + g.candidates.length, 0);
 
           const boardScoreColor = (s) =>
@@ -8982,7 +9440,9 @@ export default function App() {
           };
 
           const lockedCandidatesForType = (type) =>
-            Object.values(lockedBoardCandidates).flatMap(g => g[type] ?? []);
+            useSharedBoard
+              ? (getBoardMarketSnapshot(type) ?? []).filter(item => getBoardGamePhase(item.gamePk) !== "upcoming")
+              : Object.values(lockedBoardCandidates).flatMap(g => g[type] ?? []);
 
           const hitSummary = (type) =>
             summarizeOutcomes(lockedCandidatesForType(type), item => boardOutcome(type, item));
@@ -9074,6 +9534,7 @@ export default function App() {
             summarizeOutcomes(items, item => gameBoardOutcome(type, item));
 
           const getGameBoardCandidatesForSubTab = (sub) => {
+            if (useSharedBoard) return getBoardMarketSnapshot(sub) ?? [];
             const live = computeGameBoard(
               sub, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires, liveLineups
             );
@@ -9144,6 +9605,34 @@ export default function App() {
                   ))}
                 </div>
               )}
+
+              {useSharedBoard ? (
+                <div style={{
+                  marginBottom: 10, padding: "8px 10px", borderRadius: 8,
+                  background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.28)",
+                  fontSize: 10, color: "#9ca3af", lineHeight: 1.45, fontFamily: "monospace",
+                }}>
+                  <span style={{ fontWeight: 800, color: "#22c55e" }}>Shared daily board</span>
+                  {boardDailySnapshot?.generatedAt && (
+                    <span style={{ color: "#6b7280" }}>
+                      {" "}· snapshot {formatBoardSnapshotTime(boardDailySnapshot.generatedAt)} HI
+                    </span>
+                  )}
+                  <span style={{ color: "#4b5563" }}> — same scores &amp; text for all users. Refreshes 10 AM HI + pregame.</span>
+                </div>
+              ) : allowLiveBoardFallback ? (
+                <div style={{
+                  marginBottom: 10, padding: "8px 10px", borderRadius: 8,
+                  background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.28)",
+                  fontSize: 10, color: "#9ca3af", lineHeight: 1.45, fontFamily: "monospace",
+                }}>
+                  <span style={{ fontWeight: 800, color: "#fbbf24" }}>Live board (not shared yet)</span>
+                  <span style={{ color: "#6b7280" }}>
+                    {" "}— SIM &amp; card text can differ per browser until today&apos;s snapshot exists in Postgres.
+                    Run <span style={{ color: "#fbbf24" }}>npm run snapshot:today</span> (backend + DATABASE_URL + ANTHROPIC_API_KEY), then hard-refresh.
+                  </span>
+                </div>
+              ) : null}
 
               {/* Sub-header */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -9218,6 +9707,10 @@ export default function App() {
                         : null;
                       const homeSPEra = (parseFloat(livePitcherStats[c.homeSP?.id]?.era) || parseFloat(c.homeSP?.era)) || null;
                       const awaySPEra = (parseFloat(livePitcherStats[c.awaySP?.id]?.era) || parseFloat(c.awaySP?.era)) || null;
+                      const useSnapshotOnly = useSharedBoard && isGameBoard;
+                      const summaryText = resolveCardSummaryText(c, boardSummaryRequest, { allowPremium: !useSnapshotOnly });
+                      const premiumLine = !useSnapshotOnly ? aiCardSummaries[`premium:${boardSummaryRequest?.id}`] : null;
+                      const isPremium = !!(premiumLine && summaryText === premiumLine);
                       return (
                         <GameBoardCard
                           key={c.gamePk}
@@ -9232,8 +9725,8 @@ export default function App() {
                           finalTotalRuns={finalTotalRuns}
                           homeSPEra={homeSPEra}
                           awaySPEra={awaySPEra}
-                          summaryText={getCardSummaryText(boardSummaryRequest)}
-                          isPremium={!!aiCardSummaries[`premium:${boardSummaryRequest?.id}`]}
+                          summaryText={summaryText}
+                          isPremium={isPremium}
                           preferredBook={preferredBook}
                           onCardClick={() => setWhyModal({ c, type: gameSubTab, rank: i + 1 })}
                         />
@@ -9264,8 +9757,10 @@ export default function App() {
                   const sc = boardScoreColor(c.score);
                   const boardGameStatus = getBoardGameStatus(c.gamePk);
                   const boardSummaryRequest = buildBoardSummaryRequest(c, boardTab);
-                  const summaryText = getCardSummaryText(boardSummaryRequest);
-                  const isPremium = !!aiCardSummaries[`premium:${boardSummaryRequest?.id}`];
+                  const useSnapshotOnly = useSharedBoard;
+                  const summaryText = resolveCardSummaryText(c, boardSummaryRequest, { allowPremium: !useSnapshotOnly });
+                  const premiumLine = !useSnapshotOnly ? aiCardSummaries[`premium:${boardSummaryRequest?.id}`] : null;
+                  const isPremium = !!(premiumLine && summaryText === premiumLine);
                   const todayResult = liveBoardResults[c.id] ?? null;
 
                   if (isPitcherBoard) {
@@ -9358,6 +9853,250 @@ export default function App() {
                   </>
                 );
               })()}
+            </div>
+          );
+        })()}
+
+        {/* ════════════════════════════════════
+            SCOUT VIEW
+        ════════════════════════════════════ */}
+        {view === "scout" && isScoutUser && (() => {
+          const goalOptions = [25, 50, 75, 100];
+          const unitOptions = [10, 25, 50];
+          const slatePicks = scoutSlate?.picks ?? [];
+          const math = scoutSlate?.math ?? scoutMath([], scoutUnit, scoutGoal);
+          const previewNeeded = picksNeeded(scoutGoal, scoutUnit);
+          const formatOdds = (odds) => (odds == null ? "—" : odds > 0 ? `+${odds}` : `${odds}`);
+          const gradeScoutPick = (pick) => {
+            if (pick.market === "k" || pick.market === "outs") {
+              const result = liveBoardResults[pick.entityId] ?? null;
+              if (!result || result.live || pick.bookLine == null) return null;
+              const actual = pick.market === "k" ? result.k : result.outs;
+              if (typeof actual !== "number") return null;
+              return pick.lean === "UNDER" ? actual < pick.bookLine : actual > pick.bookLine;
+            }
+            return null;
+          };
+          const settled = slatePicks.reduce((acc, pick) => {
+            const grade = gradeScoutPick(pick);
+            if (grade === null) return acc;
+            const winAmt = pick.bookOdds > 0 ? (scoutUnit * pick.bookOdds / 100) : (scoutUnit * 100 / Math.abs(pick.bookOdds || 1));
+            acc.resolved += 1;
+            if (grade) {
+              acc.hits += 1;
+              acc.net += winAmt;
+            } else {
+              acc.net -= scoutUnit;
+            }
+            return acc;
+          }, { hits: 0, resolved: 0, net: 0 });
+
+          return (
+            <div style={{ padding: "12px 0" }}>
+              <Card style={{ padding: "14px 14px 12px", marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>🎯 THE SCOUT</div>
+                    <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 4, lineHeight: 1.5 }}>
+                      Builds a bankroll-aware slate from the strongest live edges, then adds short bettor-style reasoning for each play.
+                    </div>
+                  </div>
+                  {settled.resolved > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                      <span style={{ fontSize: 8, fontWeight: 800, color: "#22c55e", background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.35)", borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.05em" }}>
+                        {settled.hits}/{settled.resolved} hit
+                      </span>
+                      <span style={{ fontSize: 10, color: settled.net >= 0 ? "#22c55e" : "#f87171", fontFamily: "monospace", fontWeight: 700 }}>
+                        {settled.net >= 0 ? "+" : ""}${settled.net.toFixed(2)} tracked
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: "0.06em", marginBottom: 6 }}>DAILY GOAL</div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {goalOptions.map((goal) => (
+                        <button
+                          key={goal}
+                          onClick={() => setScoutGoal(goal)}
+                          style={{
+                            background: scoutGoal === goal ? "#22c55e" : "#161827",
+                            border: `1px solid ${scoutGoal === goal ? "#22c55e" : "#2d3148"}`,
+                            borderRadius: 7,
+                            padding: "5px 10px",
+                            fontSize: 10,
+                            fontWeight: 700,
+                            color: scoutGoal === goal ? "#000" : "#9ca3af",
+                            fontFamily: "monospace",
+                            cursor: "pointer",
+                          }}
+                        >
+                          ${goal}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 9, color: "#6b7280", fontWeight: 700, letterSpacing: "0.06em", marginBottom: 6 }}>UNIT SIZE</div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {unitOptions.map((unit) => (
+                        <button
+                          key={unit}
+                          onClick={() => setScoutUnit(unit)}
+                          style={{
+                            background: scoutUnit === unit ? "#a78bfa" : "#161827",
+                            border: `1px solid ${scoutUnit === unit ? "#a78bfa" : "#2d3148"}`,
+                            borderRadius: 7,
+                            padding: "5px 10px",
+                            fontSize: 10,
+                            fontWeight: 700,
+                            color: scoutUnit === unit ? "#000" : "#9ca3af",
+                            fontFamily: "monospace",
+                            cursor: "pointer",
+                          }}
+                        >
+                          ${unit}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: windowWidth > 720 ? "repeat(4, minmax(0, 1fr))" : "repeat(2, minmax(0, 1fr))", gap: 8, marginTop: 14 }}>
+                  <div style={{ background: "#111322", border: "1px solid #1f2437", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ fontSize: 8, color: "#4b5563", fontWeight: 700, marginBottom: 4 }}>TARGET</div>
+                    <div style={{ fontSize: 14, color: "#f9fafb", fontWeight: 800, fontFamily: "monospace" }}>${scoutGoal}</div>
+                  </div>
+                  <div style={{ background: "#111322", border: "1px solid #1f2437", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ fontSize: 8, color: "#4b5563", fontWeight: 700, marginBottom: 4 }}>UNITS NEEDED</div>
+                    <div style={{ fontSize: 14, color: "#f9fafb", fontWeight: 800, fontFamily: "monospace" }}>{previewNeeded}</div>
+                  </div>
+                  <div style={{ background: "#111322", border: "1px solid #1f2437", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ fontSize: 8, color: "#4b5563", fontWeight: 700, marginBottom: 4 }}>RISK ESTIMATE</div>
+                    <div style={{ fontSize: 14, color: "#f9fafb", fontWeight: 800, fontFamily: "monospace" }}>${(previewNeeded * scoutUnit).toFixed(0)}</div>
+                  </div>
+                  <div style={{ background: "#111322", border: "1px solid #1f2437", borderRadius: 8, padding: "8px 10px" }}>
+                    <div style={{ fontSize: 8, color: "#4b5563", fontWeight: 700, marginBottom: 4 }}>ASSUMED HIT RATE</div>
+                    <div style={{ fontSize: 14, color: "#f9fafb", fontWeight: 800, fontFamily: "monospace" }}>62.5%</div>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+                  <button
+                    onClick={() => handleBuildScoutSlate({ force: false })}
+                    disabled={scoutSlateLoading || !liveSlate?.length}
+                    style={{
+                      background: scoutSlateLoading || !liveSlate?.length ? "#1e2030" : "#22c55e",
+                      border: "none",
+                      borderRadius: 8,
+                      padding: "9px 12px",
+                      fontSize: 11,
+                      fontWeight: 800,
+                      color: scoutSlateLoading || !liveSlate?.length ? "#4b5563" : "#000",
+                      fontFamily: "monospace",
+                      cursor: scoutSlateLoading || !liveSlate?.length ? "default" : "pointer",
+                    }}
+                  >
+                    {scoutSlateLoading ? "Building…" : "Build Scout Slate"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      localStorage.removeItem("scout_slate_v1");
+                      handleBuildScoutSlate({ force: true });
+                    }}
+                    disabled={scoutSlateLoading || !liveSlate?.length}
+                    style={{
+                      background: "#161827",
+                      border: "1px solid #2d3148",
+                      borderRadius: 8,
+                      padding: "9px 12px",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: scoutSlateLoading || !liveSlate?.length ? "#4b5563" : "#9ca3af",
+                      fontFamily: "monospace",
+                      cursor: scoutSlateLoading || !liveSlate?.length ? "default" : "pointer",
+                    }}
+                  >
+                    Regenerate
+                  </button>
+                  {scoutSlate?.createdAt && (
+                    <span style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace" }}>
+                      Cached {new Date(scoutSlate.createdAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}
+                    </span>
+                  )}
+                </div>
+              </Card>
+
+              {scoutSlateError && (
+                <div style={{ marginBottom: 12, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.22)", borderRadius: 8, padding: "10px 12px", fontSize: 10, color: "#fca5a5" }}>
+                  {scoutSlateError}
+                </div>
+              )}
+
+              {scoutSlateLoading && (
+                <div style={{ textAlign: "center", padding: 48, color: "#6b7280", fontSize: 11 }}>
+                  <div style={{ fontSize: 24, marginBottom: 8 }}>🎯</div>
+                  Scout is building your slate…
+                </div>
+              )}
+
+              {!scoutSlateLoading && scoutSlate && (
+                <Card style={{ padding: "12px 14px", marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>
+                        {scoutSlate.date === new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" }) ? "Today’s Scout Slate" : `Scout Slate · ${scoutSlate.date}`}
+                      </div>
+                      <div style={{ fontSize: 10, color: "#6b7280", marginTop: 4 }}>
+                        {math.picksCount} play{math.picksCount !== 1 ? "s" : ""} · ${scoutSlate.unit} unit · avg pricing varies by market
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: "#9ca3af", background: "#141726", border: "1px solid #1f2437", borderRadius: 999, padding: "4px 8px", fontFamily: "monospace" }}>
+                        Risk ${math.totalRisked.toFixed(0)}
+                      </span>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: "#22c55e", background: "rgba(34,197,94,0.12)", border: "1px solid rgba(34,197,94,0.28)", borderRadius: 999, padding: "4px 8px", fontFamily: "monospace" }}>
+                        62.5% net ${math.net625.toFixed(2)}
+                      </span>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: "#fbbf24", background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.28)", borderRadius: 999, padding: "4px 8px", fontFamily: "monospace" }}>
+                        Break-even {math.breakEvenPct}% ({math.breakEvenHits})
+                      </span>
+                    </div>
+                  </div>
+                </Card>
+              )}
+
+              {!scoutSlateLoading && scoutSlate && slatePicks.length === 0 && (
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
+                  No Scout plays qualified from the current slate. This usually means the live edge filter was too thin or odds were missing.
+                </div>
+              )}
+
+              {!scoutSlateLoading && scoutSlate && slatePicks.length > 0 && (
+                <div>
+                  {slatePicks.map((pick, idx) => (
+                    <ScoutPickCard
+                      key={pick.id}
+                      c={pick}
+                      rank={idx + 1}
+                      unitSize={scoutSlate.unit}
+                      gradeResult={gradeScoutPick(pick)}
+                    />
+                  ))}
+                  <div style={{ fontSize: 9, color: "#4b5563", marginTop: 8, lineHeight: 1.5 }}>
+                    Live grading currently covers K and outs props. Game-market Scout picks stay ungraded until a dedicated resolver is added.
+                  </div>
+                </div>
+              )}
+
+              {!scoutSlateLoading && !scoutSlate && (
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
+                  Set your goal and unit size, then let Scout build a slate from the strongest {formatOdds(-110)}-style edge plays on the board.
+                </div>
+              )}
             </div>
           );
         })()}
@@ -9489,20 +10228,25 @@ export default function App() {
                 })}
               </div>
 
-              {aiBoardLoading && (
-                <div style={{ textAlign: "center", padding: 48, color: "#6b7280", fontSize: 11 }}>
-                  <div style={{ fontSize: 24, marginBottom: 8 }}>🤖</div>
-                  Running AI analysis across all markets…
+              {aiBoardEdgesMeta.generatedAt && (
+                <div style={{ fontSize: 9, color: "#4b5563", textAlign: "center", marginBottom: 8, fontFamily: "monospace" }}>
+                  Shared daily snapshot
+                  {aiBoardEdgesMeta.generatedAt
+                    ? ` · ${new Date(aiBoardEdgesMeta.generatedAt).toLocaleString("en-US", { timeZone: "Pacific/Honolulu", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} HI`
+                    : ""}
                 </div>
               )}
 
-              {!aiBoardLoading && !aiBoardData && !liveSlate?.length && (
-                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>No slate available.</div>
+              {aiBoardLoading && (
+                <div style={{ textAlign: "center", padding: 48, color: "#6b7280", fontSize: 11 }}>
+                  <div style={{ fontSize: 24, marginBottom: 8 }}>🤖</div>
+                  Loading today&apos;s AI Board…
+                </div>
               )}
 
-              {!aiBoardLoading && aiBoardData === null && liveSlate?.length > 0 && (
+              {!aiBoardLoading && aiBoardData === null && (
                 <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
-                  Preparing AI Board candidates…
+                  Loading AI Board…
                 </div>
               )}
 
@@ -9621,7 +10365,13 @@ export default function App() {
                 </div>
               )}
 
-              {!aiBoardLoading && aiBoardData?.length === 0 && (
+              {!aiBoardLoading && Array.isArray(aiBoardData) && aiBoardData.length === 0 && aiBoardEdgesMeta.fallback && (
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11, lineHeight: 1.5 }}>
+                  Today&apos;s AI picks are being generated. Check back after 10 AM Hawaii time (or after the midnight preload finishes).
+                </div>
+              )}
+
+              {!aiBoardLoading && Array.isArray(aiBoardData) && aiBoardData.length === 0 && !aiBoardEdgesMeta.fallback && (
                 <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>No AI Board picks available for today&apos;s slate.</div>
               )}
             </div>
@@ -9743,15 +10493,21 @@ export default function App() {
                 </div>
               )}
 
-              {!aiBoardLoading && !aiBoardData && (
+              {!aiBoardLoading && aiBoardData === null && (
                 <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
-                  Preparing candidates… open AI Board first if this persists.
+                  Loading edge plays…
                 </div>
               )}
 
-              {!aiBoardLoading && aiBoardData && allEdgePlays.length === 0 && (
+              {!aiBoardLoading && Array.isArray(aiBoardData) && allEdgePlays.length === 0 && aiBoardEdgesMeta.fallback && (
+                <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11, lineHeight: 1.5 }}>
+                  Today&apos;s edge scores are being generated. Check back after 10 AM Hawaii time.
+                </div>
+              )}
+
+              {!aiBoardLoading && Array.isArray(aiBoardData) && allEdgePlays.length === 0 && !aiBoardEdgesMeta.fallback && (
                 <div style={{ textAlign: "center", padding: 40, color: "#6b7280", fontSize: 11 }}>
-                  No edge plays yet. Edge plays appear when the model&apos;s probability is ≥8pts above the book&apos;s implied probability.
+                  No strong edges right now. Plays need model probability ≥8pts above the book&apos;s implied probability.
                 </div>
               )}
 
@@ -10057,8 +10813,10 @@ export default function App() {
               <div style={{ padding: "12px 16px 20px", borderTop: "1px solid #1f2437", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#161827" }}>
                 <div style={{ display: "flex", alignItems: "flex-start", gap: 4, flex: 1, minWidth: 0 }}>
                   {(() => {
-                    const summaryText = getCardSummaryText(whySummaryRequest);
-                    const isPremium = !!aiCardSummaries[`premium:${whySummaryRequest?.id}`];
+                    const whyUseSnapshot = !!(whyModal.c?._boardSummary ?? whyModal.c?.aiSummary) || boardSnapshotCoversToday();
+                    const summaryText = resolveCardSummaryText(whyModal.c, whySummaryRequest, { allowPremium: !whyUseSnapshot });
+                    const premiumLine = !whyUseSnapshot ? aiCardSummaries[`premium:${whySummaryRequest?.id}`] : null;
+                    const isPremium = !!(premiumLine && summaryText === premiumLine);
                     if (!summaryText) return null;
                     return (
                       <>

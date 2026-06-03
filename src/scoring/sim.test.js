@@ -121,6 +121,14 @@ describe("simHitsConfidence", () => {
     const poor = simHitsConfidence({ avg: 0.220, parkFactor: 1.0, matchup: null, order: 5 }, 0.5, 1000);
     expect(good).toBeGreaterThan(poor);
   });
+
+  it("same seedKey yields identical results across calls", () => {
+    const c = { avg: 0.310, parkFactor: 1.02, matchup: null, order: 4 };
+    const seed = "hits:592450:746897:1.5";
+    const a = simHitsConfidence(c, 1.5, 500, seed);
+    const b = simHitsConfidence(c, 1.5, 500, seed);
+    expect(a).toBe(b);
+  });
 });
 
 describe("simF5MLConfidence", () => {

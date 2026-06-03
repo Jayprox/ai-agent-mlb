@@ -2,10 +2,15 @@ const express = require("express");
 const crypto = require("crypto");
 const Anthropic = require("@anthropic-ai/sdk");
 const cache = require("../services/cache");
+const db = require("../services/db");
 
 const router = express.Router();
 const AI_BOARD_TTL = 4 * 60 * 60 * 1000; // 4h
 const MODEL = "claude-haiku-4-5-20251001";
+
+function todayHonolulu() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+}
 
 let _anthropic = null;
 function getAnthropic() {
@@ -27,6 +32,50 @@ function fallbackScore(candidate) {
   const sim = candidate.simConfidence ?? 50;
   return Math.round(algo * 0.6 + sim * 0.4);
 }
+
+// GET /api/ai-board/edges
+// Returns the pre-scored daily snapshot written by dailyAiSnapshot.js.
+// Falls back gracefully if the snapshot hasn't run yet today.
+router.get("/edges", async (req, res) => {
+  const date = req.query.date ?? todayHonolulu();
+
+  // In-memory cache: 5 min TTL — snapshot only updates once or twice a day
+  const cacheKey = `ai-board-edges:${date}`;
+  const hit = cache.get(cacheKey);
+  if (hit) {
+    res.setHeader("X-Cache", "HIT");
+    return res.json(hit);
+  }
+
+  if (!db.isConnected()) {
+    return res.json({ edges: [], generatedAt: null, fallback: true });
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT edges, generated_at FROM ai_board_edges WHERE slate_date = $1 LIMIT 1`,
+      [date]
+    );
+
+    const row = result?.rows?.[0];
+    if (!row) {
+      return res.json({ edges: [], generatedAt: null, fallback: true });
+    }
+
+    const payload = {
+      edges: Array.isArray(row.edges) ? row.edges : [],
+      generatedAt: row.generated_at,
+      slateDate: date,
+    };
+
+    cache.set(cacheKey, payload, 5 * 60 * 1000); // 5 min
+    res.setHeader("X-Cache", "MISS");
+    return res.json(payload);
+  } catch (err) {
+    console.warn(`  ⚠ ai-board/edges DB read failed: ${err.message}`);
+    return res.status(502).json({ error: "DB unavailable", detail: err.message });
+  }
+});
 
 router.post("/score", async (req, res) => {
   const inputCandidates = Array.isArray(req.body?.candidates) ? req.body.candidates.slice(0, 32) : [];

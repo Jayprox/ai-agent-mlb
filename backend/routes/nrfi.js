@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const mlb = require("../services/mlbApi");
 const cache = require("../services/cache");
+const { query, isConnected } = require("../services/db");
 
 const _linescoreInFlight = new Map(); // gamePk → Promise
 const _recentGamesInFlight = new Map(); // `${teamId}:${endDate}` → Promise
@@ -36,6 +37,31 @@ async function fetchGameMeta(gamePk) {
   const cacheKey = `gameMeta:${gamePk}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
+
+  const numericPk = parseInt(gamePk, 10);
+
+  if (isConnected()) {
+    try {
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+      const snap = await query(
+        "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+        [today]
+      );
+      const games = snap?.rows?.[0]?.games ?? [];
+      const game = games.find(g => g.gamePk === numericPk || g.id === numericPk);
+      if (game?.away?.id && game?.home?.id) {
+        const result = {
+          gameDate: (game.gameTime ?? game.time ?? today).slice(0, 10),
+          away: { id: game.away.id, name: game.away.name ?? "" },
+          home: { id: game.home.id, name: game.home.name ?? "" },
+        };
+        cache.set(cacheKey, result, GAME_META_TTL_MS);
+        return result;
+      }
+    } catch (err) {
+      console.warn(`  ⚠ nrfi fetchGameMeta DB read failed for ${gamePk}: ${err.message}`);
+    }
+  }
 
   const { data } = await mlb.get("/schedule", {
     params: {
@@ -196,12 +222,33 @@ router.get("/:gamePk", async (req, res) => {
   const { gamePk } = req.params;
   const cacheKey = `nrfi:${gamePk}`;
 
+  // 1. In-memory cache
   const cached = cache.get(cacheKey);
   if (cached) {
     res.setHeader("X-Cache", "HIT");
     return res.json(cached);
   }
 
+  // 2. DB snapshot
+  if (isConnected()) {
+    try {
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+      const snap = await query(
+        "SELECT data FROM nrfi_snapshots WHERE game_pk = $1 AND slate_date = $2",
+        [parseInt(gamePk, 10), today]
+      );
+      if (snap?.rows?.[0]?.data) {
+        const result = snap.rows[0].data;
+        cache.set(cacheKey, result, NRFI_TTL_MS);
+        res.setHeader("X-Cache", "DB-HIT");
+        return res.json(result);
+      }
+    } catch (err) {
+      console.warn(`  ⚠ nrfi DB read failed for ${gamePk}: ${err.message}`);
+    }
+  }
+
+  // 3. Live computation (fallback — fires all MLB schedule + linescore calls)
   try {
     const meta = await fetchGameMeta(gamePk);
     if (!meta?.away?.id || !meta?.home?.id || !meta?.gameDate) {
@@ -226,3 +273,46 @@ router.get("/:gamePk", async (req, res) => {
 });
 
 module.exports = router;
+
+// Exported for slate-bundle aggregation — same cache-first logic as the route handler.
+// Aliased as getNrfiResult for compatibility with iOS repo usage.
+module.exports.getNrfiForGame = module.exports.getNrfiResult = async function getNrfiForGame(gamePk) {
+  const cacheKey = `nrfi:${gamePk}`;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  if (isConnected()) {
+    try {
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+      const snap = await query(
+        "SELECT data FROM nrfi_snapshots WHERE game_pk = $1 AND slate_date = $2",
+        [parseInt(gamePk, 10), today]
+      );
+      if (snap?.rows?.[0]?.data) {
+        const result = snap.rows[0].data;
+        cache.set(cacheKey, result, NRFI_TTL_MS);
+        return result;
+      }
+    } catch (err) {
+      console.warn(`  ⚠ nrfi export DB read failed for ${gamePk}: ${err.message}`);
+    }
+  }
+
+  try {
+    const meta = await fetchGameMeta(gamePk);
+    if (!meta?.away?.id || !meta?.home?.id || !meta?.gameDate) return null;
+
+    const endDate = shiftDate(meta.gameDate, -1);
+    const [awayFirst, homeFirst] = await Promise.all([
+      computeTeamFirstInning(meta.away.id, endDate, Number(gamePk)),
+      computeTeamFirstInning(meta.home.id, endDate, Number(gamePk)),
+    ]);
+
+    const { lean, confidence } = deriveLeanAndConfidence(awayFirst, homeFirst);
+    const result = { awayFirst, homeFirst, lean, confidence };
+    cache.set(cacheKey, result, NRFI_TTL_MS);
+    return result;
+  } catch {
+    return null;
+  }
+};

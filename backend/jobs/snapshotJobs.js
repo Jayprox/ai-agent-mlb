@@ -95,6 +95,25 @@ async function ensurePhaseOneTables() {
       PRIMARY KEY (player_id, stat_group, slate_date)
     )
   `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS nrfi_snapshots (
+      game_pk     INTEGER      NOT NULL,
+      slate_date  DATE         NOT NULL,
+      fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+      data        JSONB        NOT NULL,
+      PRIMARY KEY (game_pk, slate_date)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS pitcher_savant_snapshots (
+      player_id   INTEGER      NOT NULL,
+      slate_date  DATE         NOT NULL,
+      fetched_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+      arsenal     JSONB,
+      splits      JSONB,
+      PRIMARY KEY (player_id, slate_date)
+    )
+  `);
 }
 
 function formatGameTime(iso) {
@@ -431,6 +450,24 @@ async function snapshotPitcherGamelogs(date = todayHonolulu()) {
     ),
   ];
 
+  // Build pitcher identity map from the schedule snapshot.
+  // The schedule snapshot stores name, team, number, and hand for each probable starter —
+  // so we can build the full stats payload without a separate people API call.
+  const pitcherIdentity = {};
+  games.forEach(g => {
+    ["away", "home"].forEach(side => {
+      const p = g.probablePitchers?.[side];
+      if (p?.id) {
+        pitcherIdentity[p.id] = {
+          name: p.name ?? `Pitcher ${p.id}`,
+          number: p.number ?? "?",
+          team: p.team ?? g[side]?.abbr ?? "?",
+          hand: p.hand ?? "R",
+        };
+      }
+    });
+  });
+
   if (!pitcherIds.length) {
     console.log(`  · snapshotPitcherGamelogs: no pitchers found for ${date}`);
     return;
@@ -519,6 +556,36 @@ async function snapshotPitcherGamelogs(date = todayHonolulu()) {
          ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
            SET fetched_at = NOW(), data = $4`,
         [pitcherId, "pitching", date, JSON.stringify(payload)]
+      );
+
+      // Also snapshot the stats-shaped payload so GET /api/players/:id/stats?group=pitching
+      // can serve from DB instead of calling MLB API live.
+      const identity = pitcherIdentity[pitcherId] ?? {};
+      const statsPayload = {
+        id: pitcherId,
+        name: identity.name ?? `Pitcher ${pitcherId}`,
+        number: identity.number ?? "?",
+        team: identity.team ?? "?",
+        position: "P",
+        hand: identity.hand ?? "R",
+        season: seasonSplit,
+        era: seasonSplit?.era ?? "0.00",
+        whip: seasonSplit?.whip ?? "0.00",
+        kPer9: seasonSplit?.strikeoutsPer9Inn ?? "0.0",
+        bbPer9: seasonSplit?.walksPer9Inn ?? "0.0",
+        wins: seasonSplit?.wins ?? 0,
+        losses: seasonSplit?.losses ?? 0,
+        ip: seasonSplit?.inningsPitched ?? "0.0",
+        k: seasonSplit?.strikeOuts ?? 0,
+        bb: seasonSplit?.baseOnBalls ?? 0,
+      };
+
+      await query(
+        `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
+         VALUES ($1, $2, $3, NOW(), $4)
+         ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
+           SET fetched_at = NOW(), data = $4`,
+        [pitcherId, "season:pitching", date, JSON.stringify(statsPayload)]
       );
 
       fetched++;
@@ -718,6 +785,161 @@ async function snapshotBatterGamelogs(date = todayHonolulu()) {
   console.log(`  ✓ snapshotBatterGamelogs  date=${date}  fetched=${fetched}  skipped=${skipped}`);
 }
 
+async function snapshotPitcherSavant(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: snapshotPitcherSavant  date=${date}`);
+  await ensurePhaseOneTables();
+
+  const result = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const games = result?.rows?.[0]?.games ?? [];
+
+  const pitcherIds = [
+    ...new Set(
+      games
+        .flatMap(g => [
+          g.probablePitchers?.away?.id,
+          g.probablePitchers?.home?.id,
+        ])
+        .filter(Boolean)
+    ),
+  ];
+
+  if (!pitcherIds.length) {
+    console.log(`  · snapshotPitcherSavant: no pitchers found for ${date}`);
+    return;
+  }
+
+  console.log(`  · snapshotPitcherSavant: ${pitcherIds.length} pitchers`);
+
+  // These are lazy-required inside the job function to avoid circular import issues
+  // (same pattern used by snapshotBullpen, pollPlayerProps, etc.)
+  const { buildArsenalPayloadForJob } = require("../routes/arsenal");
+  const { buildPitcherSplitsForJob } = require("../routes/pitcherSplits");
+
+  let fetched = 0;
+  let skipped = 0;
+
+  for (const pitcherId of pitcherIds) {
+    try {
+      const existing = await query(
+        `SELECT 1 FROM pitcher_savant_snapshots
+         WHERE player_id = $1 AND slate_date = $2
+           AND arsenal IS NOT NULL AND splits IS NOT NULL`,
+        [pitcherId, date]
+      );
+      if (existing?.rows?.length) {
+        skipped++;
+        continue;
+      }
+    } catch (err) {
+      console.warn(`  ⚠ snapshotPitcherSavant: DB check failed for ${pitcherId}: ${err.message}`);
+    }
+
+    let arsenal = null;
+    let splits = null;
+
+    try {
+      const payload = await buildArsenalPayloadForJob(pitcherId);
+      arsenal = payload ?? null;
+    } catch (err) {
+      console.warn(`  ⚠ snapshotPitcherSavant: arsenal failed for ${pitcherId}: ${err.message}`);
+    }
+
+    await new Promise(r => setTimeout(r, 800));
+
+    try {
+      splits = await buildPitcherSplitsForJob(pitcherId);
+    } catch (err) {
+      console.warn(`  ⚠ snapshotPitcherSavant: splits failed for ${pitcherId}: ${err.message}`);
+    }
+
+    try {
+      await query(
+        `INSERT INTO pitcher_savant_snapshots (player_id, slate_date, fetched_at, arsenal, splits)
+         VALUES ($1, $2, NOW(), $3, $4)
+         ON CONFLICT (player_id, slate_date) DO UPDATE
+           SET fetched_at = NOW(),
+               arsenal    = COALESCE(EXCLUDED.arsenal, pitcher_savant_snapshots.arsenal),
+               splits     = COALESCE(EXCLUDED.splits, pitcher_savant_snapshots.splits)`,
+        [pitcherId, date, arsenal ? JSON.stringify(arsenal) : null, splits ? JSON.stringify(splits) : null]
+      );
+      fetched++;
+    } catch (err) {
+      console.warn(`  ⚠ snapshotPitcherSavant: DB save failed for ${pitcherId}: ${err.message}`);
+    }
+
+    await new Promise(r => setTimeout(r, 800));
+  }
+
+  console.log(`  ✓ snapshotPitcherSavant  date=${date}  fetched=${fetched}  skipped=${skipped}`);
+}
+
+async function snapshotNrfiForSlate(date = todayHonolulu()) {
+  if (!isConnected()) return;
+  console.log(`  → Job: snapshotNrfiForSlate  date=${date}`);
+  await ensurePhaseOneTables();
+
+  const result = await query(
+    "SELECT games FROM schedule_snapshots WHERE slate_date = $1",
+    [date]
+  );
+  const games = result?.rows?.[0]?.games ?? [];
+
+  if (!games.length) {
+    console.log(`  · snapshotNrfiForSlate: no games found for ${date}`);
+    return;
+  }
+
+  const { getNrfiForGame } = require("../routes/nrfi");
+
+  let saved = 0;
+  let skipped = 0;
+
+  for (const game of games) {
+    const gamePk = game.gamePk ?? game.id;
+    if (!gamePk) continue;
+
+    try {
+      const existing = await query(
+        "SELECT 1 FROM nrfi_snapshots WHERE game_pk = $1 AND slate_date = $2",
+        [gamePk, date]
+      );
+      if (existing?.rows?.length) {
+        skipped++;
+        continue;
+      }
+    } catch (err) {
+      console.warn(`  ⚠ snapshotNrfiForSlate: DB check failed for ${gamePk}: ${err.message}`);
+    }
+
+    try {
+      const nrfi = await getNrfiForGame(gamePk);
+      if (!nrfi) {
+        console.warn(`  ⚠ snapshotNrfiForSlate: no result for gamePk=${gamePk}`);
+        continue;
+      }
+
+      await query(
+        `INSERT INTO nrfi_snapshots (game_pk, slate_date, fetched_at, data)
+         VALUES ($1, $2, NOW(), $3)
+         ON CONFLICT (game_pk, slate_date) DO UPDATE
+           SET fetched_at = NOW(), data = $3`,
+        [gamePk, date, JSON.stringify(nrfi)]
+      );
+      saved++;
+    } catch (err) {
+      console.warn(`  ⚠ snapshotNrfiForSlate: failed for gamePk=${gamePk}: ${err.message}`);
+    }
+
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  console.log(`  ✓ snapshotNrfiForSlate  date=${date}  saved=${saved}  skipped=${skipped}`);
+}
+
 function ipStringToOuts(ipValue) {
   if (ipValue == null) return 0;
   const [wholeStr, fracStr = "0"] = String(ipValue).split(".");
@@ -897,6 +1119,8 @@ module.exports = {
   pollPlayerProps,
   snapshotPitcherGamelogs,
   snapshotBatterGamelogs,
+  snapshotPitcherSavant,
+  snapshotNrfiForSlate,
   runScoutEvaluation,
   todayHonolulu,
 };

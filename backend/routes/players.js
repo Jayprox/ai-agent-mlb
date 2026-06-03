@@ -77,12 +77,34 @@ router.get("/:playerId/stats", async (req, res) => {
   const group        = req.query.group ?? "hitting";
   const cacheKey     = `player:${playerId}:${group}`;
 
+  // 1. In-memory cache
   const cached = cache.get(cacheKey);
   if (cached) {
     res.setHeader("X-Cache", "HIT");
     return res.json(cached);
   }
 
+  // 2. DB snapshot (today's pre-fetched stats from snapshotPitcherGamelogs job)
+  if (db.isConnected()) {
+    try {
+      const today = todayHonolulu();
+      const snap = await db.query(
+        `SELECT data FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = $2 AND slate_date = $3`,
+        [parseInt(playerId, 10), `season:${group}`, today]
+      );
+      if (snap?.rows?.[0]?.data) {
+        const result = snap.rows[0].data;
+        cache.set(cacheKey, result, 6 * 60 * 60 * 1000);
+        res.setHeader("X-Cache", "DB-HIT");
+        return res.json(result);
+      }
+    } catch (dbErr) {
+      console.warn(`  ⚠ player stats DB read failed for ${playerId}: ${dbErr.message}`);
+    }
+  }
+
+  // 3. Live MLB API fallback (only fires if snapshot is missing)
   try {
     // Fetch person info + season stats in parallel
     const [personRes, statsRes] = await Promise.all([

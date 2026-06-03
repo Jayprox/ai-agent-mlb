@@ -365,25 +365,50 @@ The `books` object enables cross-book line comparison. Sharp books (DK, FD) set 
 ---
 
 ### `GET /api/weather`
-Current weather for today's MLB stadium locations via Open-Meteo. Cached **1 hour** server-side.
+Current weather for a single stadium via Open-Meteo. Cached **1 hour** server-side.
+
+Query params: `lat`, `lon`, `tz`, `hour`, `key` (cache key, e.g. stadium name).
+
+**Response:** `{ temp, windspeed, winddirection, weathercode, precipitation_probability, relativehumidity, fetchedAt, cached }`
+
+---
+
+### `POST /api/weather/batch`
+Batch weather fetch for multiple games in a single call. Used by the iOS app instead of per-game requests. Cached **1 hour** per stadium server-side.
+
+**Request body:**
+```json
+[
+  { "gamePk": 716463, "lat": 39.9061, "lon": -75.1665, "tz": "America/New_York", "hour": 19, "key": "Citizens Bank Park" }
+]
+```
+
+**Response:** `{ [gamePk]: { temp, windspeed, winddirection, weathercode, precipitation_probability, relativehumidity, fetchedAt } }`
+
+Dome stadiums should be excluded from the request body — the mobile client sets a hardcoded dome result for them.
+
+---
+
+### `GET /api/slate-bundle`
+**Mobile-optimised aggregation endpoint.** Returns schedule + odds + per-game NRFI + per-game weather in a single response, replacing ~15–30 individual requests per session on a full slate.
+
+Query params: `date` (YYYY-MM-DD, defaults to today in Honolulu time).
 
 **Response:**
 ```json
 {
-  "stadiums": [
-    {
-      "gamePk": 716463,
-      "stadium": "Citizens Bank Park",
-      "city": "Philadelphia",
-      "temp": 72,
-      "windSpeed": 9,
-      "windDir": "OUT to RF",
-      "condition": "Partly Cloudy",
-      "humidity": 58
-    }
-  ]
+  "schedule":   [ /* same shape as GET /api/schedule */ ],
+  "oddsMap":    { "Away|Home": { /* same shape as GET /api/odds map entries */ } },
+  "nrfiMap":    { "[gamePk]": { "awayFirst": {}, "homeFirst": {}, "lean": "NRFI", "confidence": 64 } },
+  "weatherMap": { "[gamePk]": { "temp": 72, "windspeed": 9, "winddirection": 220, "weathercode": 2, "precipitation_probability": 5, "relativehumidity": 58 } },
+  "fetchedAt":  "2026-05-19T18:00:00.000Z"
 }
 ```
+
+- `oddsMap` is keyed by `"Away|Home"` team name string (same format as `GET /api/odds`).
+- Dome stadium games have `weatherMap[gamePk] = null` — client applies its own dome result.
+- Bundle TTL: **5 minutes**. Each sub-component uses its own cache, so upstream calls only fire on individual cache misses.
+- Any component failure (odds API down, weather unreachable) is non-fatal — that key returns `null` in the response.
 
 ---
 
@@ -505,6 +530,39 @@ Full-slate AI analysis card for today's MLB games. Uses Claude Sonnet to surface
 
 > Analysis rules applied silently: min 2 independent signals, unconfirmed lineup lowers batter prop confidence, missing umpire lowers K prop confidence, avgIP < 5.0 blocks K overs, bad lines noted in PLAYABILITY only.
 
+### `GET /api/ai-board/edges`
+Returns today's pre-scored Predict candidates written by the daily AI snapshot job. Reading this endpoint **never** triggers an Anthropic call — all scoring happened server-side at 10 AM HST and again ~95 min before first pitch.
+
+**Query params:**
+- `date` (optional, `YYYY-MM-DD`) — defaults to today Honolulu. Use for debugging prior runs.
+
+**Response:**
+```json
+{
+  "edges": [
+    {
+      "id": "corey-seager-k-2025-05-20",
+      "market": "k",
+      "playerName": "Corey Seager",
+      "team": "TEX",
+      "gameLabel": "TEX @ HOU",
+      "score": 72,
+      "simConfidence": 68,
+      "bookLine": 1.5,
+      "edge": 0.14,
+      "aiScore": 77,
+      "aiReason": "Corey Seager posts 34% K rate vs. RHP with two strikeouts per game in last five."
+    }
+  ],
+  "generatedAt": "2026-05-20T23:04:11Z",
+  "slateDate": "2026-05-20"
+}
+```
+
+If no snapshot has run yet today, returns `{ "edges": [], "generatedAt": null, "fallback": true }`.
+
+**Caching:** 5-minute in-memory TTL. Snapshot updates at most twice daily (10 AM HST + pregame).
+
 ---
 
 ## Recommended Research Flow
@@ -527,7 +585,10 @@ For a full pre-game picture, call endpoints in this order:
 13. GET /api/injuries                         → check for scratches
 14. GET /api/odds                             → current lines + totals
 15. GET /api/player-props/:gamePk?eventId=... → prop lines (incl. per-book for LINE INTELLIGENCE)
-16. GET /api/weather                          → stadium weather conditions
+16. GET /api/weather                          → single-stadium weather (per-game)
+    POST /api/weather/batch                   → batch weather for all non-dome games at once
 17. POST /api/props/:gamePk  { context }      → per-game AI picks with reasoning
 18. GET /api/daily-card                       → full-slate AI card (best 2–3 plays, all games)
+19. GET /api/slate-bundle                     → mobile bundle: schedule + oddsMap + nrfiMap + weatherMap in one call
+20. GET /api/ai-board/edges                   → pre-scored Predict candidates (daily snapshot, no Anthropic call on read)
 ```

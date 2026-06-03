@@ -1,4 +1,6 @@
 require("dotenv").config();
+const { bootstrapDatabaseEnv } = require("./lib/bootstrapEnv");
+bootstrapDatabaseEnv();
 const express = require("express");
 const cors    = require("cors");
 const path    = require("path");
@@ -58,7 +60,9 @@ app.use("/api/hr-scout", require("./routes/hrScout"));
 app.use("/api/chat", require("./routes/chat"));
 app.use("/api/advisor", require("./routes/advisor"));
 app.use("/api/model", require("./routes/modelF5"));
+app.use("/api/board", require("./routes/boardDailySnapshot"));
 app.use("/api/board-snapshot", require("./routes/boardSnapshot"));
+app.use("/api/slate-bundle",  require("./routes/slateBundle"));  // Mobile: schedule + odds + nrfi + weather in one call
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {
@@ -124,6 +128,23 @@ app.get("/api/admin/jobs/resolve-lab-calibration", async (req, res) => {
     return res.json({ ok: true, ...result });
   } catch (err) {
     return res.status(500).json({ error: "resolve-lab-calibration failed", detail: err.message });
+  }
+});
+
+app.get("/api/admin/jobs/midnight-slate", async (req, res) => {
+  if (req.headers["x-admin-secret"] !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    const date = req.query.date ?? undefined;
+    const skipAi = req.query.skipAi === "true" || req.query.skipAi === "1";
+    const result = await require("./jobs/runNewSlateDay").runNewSlateDay({
+      date,
+      skipAi,
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ error: "midnight-slate failed", detail: err.message });
   }
 });
 

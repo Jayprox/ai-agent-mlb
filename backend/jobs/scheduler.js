@@ -2,7 +2,7 @@ const cron = require("node-cron");
 const { query, isConnected } = require("../services/db");
 const {
   snapshotSlate, snapshotOdds, snapshotBullpen,
-  snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, snapshotPitcherGamelogs, snapshotBatterGamelogs, runScoutEvaluation, todayHonolulu,
+  snapshotLinescore, snapshotUmpires, pollSchedule, pollInjuries, pollPlayerProps, snapshotPitcherGamelogs, snapshotBatterGamelogs, runScoutEvaluation, todayHonolulu, snapshotPitcherSavant, snapshotNrfiForSlate,
 } = require("./snapshotJobs");
 const { gradePendingPicks } = require("./gradePicksJob");
 const { resolveCardSnapshots } = require("./resolveCardSnapshotsJob");
@@ -10,8 +10,12 @@ const { resolveLabCalibration } = require("./resolveLabCalibrationJob");
 const { refreshUmpireData } = require("./refreshUmpireDataJob");
 const { warmCache } = require("./warmCache");
 const { regenerateDailyCard } = require("../routes/dailyCard");
+const { generateDailyAiSnapshot } = require("./dailyAiSnapshot");
+const { runNewSlateDay } = require("./runNewSlateDay");
 
 let _pregameRan = { date: null };
+let _aiSnapshotRan = { date: null };
+let _nrfiSnapshotRan = { date: null };
 
 async function getTodayGames() {
   if (!isConnected()) return [];
@@ -49,6 +53,15 @@ async function getInProgressGamePks() {
 function startScheduler() {
   console.log("  ✓ Job scheduler started");
 
+  // Midnight slate rollover — 12:05 AM Honolulu (Wave 1: facts + early board snapshot)
+  cron.schedule("5 0 * * *", async () => {
+    try {
+      await runNewSlateDay();
+    } catch (err) {
+      console.warn(`Midnight slate rollover failed: ${err.message}`);
+    }
+  }, { timezone: "Pacific/Honolulu" });
+
   cron.schedule("0 8 * * *", () => snapshotSlate(), { timezone: "Pacific/Honolulu" });
   cron.schedule("*/30 * * * *", () => pollSchedule(), { timezone: "Pacific/Honolulu" });
   cron.schedule("*/30 * * * *", () => pollInjuries(), { timezone: "Pacific/Honolulu" });
@@ -71,6 +84,18 @@ function startScheduler() {
   cron.schedule("0 10,14 * * *", () => snapshotPitcherGamelogs(), { timezone: "Pacific/Honolulu" });
   // Pre-fetch batter gamelogs at 10 AM and 2 PM Honolulu
   cron.schedule("0 10,14 * * *", () => snapshotBatterGamelogs(), { timezone: "Pacific/Honolulu" });
+  // Pre-fetch pitcher Savant data (arsenal + splits) at 10 AM and 2 PM Honolulu
+  // Runs after snapshotPitcherGamelogs so probable pitchers are confirmed in the schedule snapshot
+  cron.schedule("30 10,14 * * *", () => snapshotPitcherSavant(), { timezone: "Pacific/Honolulu" });
+  // Pre-compute NRFI for today's slate at 10 AM Honolulu
+  // Runs after snapshotSlate (8 AM) so the schedule snapshot is warm
+  cron.schedule("0 10 * * *", async () => {
+    try {
+      await snapshotNrfiForSlate();
+    } catch (err) {
+      console.warn(`NRFI snapshot 10am run failed: ${err.message}`);
+    }
+  }, { timezone: "Pacific/Honolulu" });
 
   cron.schedule("0 9 * * *", async () => {
     try {
@@ -101,6 +126,67 @@ function startScheduler() {
       console.log(`  ✓ Daily Card pregame run completed for ${today}`);
     } catch (err) {
       console.warn(`Daily Card pregame run failed: ${err.message}`);
+    }
+  }, { timezone: "Pacific/Honolulu" });
+
+  // Daily AI snapshot — 10 AM Honolulu (~2h before typical first pitch / 6 PM ET)
+  cron.schedule("0 10 * * *", async () => {
+    try {
+      await generateDailyAiSnapshot("10am-scheduled");
+    } catch (err) {
+      console.warn(`Daily AI snapshot 10am run failed: ${err.message}`);
+    }
+  }, { timezone: "Pacific/Honolulu" });
+
+  // Daily AI snapshot — pregame re-run (~95 min before first pitch, once per day)
+  // Re-scores with final lineups; skips if already ran this window
+  cron.schedule("*/5 8-16 * * *", async () => {
+    const today = todayHonolulu();
+    if (_aiSnapshotRan.date === today) return;
+
+    try {
+      const games = await getTodayGames();
+      const earliestMs = games
+        .map((g) => Date.parse(g.gameTime))
+        .filter((ts) => Number.isFinite(ts))
+        .sort((a, b) => a - b)[0];
+
+      if (!earliestMs) return;
+
+      const triggerAt = earliestMs - (95 * 60 * 1000);
+      if (Date.now() < triggerAt) return;
+
+      await generateDailyAiSnapshot("pregame");
+      _aiSnapshotRan.date = today;
+      console.log(`  ✓ Daily AI snapshot pregame run completed for ${today}`);
+    } catch (err) {
+      console.warn(`Daily AI snapshot pregame run failed: ${err.message}`);
+    }
+  }, { timezone: "Pacific/Honolulu" });
+
+  // NRFI snapshot — pregame re-run (~95 min before first pitch, once per day)
+  // Re-computes with confirmed lineups and any SP changes
+  cron.schedule("*/5 8-16 * * *", async () => {
+    const today = todayHonolulu();
+    if (_nrfiSnapshotRan.date === today) return;
+
+    try {
+      const games = await getTodayGames();
+      const earliestMs = games
+        .map((g) => Date.parse(g.gameTime))
+        .filter((ts) => Number.isFinite(ts))
+        .sort((a, b) => a - b)[0];
+
+      if (!earliestMs) return;
+
+      const triggerAt = earliestMs - (95 * 60 * 1000);
+      if (Date.now() < triggerAt) return;
+
+      await snapshotNrfiForSlate();
+      _nrfiSnapshotRan.date = today;
+      console.log(`  ✓ NRFI snapshot pregame run completed for ${today}`);
+    } catch (err) {
+      console.warn(`NRFI snapshot pregame run failed: ${err.message}`);
     }
   }, { timezone: "Pacific/Honolulu" });
 
