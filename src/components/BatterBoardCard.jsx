@@ -1,6 +1,6 @@
 // src/components/BatterBoardCard.jsx
 import { Card, RankScoreColumn, GameStatusBadge } from "./shared.jsx";
-import { resultBorderStyle, formatLocalTime } from "../utils.js";
+import { resultBorderStyle, formatLocalTime, useLongPress } from "../utils.js";
 
 const BOOK_COLORS = {
   DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa", BOV: "#f87171",
@@ -10,8 +10,9 @@ export default function BatterBoardCard({
   c, rank, boardTab, sc,
   boardGameStatus, todayResult, evEdge,
   summaryText, isPremium, preferredBook,
-  onCardClick,
+  onCardClick, onLongPress, isLogged,
 }) {
+  const longPressHandlers = useLongPress(onLongPress ?? (() => {}));
   const l5dots = Array.from({ length: 5 }, (_, j) => c.hitRate[j] ?? null);
   const isHrBoard = boardTab === "hr";
   const hasResult   = todayResult && todayResult.ab > 0;
@@ -25,7 +26,19 @@ export default function BatterBoardCard({
   );
 
   return (
-    <Card style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={onCardClick}>
+    <Card
+      style={{ position: "relative", marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }}
+      onClick={onCardClick}
+      {...longPressHandlers}
+    >
+      {isLogged && (
+        <div style={{
+          position: "absolute", top: 6, right: 8,
+          fontSize: 9, color: "#3b82f6", fontWeight: 700,
+        }}>
+          ✓ logged
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         {/* Rank */}
         <RankScoreColumn rank={rank} score={c.score} scoreColor={sc} simConfidence={c.simConfidence} />

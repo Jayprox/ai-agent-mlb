@@ -1,3 +1,5 @@
+import * as React from "react";
+
 export const mlToImplied = (ml) => {
   const n = parseInt(ml);
   if (isNaN(n)) return 0.5;
@@ -24,7 +26,11 @@ export const summarizeOutcomes = (items, outcomeFn) => {
   if (!items.length) return null;
   const resolved = items.map(outcomeFn).filter(v => v !== null);
   if (!resolved.length) return null;
-  return { hits: resolved.filter(Boolean).length, total: items.length };
+  return {
+    hits: resolved.filter(Boolean).length,
+    total: items.length,
+    resolved: resolved.length,
+  };
 };
 
 export const normalizeScratchName = (name) =>
@@ -59,4 +65,32 @@ export function kellyFraction(modelProb, americanOdds) {
   const q = 1 - modelProb;
   const f = (modelProb * b - q) / b;
   return Math.min(0.30, Math.max(0, f));
+}
+
+export function useLongPress(callback, ms = 500) {
+  const timerRef = React.useRef(null);
+
+  const start = React.useCallback((e) => {
+    e.preventDefault();
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      callback();
+    }, ms);
+  }, [callback, ms]);
+
+  const cancel = React.useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  return {
+    onMouseDown: start,
+    onMouseUp: cancel,
+    onMouseLeave: cancel,
+    onTouchStart: start,
+    onTouchEnd: cancel,
+    onTouchCancel: cancel,
+  };
 }

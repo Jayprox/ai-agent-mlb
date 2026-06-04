@@ -68,6 +68,18 @@ async function ensurePhaseOneTables() {
       PRIMARY KEY (game_pk, snapshot_date)
     )
   `);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS player_id TEXT`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS market TEXT`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS side TEXT`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS book_line NUMERIC`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS odds INTEGER`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS units NUMERIC NOT NULL DEFAULT 1.0`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS slate_date DATE`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS voided BOOLEAN NOT NULL DEFAULT FALSE`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS source TEXT`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS game_label TEXT`);
+  await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS player_name TEXT`);
   await query(`
     CREATE TABLE IF NOT EXISTS scout_picks_snapshots (
       slate_date DATE PRIMARY KEY,

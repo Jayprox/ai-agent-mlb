@@ -16,6 +16,7 @@ import {
   vigStrip,
   propEdgeData,
   kellyFraction,
+  useLongPress,
 } from "./src/utils.js";
 import { hrBoardScore, hitBoardScore } from "./src/scoring/batter.js";
 import { LeanBadge, TierBadge, GameStatusBadge, RankScoreColumn, Card, Divider } from "./src/components/shared.jsx";
@@ -345,10 +346,10 @@ const IS_SAVANT_SANDBOX = IS_STATS_SANDBOX;
 // preventing a 401 race on page reload that would log the user out.
 let _authToken = (() => { try { return localStorage.getItem("propscout_token") || null; } catch { return null; } })();
 
-const apiFetch = async (path) => {
-  const headers = {};
+const apiFetch = async (path, init = {}) => {
+  const headers = { ...(init.headers ?? {}) };
   if (_authToken) headers["Authorization"] = `Bearer ${_authToken}`;
-  const res = await fetch(`${API_BASE}${path}`, { headers });
+  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (res.status === 401) {
     _authToken = null;
     window.dispatchEvent(new Event("propscout:unauthorized"));
@@ -1588,6 +1589,191 @@ const ConfBar = ({ pct, positive }) => {
   );
 };
 
+const PROP_MARKET_MAP = {
+  pitcher_strikeouts: "k",
+  pitcher_outs: "outs",
+  batter_hits: "hits",
+  batter_home_runs: "hr",
+  batter_total_bases: "hits",
+};
+
+const MARKET_LABELS = { k: "K", outs: "Outs", hr: "HR", hits: "Hits" };
+const MARKET_COLORS = { k: "#38bdf8", outs: "#34d399", hr: "#fbbf24", hits: "#f87171" };
+
+const PropsSportsbookRow = ({
+  p,
+  i,
+  mKey,
+  activeBooks,
+  allActiveBooks,
+  expandedPropRow,
+  setExpandedPropRow,
+  lineupScratchNames,
+  BOOK_COLORS,
+  currentUser,
+  loggedPickIds,
+  selectedGame,
+  slateDate,
+  openAddPickSheet,
+}) => {
+  const books = p.books ?? {};
+  const rowKey = `${mKey}:${p.player}`;
+  const isExpanded = expandedPropRow === rowKey;
+  const scratchedRow = lineupScratchNames.has(normalizeScratchName(p.player));
+  const availLines = allActiveBooks.map((bk) => books[bk]?.line).filter(Boolean);
+  const uniqueLines = [...new Set(availLines)];
+  const hasDiscrepancy = uniqueLines.length > 1;
+  const lowestLine = hasDiscrepancy ? Math.min(...uniqueLines) : null;
+  const SHARP_BOOKS = ["DK", "FD"];
+  const SQUARE_BOOKS = ["CZR", "MGM", "BOV"];
+  const sharpLines = SHARP_BOOKS.map((bk) => books[bk]?.line).filter(Boolean);
+  const squareLines = SQUARE_BOOKS.map((bk) => books[bk]?.line).filter(Boolean);
+  const sharpAvg = sharpLines.length ? sharpLines.reduce((s, v) => s + v, 0) / sharpLines.length : null;
+  const squareAvg = squareLines.length ? squareLines.reduce((s, v) => s + v, 0) / squareLines.length : null;
+  const lineGap = (sharpAvg !== null && squareAvg !== null) ? (squareAvg - sharpAvg) : null;
+  const hasEdge = lineGap !== null && lineGap >= 0.5;
+  const rawConfidencePct = hasEdge
+    ? Math.min(80, Math.round(55 + (lineGap / 0.5) * 10))
+    : null;
+  const confidencePct = rawConfidencePct == null
+    ? (scratchedRow ? 40 : null)
+    : Math.max(40, rawConfidencePct - (scratchedRow ? 20 : 0));
+  const confidenceLabel = confidencePct !== null
+    ? (scratchedRow ? "SCRATCHED" : confidencePct >= 75 ? "HIGH" : confidencePct >= 65 ? "MOD" : "MILD")
+    : null;
+  const confidenceColor = confidenceLabel === "SCRATCHED" ? "#ef4444"
+    : confidenceLabel === "HIGH" ? "#22c55e"
+    : confidenceLabel === "MOD" ? "#fbbf24"
+    : confidenceLabel === "MILD" ? "#94a3b8"
+    : "#fbbf24";
+  const bestOverOdds = allActiveBooks
+    .map((bk) => books[bk]?.overOdds)
+    .filter(Boolean)
+    .sort((a, b) => parseInt(b, 10) - parseInt(a, 10))[0] ?? null;
+  const propMarket = PROP_MARKET_MAP[mKey] ?? null;
+  const propPlayerId = p.playerId ? String(p.playerId) : p.player;
+  const propBookLine = p.books?.DK?.line ?? p.books?.FD?.line ?? null;
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+  const propPickId = `${currentUser?.userId ?? currentUser?.username}:${propPlayerId}:${propMarket}:${today}`;
+  const isPropLogged = !!propMarket && loggedPickIds.has(propPickId);
+  const propGameLabel = selectedGame
+    ? `${selectedGame.away?.abbr ?? selectedGame.away?.name ?? "?"} @ ${selectedGame.home?.abbr ?? selectedGame.home?.name ?? "?"}`
+    : "";
+  const longPressHandlers = useLongPress(() => {
+    if (!propMarket || !currentUser) return;
+    if (slateDate && slateDate < today) return;
+    openAddPickSheet({
+      playerId: propPlayerId,
+      playerName: p.player,
+      gameLabel: propGameLabel,
+      market: propMarket,
+      side: "over",
+      bookLine: propBookLine != null && Number.isFinite(Number(propBookLine)) ? Number(propBookLine) : null,
+      source: "props",
+    });
+  });
+  const fmtO = (s) => s ?? "—";
+
+  return (
+    <div key={i}>
+      <div
+        onClick={() => setExpandedPropRow(isExpanded ? null : rowKey)}
+        {...longPressHandlers}
+        style={{ display: "grid", gridTemplateColumns: `1fr ${activeBooks.map(() => "52px").join(" ")}`, gap: 0, padding: "7px 10px", cursor: "pointer", background: isExpanded ? "rgba(255,255,255,0.03)" : "transparent", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none", alignItems: "center" }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#e5e7eb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.player}</span>
+            {isPropLogged && (
+              <span style={{ fontSize: 8, fontWeight: 800, color: "#3b82f6", background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.35)", borderRadius: 4, padding: "1px 5px", flexShrink: 0 }}>
+                ✓
+              </span>
+            )}
+            {scratchedRow && (
+              <span style={{ fontSize: 7, fontWeight: 800, color: "#fca5a5", background: "rgba(239,68,68,0.16)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 3, padding: "1px 4px", flexShrink: 0 }}>
+                SCRATCHED
+              </span>
+            )}
+            {hasDiscrepancy && (
+              <span style={{ fontSize: 7, fontWeight: 800, color: confidenceColor, background: `${confidenceColor}18`, border: `1px solid ${confidenceColor}44`, borderRadius: 3, padding: "1px 4px", flexShrink: 0 }}>
+                {hasEdge ? `SPLIT ${confidencePct}%` : "SPLIT"}
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>
+            best O {bestOverOdds ?? "—"}  ·  {isExpanded ? "▲" : "▼"}
+          </div>
+        </div>
+
+        {activeBooks.map((bk) => {
+          const b = books[bk];
+          const isLow = hasDiscrepancy && b?.line === lowestLine;
+          const bkColor = BOOK_COLORS[bk];
+          return (
+            <div key={bk} style={{ textAlign: "center" }}>
+              {b ? (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: isLow ? bkColor : "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{b.line}</div>
+                  <div style={{ fontSize: 8, color: "#22c55e", fontFamily: "monospace" }}>{b.overOdds ?? "—"}</div>
+                </>
+              ) : (
+                <div style={{ fontSize: 9, color: "#2d3748" }}>—</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {isExpanded && (
+        <div style={{ background: "#0a0b12", borderTop: "1px solid #1a1f2e", padding: "10px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${activeBooks.length}, 1fr)`, gap: 6, marginBottom: 10 }}>
+            {activeBooks.map((bk) => {
+              const b = books[bk];
+              const isLow = hasDiscrepancy && b?.line === lowestLine;
+              const bkColor = BOOK_COLORS[bk];
+              return (
+                <div key={bk} style={{ background: isLow ? `${bkColor}15` : "#161827", border: `1px solid ${isLow ? `${bkColor}55` : "#1f2437"}`, borderRadius: 8, padding: "8px 6px", textAlign: "center" }}>
+                  <div style={{ fontSize: 8, fontWeight: 700, color: bkColor, marginBottom: 4 }}>{bk}</div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: isLow ? bkColor : "#f9fafb", fontFamily: "monospace", lineHeight: 1, marginBottom: 4 }}>{b?.line ?? "—"}</div>
+                  <div style={{ fontSize: 9, fontFamily: "monospace" }}>
+                    <span style={{ color: "#22c55e" }}>{fmtO(b?.overOdds)}</span>
+                    <span style={{ color: "#374151" }}> / </span>
+                    <span style={{ color: "#ef4444" }}>{fmtO(b?.underOdds)}</span>
+                  </div>
+                  {isLow && <div style={{ fontSize: 7, color: bkColor, marginTop: 3, fontWeight: 700 }}>BEST LINE</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          {hasEdge && (
+            <div style={{ background: `${confidenceColor}0d`, border: `1px solid ${confidenceColor}33`, borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+                <span style={{ fontSize: 9, fontWeight: 800, color: confidenceColor, letterSpacing: "0.06em" }}>LINE INTELLIGENCE</span>
+                <span style={{ fontSize: 9, fontWeight: 700, color: confidenceColor, background: `${confidenceColor}22`, border: `1px solid ${confidenceColor}55`, borderRadius: 3, padding: "1px 5px" }}>{confidenceLabel} {confidencePct}%</span>
+              </div>
+              <div style={{ fontSize: 9, color: "#9ca3af", lineHeight: 1.5 }}>
+                <span style={{ color: "#38bdf8", fontWeight: 700 }}>Sharp books</span>
+                <span> (DK/FD) have this at </span>
+                <span style={{ color: "#f9fafb", fontWeight: 700 }}>{sharpAvg.toFixed(1)}</span>
+                <span>, while </span>
+                <span style={{ color: "#a78bfa", fontWeight: 700 }}>square books</span>
+                <span> (CZR/MGM) are at </span>
+                <span style={{ color: "#f9fafb", fontWeight: 700 }}>{squareAvg.toFixed(1)}</span>.
+                {lineGap >= 0.5 && (
+                  <span style={{ display: "block", marginTop: 3, color: confidenceColor }}>
+                    Lower sharp-book line suggests the OVER is being priced more aggressively by sharper markets.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const FatigueChip = ({ level }) => {
   const map = { HIGH: ["#ef4444", "rgba(239,68,68,0.15)"], MODERATE: ["#f59e0b", "rgba(245,158,11,0.12)"], FRESH: ["#22c55e", "rgba(34,197,94,0.12)"] };
   const [color, bg] = map[level] ?? ["#9ca3af", "#1e2030"];
@@ -2603,6 +2789,10 @@ export default function App() {
   const isScoutUser = !!currentUser && SCOUT_ALLOWLIST.includes(scoutIdentity);
   const CHAT_ALLOWLIST = ["leadoffkaiba"];
   const isChatUser = !!currentUser && CHAT_ALLOWLIST.includes((currentUser?.username ?? currentUser?.email ?? "").toLowerCase());
+  const showToast = useCallback((msg) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg(null), 2500);
+  }, []);
 
   const [preferredBook,    setPreferredBook]    = useState("DK"); // "DK"|"FD"|"CZR"|"MGM"|"BOV" — DK is app default
   const [propsBookFilter,  setPropsBookFilter]  = useState("DK");
@@ -2613,6 +2803,16 @@ export default function App() {
   const [view, setView] = useState("slate"); // "slate" | "game" | "model" | "board" | "scout" | "chat" | "settings"
   const [showHelp, setShowHelp] = useState(false);
   const [whyModal, setWhyModal] = useState(null); // { c, type: boardTab, rank }
+  const [addPickSheet, setAddPickSheet] = useState(null);
+  const [addPickOdds, setAddPickOdds] = useState("");
+  const [addPickUnits, setAddPickUnits] = useState("1");
+  const [loggedPickIds, setLoggedPickIds] = useState(new Set());
+  const [toastMsg, setToastMsg] = useState(null);
+  const [picksViewData, setPicksViewData] = useState(null);
+  const [picksViewStats, setPicksViewStats] = useState(null);
+  const [picksViewLoading, setPicksViewLoading] = useState(false);
+  const [picksViewDays, setPicksViewDays] = useState(0);
+  const [picksShowLegacy, setPicksShowLegacy] = useState(false);
   const [collapsedMarkets, setCollapsedMarkets] = useState({
     pitcher_strikeouts: true,
     batter_home_runs: true,
@@ -2657,6 +2857,7 @@ export default function App() {
   /** Snapshot rows for a market (may be []). Null only when no shared snapshot for today. */
   const getBoardMarketSnapshot = useCallback((market) => {
     if (!boardSnapshotCoversToday()) return null;
+    if (!Object.prototype.hasOwnProperty.call(boardDailySnapshot ?? {}, market)) return null;
     const snapshotCards = boardDailySnapshot[market];
     return Array.isArray(snapshotCards) ? snapshotCards : [];
   }, [boardDailySnapshot, boardSnapshotCoversToday]);
@@ -2802,6 +3003,118 @@ export default function App() {
     });
     return result;
   }, [livePitcherStats, liveGameLog]);
+
+  useEffect(() => {
+    if (!currentUser?.userId) {
+      setLoggedPickIds(new Set());
+      return;
+    }
+    apiFetch("/api/picks")
+      .then((data) => {
+        const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+        const todayIds = new Set(
+          (data?.picks ?? [])
+            .filter((p) => p.slateDate === today)
+            .map((p) => p.id)
+        );
+        setLoggedPickIds(todayIds);
+      })
+      .catch(() => {});
+  }, [currentUser]);
+
+  const openAddPickSheet = useCallback((payload) => {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    if (!currentUser || (slateDate && slateDate < today)) return;
+    const pickId = `${currentUser?.userId ?? currentUser?.username}:${payload.playerId}:${payload.market}:${today}`;
+    if (loggedPickIds.has(pickId)) {
+      showToast("Already in your log");
+      return;
+    }
+    setAddPickOdds("");
+    setAddPickUnits("1");
+    setAddPickSheet({ ...payload, slateDate: today });
+  }, [currentUser, slateDate, loggedPickIds, showToast]);
+
+  const submitAddPick = useCallback(async () => {
+    if (!addPickSheet || !currentUser?.userId) return;
+
+    const oddsVal = addPickOdds.trim() !== "" ? parseInt(addPickOdds.trim(), 10) : null;
+    const unitsVal = addPickUnits.trim() !== "" ? parseFloat(addPickUnits.trim()) : 1.0;
+
+    if (oddsVal !== null && !Number.isFinite(oddsVal)) {
+      showToast("Invalid odds — use e.g. -125 or +110");
+      return;
+    }
+    if (!Number.isFinite(unitsVal) || unitsVal <= 0) {
+      showToast("Invalid units");
+      return;
+    }
+
+    try {
+      const res = await apiMutate("/api/picks", "POST", {
+        playerId: addPickSheet.playerId,
+        playerName: addPickSheet.playerName,
+        gameLabel: addPickSheet.gameLabel,
+        market: addPickSheet.market,
+        side: addPickSheet.side,
+        bookLine: addPickSheet.bookLine,
+        odds: oddsVal,
+        units: unitsVal,
+        slateDate: addPickSheet.slateDate,
+        source: addPickSheet.source ?? "board",
+      });
+
+      if (res?.error === "already_logged") {
+        showToast("Already in your log");
+      } else if (res?.ok) {
+        setLoggedPickIds((prev) => new Set([...prev, res.id]));
+        showToast("Pick logged ✓");
+      }
+    } catch (err) {
+      if ((err?.message ?? "").includes("already_logged")) showToast("Already in your log");
+      else showToast("Could not save pick — try again");
+    } finally {
+      setAddPickSheet(null);
+    }
+  }, [addPickSheet, addPickOdds, addPickUnits, currentUser, showToast]);
+
+  useEffect(() => {
+    if (view !== "picks" || !currentUser) return;
+    setPicksViewLoading(true);
+
+    Promise.all([
+      apiFetch(`/api/picks?days=${picksViewDays}`),
+      apiFetch(`/api/picks/stats?days=${picksViewDays}`),
+    ])
+      .then(([picksRes, statsRes]) => {
+        setPicksViewData(picksRes ?? { picks: [] });
+        setPicksViewStats(statsRes ?? null);
+      })
+      .catch(() => {
+        setPicksViewData({ picks: [] });
+        setPicksViewStats(null);
+      })
+      .finally(() => setPicksViewLoading(false));
+  }, [view, currentUser, picksViewDays]);
+
+  const voidPick = useCallback(async (pickId) => {
+    try {
+      await apiFetch(`/api/picks/${pickId}/void`, { method: "PATCH" });
+      setPicksViewData((prev) => ({
+        picks: (prev?.picks ?? []).filter((p) => p.id !== pickId),
+      }));
+      setLoggedPickIds((prev) => {
+        const next = new Set(prev);
+        next.delete(pickId);
+        return next;
+      });
+      apiFetch(`/api/picks/stats?days=${picksViewDays}`)
+        .then((s) => setPicksViewStats(s))
+        .catch(() => {});
+    } catch (_err) {
+      showToast("Could not void pick — try again");
+    }
+  }, [picksViewDays, showToast]);
 
   // Fetch weather when a game card is opened
   useEffect(() => {
@@ -3867,12 +4180,16 @@ export default function App() {
       const linescoreFinished = ls && ls.inning === null && ((ls.awayScore ?? 0) > 0 || (ls.homeScore ?? 0) > 0);
       const isFinal = status === "Final" || status === "Game Over" || linescoreFinished;
       if (!isLive && !isFinal) return;
-      if (isFinal && boardBoxFetched.current.has(g.gamePk)) return; // don't re-fetch finals
+      const liveKey  = `live:${g.gamePk}`;
+      const finalKey = `final:${g.gamePk}`;
+      if (isLive && boardBoxFetched.current.has(liveKey)) return;
+      if (isFinal && boardBoxFetched.current.has(finalKey)) return;
       apiFetch(`/api/boxscore/${g.gamePk}`)
         .then(box => {
           if (!box?.batting) return;
           setLiveBoxscores(prev => ({ ...prev, [g.gamePk]: box }));
-          if (box?.isFinal) boardBoxFetched.current.add(g.gamePk);
+          if (box?.isFinal) boardBoxFetched.current.add(finalKey);
+          else if (isLive) boardBoxFetched.current.add(liveKey);
           const resultLive = !box?.isFinal && isLive;
           const results = {};
           ["away", "home"].forEach(side => {
@@ -5183,6 +5500,25 @@ export default function App() {
                 }}
               >
                 ⚡ Predict
+              </button>
+            )}
+            {currentUser && (
+              <button
+                onClick={() => setView("picks")}
+                style={{
+                  background: view === "picks" ? "#3b82f6" : "#161827",
+                  border: `1px solid ${view === "picks" ? "#3b82f6" : "#1f2437"}`,
+                  borderRadius: 8,
+                  padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+                  fontSize: isNarrowPhone ? 9 : 10,
+                  color: view === "picks" ? "#fff" : "#9ca3af",
+                  fontFamily: "monospace",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  textTransform: "uppercase",
+                }}
+              >
+                📋 Picks
               </button>
             )}
           </div>
@@ -8417,8 +8753,6 @@ export default function App() {
                   batter_hits:        allProps.filter(p => p.market === "batter_hits"),
                 };
 
-                const fmtO = (s) => s ?? "—";
-
                 return (
                   <>
                     <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
@@ -8539,157 +8873,25 @@ export default function App() {
                                   </div>
 
                                   {/* Player rows */}
-                                  {rows.map((p, i) => {
-                                const books          = p.books ?? {};
-                                const rowKey         = `${mKey}:${p.player}`;
-                                const isExpanded     = expandedPropRow === rowKey;
-                                const scratchedRow   = lineupScratchNames.has(normalizeScratchName(p.player));
-
-                                // Line discrepancy detection
-                                const availLines     = allActiveBooks.map(bk => books[bk]?.line).filter(Boolean);
-                                const uniqueLines    = [...new Set(availLines)];
-                                const hasDiscrepancy = uniqueLines.length > 1;
-                                const lowestLine     = hasDiscrepancy ? Math.min(...uniqueLines) : null;
-
-                                // Sharp vs square book confidence signal
-                                // Sharp books (DK/FD) set tighter lines; when they're lower than square
-                                // books (CZR/MGM), it signals the market leans toward the OVER on that line
-                                const SHARP_BOOKS  = ["DK", "FD"];
-                                const SQUARE_BOOKS = ["CZR", "MGM", "BOV"];
-                                const sharpLines   = SHARP_BOOKS.map(bk => books[bk]?.line).filter(Boolean);
-                                const squareLines  = SQUARE_BOOKS.map(bk => books[bk]?.line).filter(Boolean);
-                                const sharpAvg     = sharpLines.length  ? sharpLines.reduce((s, v) => s + v, 0)  / sharpLines.length  : null;
-                                const squareAvg    = squareLines.length ? squareLines.reduce((s, v) => s + v, 0) / squareLines.length : null;
-                                const lineGap      = (sharpAvg !== null && squareAvg !== null) ? (squareAvg - sharpAvg) : null;
-                                // lineGap > 0 means sharp books are lower → over-edge signal
-                                const hasEdge      = lineGap !== null && lineGap >= 0.5;
-                                const rawConfidencePct = hasEdge
-                                  ? Math.min(80, Math.round(55 + (lineGap / 0.5) * 10))
-                                  : null;
-                                const confidencePct = rawConfidencePct == null
-                                  ? (scratchedRow ? 40 : null)
-                                  : Math.max(40, rawConfidencePct - (scratchedRow ? 20 : 0));
-                                const confidenceLabel = confidencePct !== null
-                                  ? (scratchedRow ? "SCRATCHED" : confidencePct >= 75 ? "HIGH" : confidencePct >= 65 ? "MOD" : "MILD")
-                                  : null;
-                                const confidenceColor = confidenceLabel === "SCRATCHED" ? "#ef4444"
-                                  : confidenceLabel === "HIGH" ? "#22c55e"
-                                  : confidenceLabel === "MOD"  ? "#fbbf24"
-                                  : confidenceLabel === "MILD" ? "#94a3b8"
-                                  : "#fbbf24";
-
-                                // Best over odds among all books
-                                const bestOverOdds = allActiveBooks
-                                  .map(bk => books[bk]?.overOdds)
-                                  .filter(Boolean)
-                                  .sort((a, b) => parseInt(b) - parseInt(a))[0] ?? null;
-
-                                return (
-                                  <div key={i}>
-                                    {/* ── Compact row (Option A) ── */}
-                                    <div
-                                      onClick={() => setExpandedPropRow(isExpanded ? null : rowKey)}
-                                      style={{ display: "grid", gridTemplateColumns: `1fr ${activeBooks.map(() => "52px").join(" ")}`, gap: 0, padding: "7px 10px", cursor: "pointer", background: isExpanded ? "rgba(255,255,255,0.03)" : "transparent", borderTop: i > 0 ? "1px solid rgba(255,255,255,0.04)" : "none", alignItems: "center" }}
-                                    >
-                                      {/* Player name */}
-                                      <div style={{ minWidth: 0 }}>
-                                        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                                          <span style={{ fontSize: 11, fontWeight: 600, color: "#e5e7eb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.player}</span>
-                                          {scratchedRow && (
-                                            <span style={{ fontSize: 7, fontWeight: 800, color: "#fca5a5", background: "rgba(239,68,68,0.16)", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 3, padding: "1px 4px", flexShrink: 0 }}>
-                                              SCRATCHED
-                                            </span>
-                                          )}
-                                          {hasDiscrepancy && (
-                                            <span style={{ fontSize: 7, fontWeight: 800, color: confidenceColor, background: `${confidenceColor}18`, border: `1px solid ${confidenceColor}44`, borderRadius: 3, padding: "1px 4px", flexShrink: 0 }}>
-                                              {hasEdge ? `SPLIT ${confidencePct}%` : "SPLIT"}
-                                            </span>
-                                          )}
-                                        </div>
-                                        <div style={{ fontSize: 8, color: "#4b5563", fontFamily: "monospace" }}>
-                                          best O {bestOverOdds ?? "—"}  ·  {isExpanded ? "▲" : "▼"}
-                                        </div>
-                                      </div>
-
-                                      {/* Per-book line cells */}
-                                      {activeBooks.map(bk => {
-                                        const b      = books[bk];
-                                        const isLow  = hasDiscrepancy && b?.line === lowestLine;
-                                        const bkColor = BOOK_COLORS[bk];
-                                        return (
-                                          <div key={bk} style={{ textAlign: "center" }}>
-                                            {b ? (
-                                              <>
-                                                <div style={{ fontSize: 12, fontWeight: 800, color: isLow ? bkColor : "#f9fafb", fontFamily: "monospace", lineHeight: 1 }}>{b.line}</div>
-                                                <div style={{ fontSize: 8, color: "#22c55e", fontFamily: "monospace" }}>{b.overOdds ?? "—"}</div>
-                                              </>
-                                            ) : (
-                                              <div style={{ fontSize: 9, color: "#2d3748" }}>—</div>
-                                            )}
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-
-                                    {/* ── Expanded detail (Option B) ── */}
-                                    {isExpanded && (
-                                      <div style={{ background: "#0a0b12", borderTop: "1px solid #1a1f2e", padding: "10px" }}>
-                                        {/* Full book comparison grid — only books with lines */}
-                                        <div style={{ display: "grid", gridTemplateColumns: `repeat(${activeBooks.length}, 1fr)`, gap: 6, marginBottom: 10 }}>
-                                          {activeBooks.map(bk => {
-                                            const b      = books[bk];
-                                            const isLow  = hasDiscrepancy && b?.line === lowestLine;
-                                            const bkColor = BOOK_COLORS[bk];
-                                            return (
-                                              <div key={bk} style={{ background: isLow ? `${bkColor}15` : "#161827", border: `1px solid ${isLow ? `${bkColor}55` : "#1f2437"}`, borderRadius: 8, padding: "8px 6px", textAlign: "center" }}>
-                                                <div style={{ fontSize: 8, fontWeight: 700, color: bkColor, marginBottom: 4 }}>{bk}</div>
-                                                <div style={{ fontSize: 14, fontWeight: 800, color: isLow ? bkColor : "#f9fafb", fontFamily: "monospace", lineHeight: 1, marginBottom: 4 }}>{b?.line ?? "—"}</div>
-                                                <div style={{ fontSize: 9, fontFamily: "monospace" }}>
-                                                  <span style={{ color: "#22c55e" }}>{fmtO(b?.overOdds)}</span>
-                                                  <span style={{ color: "#374151" }}> / </span>
-                                                  <span style={{ color: "#ef4444" }}>{fmtO(b?.underOdds)}</span>
-                                                </div>
-                                                {isLow && <div style={{ fontSize: 7, color: bkColor, marginTop: 3, fontWeight: 700 }}>BEST LINE</div>}
-                                              </div>
-                                            );
-                                          })}
-                                        </div>
-
-                                        {/* ── Line Intelligence panel (shown when sharp ≠ square) ── */}
-                                        {hasEdge && (
-                                          <div style={{ background: `${confidenceColor}0d`, border: `1px solid ${confidenceColor}33`, borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
-                                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
-                                              <span style={{ fontSize: 9, fontWeight: 800, color: confidenceColor, letterSpacing: "0.06em" }}>LINE INTELLIGENCE</span>
-                                              <span style={{ fontSize: 9, fontWeight: 700, color: confidenceColor, background: `${confidenceColor}22`, border: `1px solid ${confidenceColor}55`, borderRadius: 3, padding: "1px 5px" }}>{confidenceLabel} {confidencePct}%</span>
-                                            </div>
-                                            <div style={{ fontSize: 9, color: "#9ca3af", lineHeight: 1.5 }}>
-                                              <span style={{ color: "#38bdf8", fontWeight: 700 }}>Sharp books</span>
-                                              <span> (DK/FD) have this at </span>
-                                              <span style={{ color: "#f9fafb", fontWeight: 700 }}>{sharpAvg % 1 === 0 ? sharpAvg.toFixed(1) : sharpAvg.toFixed(1)}</span>
-                                              <span>, while </span>
-                                              <span style={{ color: "#a78bfa", fontWeight: 700 }}>square books</span>
-                                              <span> (CZR/MGM) are at </span>
-                                              <span style={{ color: "#f9fafb", fontWeight: 700 }}>{squareAvg.toFixed(1)}</span>
-                                              <span>.</span>
-                                              {lineGap >= 0.5 && (
-                                                <span style={{ display: "block", marginTop: 3, color: confidenceColor }}>
-                                                  A {lineGap.toFixed(1)}-point gap suggests market confidence on the OVER {sharpAvg.toFixed(1)}.
-                                                </span>
-                                              )}
-                                            </div>
-                                          </div>
-                                        )}
-
-                                        {scratchedRow && (
-                                          <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.24)", borderRadius: 8, padding: "8px 10px", marginBottom: 8, fontSize: 9, color: "#fca5a5", lineHeight: 1.5 }}>
-                                            Current confirmed lineup removed this batter. Confidence is reduced and this prop may no longer be actionable.
-                                          </div>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                                  })}
+                                  {rows.map((p, i) => (
+                                    <PropsSportsbookRow
+                                      key={`${mKey}:${p.player}:${i}`}
+                                      p={p}
+                                      i={i}
+                                      mKey={mKey}
+                                      activeBooks={activeBooks}
+                                      allActiveBooks={allActiveBooks}
+                                      expandedPropRow={expandedPropRow}
+                                      setExpandedPropRow={setExpandedPropRow}
+                                      lineupScratchNames={lineupScratchNames}
+                                      BOOK_COLORS={BOOK_COLORS}
+                                      currentUser={currentUser}
+                                      loggedPickIds={loggedPickIds}
+                                      selectedGame={game}
+                                      slateDate={slateDate}
+                                      openAddPickSheet={openAddPickSheet}
+                                    />
+                                  ))}
                                 </>
                               )}
                             </Card>
@@ -9210,16 +9412,17 @@ export default function App() {
 
           const snapshotPropCandidates = getBoardMarketSnapshot(boardTab);
           const snapshotGameCandidates = getBoardMarketSnapshot(gameSubTab);
-          const boardCandidatesByType = useSharedBoard ? {
-            hr:   getBoardMarketSnapshot("hr") ?? [],
-            hits: getBoardMarketSnapshot("hits") ?? [],
-            k:    getBoardMarketSnapshot("k") ?? [],
-            outs: getBoardMarketSnapshot("outs") ?? [],
-          } : {
+          const livePropBoardCandidatesByType = {
             hr:   computeBatterBoard("hr", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
             hits: computeBatterBoard("hits", activeSlate, liveLineups, liveWeather, livePlayerProps, liveHittingLog, liveStatSplits),
             k:    computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal),
             outs: computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal),
+          };
+          const boardCandidatesByType = {
+            hr:   useSharedBoard && snapshotPropCandidates !== null && boardTab === "hr"   ? snapshotPropCandidates : (useSharedBoard && getBoardMarketSnapshot("hr")   !== null ? getBoardMarketSnapshot("hr")   : livePropBoardCandidatesByType.hr),
+            hits: useSharedBoard && snapshotPropCandidates !== null && boardTab === "hits" ? snapshotPropCandidates : (useSharedBoard && getBoardMarketSnapshot("hits") !== null ? getBoardMarketSnapshot("hits") : livePropBoardCandidatesByType.hits),
+            k:    useSharedBoard && snapshotPropCandidates !== null && boardTab === "k"    ? snapshotPropCandidates : (useSharedBoard && getBoardMarketSnapshot("k")    !== null ? getBoardMarketSnapshot("k")    : livePropBoardCandidatesByType.k),
+            outs: useSharedBoard && snapshotPropCandidates !== null && boardTab === "outs" ? snapshotPropCandidates : (useSharedBoard && getBoardMarketSnapshot("outs") !== null ? getBoardMarketSnapshot("outs") : livePropBoardCandidatesByType.outs),
           };
           const allPropBoardCandidates = boardCandidatesByType[boardTab] ?? [];
           const liveBoardCandidates = allPropBoardCandidates.filter(c =>
@@ -9392,7 +9595,7 @@ export default function App() {
           // but swapped with locked snapshots once games go live/final.
           const gameBoardCandidates = (() => {
             if (!isGameBoard) return [];
-            if (useSharedBoard) return snapshotGameCandidates ?? [];
+            if (useSharedBoard && snapshotGameCandidates !== null) return snapshotGameCandidates;
             const live = computeGameBoard(
               gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires, liveLineups
             );
@@ -9414,15 +9617,36 @@ export default function App() {
           const boardScoreColor = (s) =>
             s >= 70 ? "#22c55e" : s >= 55 ? "#f59e0b" : s >= 40 ? "#ef4444" : "#6b7280";
 
+          const lookupBoardResult = (item) => {
+            // entityId is the plain player ID; item.id may be a composite string like "hr:592450:745461"
+            const rawId = item?.entityId ?? item?.id ?? item?.playerId;
+            if (rawId == null || rawId === "") return null;
+            const direct = liveBoardResults[rawId]
+              ?? liveBoardResults[String(rawId)]
+              ?? liveBoardResults[Number(rawId)]
+              ?? null;
+            if (direct) return direct;
+            // If id was composite (market:playerId:gamePk), extract the middle segment
+            if (typeof rawId === "string" && rawId.includes(":")) {
+              const parts = rawId.split(":");
+              const extractedId = parts[1];
+              return liveBoardResults[extractedId]
+                ?? liveBoardResults[Number(extractedId)]
+                ?? null;
+            }
+            return null;
+          };
+
           const boardOutcome = (type, item) => {
-            const id = item.id;
-            const result = liveBoardResults[id];
-            if (!result || result.live) return null;
+            const result = lookupBoardResult(item);
+            if (!result) return null;
+            // Mid-game stats stay tentative only while the game is still live
+            if (result.live && getBoardGamePhase(item.gamePk) === "live") return null;
 
             if (type === "hr") return result.ab > 0 ? result.hr > 0 : null;
             if (type === "hits") return result.ab > 0 ? result.h > 0 : null;
 
-            const line = item.propLine?.line ?? item.suggestedLine;
+            const line = item.propLine?.line ?? item.suggestedLine ?? item.bookLine;
             const lean = item.score >= 55 ? "OVER" : "UNDER";
             if (line === null || line === undefined) return null;
 
@@ -9439,10 +9663,14 @@ export default function App() {
             return null;
           };
 
-          const lockedCandidatesForType = (type) =>
-            useSharedBoard
-              ? (getBoardMarketSnapshot(type) ?? []).filter(item => getBoardGamePhase(item.gamePk) !== "upcoming")
-              : Object.values(lockedBoardCandidates).flatMap(g => g[type] ?? []);
+          const lockedCandidatesForType = (type) => {
+            if (useSharedBoard) {
+              // Use boardCandidatesByType which already handles snapshot-or-live fallback
+              const pool = boardCandidatesByType[type] ?? [];
+              return pool.filter(item => getBoardGamePhase(item.gamePk) !== "upcoming");
+            }
+            return Object.values(lockedBoardCandidates).flatMap(g => g[type] ?? []);
+          };
 
           const hitSummary = (type) =>
             summarizeOutcomes(lockedCandidatesForType(type), item => boardOutcome(type, item));
@@ -9582,7 +9810,10 @@ export default function App() {
                       fontWeight: 700, color: boardTab === type ? "#000" : "#9ca3af", cursor: "pointer" }}>
                     {label}
                     {!isGameBoard && tabHitSummary[type] && (
-                      <TabHitBadge hits={tabHitSummary[type].hits} total={tabHitSummary[type].total} />
+                      <TabHitBadge
+                        hits={tabHitSummary[type].hits}
+                        total={tabHitSummary[type].resolved ?? tabHitSummary[type].total}
+                      />
                     )}
                   </button>
                 ))}
@@ -9599,7 +9830,10 @@ export default function App() {
                         fontWeight: 700, color: gameSubTab === sub ? "#818cf8" : "#6b7280", cursor: "pointer" }}>
                       {label}
                       {gameSubtabHitSummary[sub] && (
-                        <TabHitBadge hits={gameSubtabHitSummary[sub].hits} total={gameSubtabHitSummary[sub].total} />
+                        <TabHitBadge
+                          hits={gameSubtabHitSummary[sub].hits}
+                          total={gameSubtabHitSummary[sub].resolved ?? gameSubtabHitSummary[sub].total}
+                        />
                       )}
                     </button>
                   ))}
@@ -9754,6 +9988,7 @@ export default function App() {
                 </Card>
               ) : !isGameBoard && (() => {
                 const renderBoardCandidateCard = (c, i) => {
+                  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
                   const sc = boardScoreColor(c.score);
                   const boardGameStatus = getBoardGameStatus(c.gamePk);
                   const boardSummaryRequest = buildBoardSummaryRequest(c, boardTab);
@@ -9761,7 +9996,23 @@ export default function App() {
                   const summaryText = resolveCardSummaryText(c, boardSummaryRequest, { allowPremium: !useSnapshotOnly });
                   const premiumLine = !useSnapshotOnly ? aiCardSummaries[`premium:${boardSummaryRequest?.id}`] : null;
                   const isPremium = !!(premiumLine && summaryText === premiumLine);
-                  const todayResult = liveBoardResults[c.id] ?? null;
+                  const todayResult = lookupBoardResult(c);
+                  const pickId = `${currentUser?.userId ?? currentUser?.username}:${c.id}:${boardTab}:${today}`;
+                  const isLogged = loggedPickIds.has(pickId);
+                  const handleLongPress = () => {
+                    if (!currentUser || (slateDate && slateDate < today)) return;
+                    const rawLine = c.propLine?.books?.DK?.line ?? c.propLine?.line ?? c.suggestedLine;
+                    const bookLine = rawLine != null && Number.isFinite(Number(rawLine)) ? Number(rawLine) : null;
+                    openAddPickSheet({
+                      playerId: String(c.id),
+                      playerName: c.name,
+                      gameLabel: c.gameLabel ?? "",
+                      market: boardTab,
+                      side: c.lean ?? (c.score >= 55 ? "over" : "under"),
+                      bookLine,
+                      source: "board",
+                    });
+                  };
 
                   if (isPitcherBoard) {
                     const pitcherMetrics = {
@@ -9786,6 +10037,8 @@ export default function App() {
                         isPremium={isPremium}
                         preferredBook={preferredBook}
                         onCardClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}
+                        onLongPress={handleLongPress}
+                        isLogged={isLogged}
                       />
                     );
                   }
@@ -9804,6 +10057,8 @@ export default function App() {
                       isPremium={isPremium}
                       preferredBook={preferredBook}
                       onCardClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}
+                      onLongPress={handleLongPress}
+                      isLogged={isLogged}
                     />
                   );
                 };
@@ -10580,6 +10835,228 @@ export default function App() {
           );
         })()}
 
+        {view === "picks" && !currentUser && (
+          <div style={{ textAlign: "center", padding: "60px 20px" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb", marginBottom: 8 }}>
+              Sign in to view your picks
+            </div>
+            <div style={{ fontSize: 11, color: "#6b7280" }}>
+              Your pick log is saved to your account
+            </div>
+          </div>
+        )}
+
+        {view === "picks" && currentUser && (() => {
+          const rawPicks = picksViewData?.picks ?? [];
+          const isLegacyIncompletePick = (pick) => {
+            const hasName = !!(pick?.playerName && String(pick.playerName).trim());
+            const hasMarket = !!(pick?.market && String(pick.market).trim());
+            const hasContext = !!(
+              (pick?.gameLabel && String(pick.gameLabel).trim()) ||
+              (pick?.side && String(pick.side).trim()) ||
+              pick?.bookLine != null
+            );
+            return !(hasName && hasMarket && hasContext);
+          };
+          const hiddenLegacyCount = rawPicks.filter(isLegacyIncompletePick).length;
+          const picks = picksShowLegacy ? rawPicks : rawPicks.filter((pick) => !isLegacyIncompletePick(pick));
+          const stats = picks.reduce((acc, pick) => {
+            if (pick.resultHit === true) {
+              acc.wins += 1;
+              if (pick.pnl != null) acc.totalPnl += Number(pick.pnl) || 0;
+            } else if (pick.resultHit === false) {
+              acc.losses += 1;
+              if (pick.pnl != null) acc.totalPnl += Number(pick.pnl) || 0;
+            } else {
+              acc.pending += 1;
+            }
+            return acc;
+          }, { wins: 0, losses: 0, pending: 0, totalPnl: 0 });
+          const resolved = stats.wins + stats.losses;
+          const displayStats = {
+            wins: stats.wins,
+            losses: stats.losses,
+            pending: stats.pending,
+            hitRate: resolved > 0 ? Math.round((stats.wins / resolved) * 1000) / 10 : null,
+            totalPnl: picks.some((pick) => pick.pnl != null) ? stats.totalPnl : null,
+          };
+          const groups = picks.reduce((acc, pick) => {
+            const key = pick.slateDate || "Unknown";
+            if (!acc[key]) acc[key] = [];
+            acc[key].push(pick);
+            return acc;
+          }, {});
+          const orderedDates = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+          const rangeOptions = [
+            { days: 0, label: "ALL" },
+            { days: 7, label: "7D" },
+            { days: 30, label: "30D" },
+          ];
+
+          return (
+            <div style={{ padding: "6px 0 18px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>📋 PICKS</div>
+                  <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>
+                    Logged board and props plays for {currentUser.username ?? currentUser.email}
+                  </div>
+                  {!picksShowLegacy && hiddenLegacyCount > 0 && (
+                    <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4 }}>
+                      {hiddenLegacyCount} incomplete legacy pick{hiddenLegacyCount !== 1 ? "s" : ""} hidden
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  {hiddenLegacyCount > 0 && (
+                    <button
+                      onClick={() => setPicksShowLegacy((v) => !v)}
+                      style={{
+                        background: picksShowLegacy ? "rgba(245,158,11,0.15)" : "#161827",
+                        border: `1px solid ${picksShowLegacy ? "#f59e0b" : "#1f2437"}`,
+                        borderRadius: 999,
+                        padding: "6px 10px",
+                        fontSize: 10,
+                        fontWeight: 800,
+                        color: picksShowLegacy ? "#fbbf24" : "#9ca3af",
+                        fontFamily: "monospace",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {picksShowLegacy ? "Hide Legacy" : "Show Legacy"}
+                    </button>
+                  )}
+                  {rangeOptions.map((opt) => (
+                    <button
+                      key={opt.days}
+                      onClick={() => setPicksViewDays(opt.days)}
+                      style={{
+                        background: picksViewDays === opt.days ? "#3b82f6" : "#161827",
+                        border: `1px solid ${picksViewDays === opt.days ? "#3b82f6" : "#1f2437"}`,
+                        borderRadius: 999,
+                        padding: "6px 10px",
+                        fontSize: 10,
+                        fontWeight: 800,
+                        color: picksViewDays === opt.days ? "#fff" : "#9ca3af",
+                        fontFamily: "monospace",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 18 }}>
+                <div style={{ background: "#121523", border: "1px solid #1f2437", borderRadius: 10, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Record</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: "#f9fafb" }}>{displayStats.wins ?? 0}-{displayStats.losses ?? 0}</div>
+                  {(displayStats.pending ?? 0) > 0 && (
+                    <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 3 }}>{displayStats.pending} pending</div>
+                  )}
+                </div>
+                <div style={{ background: "#121523", border: "1px solid #1f2437", borderRadius: 10, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Hit Rate</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: "#f9fafb" }}>
+                    {displayStats.hitRate != null ? `${displayStats.hitRate}%` : "—"}
+                  </div>
+                </div>
+                <div style={{ background: "#121523", border: "1px solid #1f2437", borderRadius: 10, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>P&L</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: displayStats.totalPnl == null ? "#f9fafb" : displayStats.totalPnl >= 0 ? "#22c55e" : "#ef4444" }}>
+                    {displayStats.totalPnl == null ? "—" : `${displayStats.totalPnl > 0 ? "+" : ""}${displayStats.totalPnl.toFixed(2)}u`}
+                  </div>
+                </div>
+              </div>
+
+              {picksViewLoading && (
+                <div style={{ textAlign: "center", padding: 44, color: "#6b7280", fontSize: 11 }}>
+                  Loading picks…
+                </div>
+              )}
+
+              {!picksViewLoading && picks.length === 0 && (
+                <div style={{ textAlign: "center", padding: 52, color: "#6b7280", fontSize: 11, lineHeight: 1.6 }}>
+                  No logged picks in this range yet.
+                </div>
+              )}
+
+              {!picksViewLoading && orderedDates.map((dateKey) => (
+                <div key={dateKey} style={{ marginBottom: 18 }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, color: "#6b7280", fontFamily: "monospace", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+                    {dateKey}
+                  </div>
+                  {groups[dateKey].map((pick) => {
+                    const marketColor = MARKET_COLORS[pick.market] ?? "#9ca3af";
+                    const marketLabel = MARKET_LABELS[pick.market] ?? (pick.market ?? "—").toUpperCase();
+                    const resultText = pick.resultHit === true ? "HIT" : pick.resultHit === false ? "MISS" : "PENDING";
+                    const resultColor = pick.resultHit === true ? "#22c55e" : pick.resultHit === false ? "#ef4444" : "#6b7280";
+                    const oddsText = pick.odds == null ? null : `${pick.odds > 0 ? "+" : ""}${pick.odds}`;
+                    const unitsText = pick.units != null ? `${pick.units}u` : null;
+                    const metaParts = [
+                      [pick.side, pick.bookLine].filter(Boolean).join(" "),
+                      pick.gameLabel,
+                      oddsText,
+                      unitsText,
+                    ].filter(Boolean);
+
+                    return (
+                      <div key={pick.id} style={{ background: "#121523", border: "1px solid #1f2437", borderRadius: 12, padding: "12px 14px", marginBottom: 10 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 5 }}>
+                              <span style={{ fontSize: 8, fontWeight: 800, color: marketColor, background: `${marketColor}18`, border: `1px solid ${marketColor}40`, borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.06em" }}>
+                                {marketLabel}
+                              </span>
+                              <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{pick.playerName ?? "Unknown player"}</span>
+                            </div>
+                            <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>
+                              {metaParts.join(" · ") || "No pick details"}
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                              <span style={{ fontSize: 8, fontWeight: 800, color: resultColor, background: `${resultColor}18`, border: `1px solid ${resultColor}40`, borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.06em" }}>
+                                {resultText}
+                              </span>
+                              {pick.actualStat != null && (
+                                <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "monospace" }}>
+                                  actual {pick.actualStat}
+                                </span>
+                              )}
+                              {pick.pnl != null && (
+                                <span style={{ fontSize: 10, fontWeight: 700, color: pick.pnl >= 0 ? "#22c55e" : "#ef4444", fontFamily: "monospace" }}>
+                                  {pick.pnl > 0 ? "+" : ""}{pick.pnl.toFixed(2)}u
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => voidPick(pick.id)}
+                            style={{
+                              background: "transparent",
+                              border: "1px solid rgba(239,68,68,0.28)",
+                              borderRadius: 8,
+                              padding: "7px 10px",
+                              fontSize: 10,
+                              fontWeight: 800,
+                              color: "#ef4444",
+                              fontFamily: "monospace",
+                              cursor: "pointer",
+                              flexShrink: 0,
+                            }}
+                          >
+                            Void
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+
         {/* ── Settings view ─────────────────────────────────────────────────── */}
         {view === "settings" && (() => {
           const BOOKS = ["DK","FD","CZR","MGM","BOV"];
@@ -10840,6 +11317,115 @@ export default function App() {
           </div>
         );
       })()}
+
+      {addPickSheet && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 9000,
+            background: "rgba(0,0,0,0.55)", display: "flex",
+            alignItems: "flex-end", justifyContent: "center",
+          }}
+          onClick={() => setAddPickSheet(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%", maxWidth: 480,
+              background: "#13141f", borderRadius: "16px 16px 0 0",
+              padding: "20px 20px 32px", border: "1px solid rgba(255,255,255,0.08)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb" }}>Log Pick</span>
+              <button onClick={() => setAddPickSheet(null)} style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 18, lineHeight: 1 }}>✕</button>
+            </div>
+
+            <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 10, padding: "10px 14px", marginBottom: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb", marginBottom: 2 }}>{addPickSheet.playerName}</div>
+              <div style={{ fontSize: 10, color: "#9ca3af" }}>
+                {addPickSheet.market?.toUpperCase()} · {addPickSheet.gameLabel}
+                {addPickSheet.bookLine != null ? ` · Line ${addPickSheet.bookLine}` : ""}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Side</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {["over", "under"].map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setAddPickSheet((prev) => ({ ...prev, side: s }))}
+                    style={{
+                      flex: 1, padding: "8px 0", borderRadius: 8, border: "none",
+                      fontSize: 12, fontWeight: 700, cursor: "pointer",
+                      textTransform: "uppercase",
+                      background: addPickSheet.side === s ? "#3b82f6" : "rgba(255,255,255,0.06)",
+                      color: addPickSheet.side === s ? "#fff" : "#9ca3af",
+                    }}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Odds <span style={{ color: "#374151" }}>(optional)</span></div>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="-125"
+                  value={addPickOdds}
+                  onChange={(e) => setAddPickOdds(e.target.value)}
+                  style={{
+                    width: "100%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 8, padding: "8px 10px", fontSize: 13, color: "#f9fafb",
+                    outline: "none", boxSizing: "border-box",
+                  }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Units</div>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="1"
+                  value={addPickUnits}
+                  onChange={(e) => setAddPickUnits(e.target.value)}
+                  style={{
+                    width: "100%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 8, padding: "8px 10px", fontSize: 13, color: "#f9fafb",
+                    outline: "none", boxSizing: "border-box",
+                  }}
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={submitAddPick}
+              style={{
+                width: "100%", padding: "12px 0", borderRadius: 10, border: "none",
+                background: "#3b82f6", color: "#fff", fontSize: 14, fontWeight: 700,
+                cursor: "pointer", letterSpacing: "0.02em",
+              }}
+            >
+              Add Pick
+            </button>
+          </div>
+        </div>
+      )}
+
+      {toastMsg && (
+        <div style={{
+          position: "fixed", bottom: 80, left: "50%", transform: "translateX(-50%)",
+          background: "rgba(30,31,48,0.96)", border: "1px solid rgba(255,255,255,0.12)",
+          borderRadius: 10, padding: "8px 18px", fontSize: 12, color: "#e5e7eb",
+          zIndex: 9999, pointerEvents: "none", whiteSpace: "nowrap",
+        }}>
+          {toastMsg}
+        </div>
+      )}
 
       {/* ── Help Overlay ── */}
       {showHelp && (

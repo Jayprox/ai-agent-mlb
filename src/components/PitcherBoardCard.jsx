@@ -1,6 +1,6 @@
 // src/components/PitcherBoardCard.jsx
 import { Card, RankScoreColumn, TierBadge, GameStatusBadge } from "./shared.jsx";
-import { resultBorderStyle, formatLocalTime } from "../utils.js";
+import { resultBorderStyle, formatLocalTime, useLongPress } from "../utils.js";
 
 const BOOK_COLORS = {
   DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa", BOV: "#f87171",
@@ -10,8 +10,9 @@ export default function PitcherBoardCard({
   c, rank, boardTab, sc,
   boardGameStatus, todayResult, pitcherMetrics,
   summaryText, isPremium, preferredBook,
-  onCardClick,
+  onCardClick, onLongPress, isLogged,
 }) {
+  const longPressHandlers = useLongPress(onLongPress ?? (() => {}));
   const hasResolvedResult = !!todayResult && !todayResult.live;
   const propLineValue = c.propLine?.line ?? c.suggestedLine;
   const boardLean = c.score >= 55 ? "OVER" : "UNDER";
@@ -25,7 +26,19 @@ export default function PitcherBoardCard({
   const propBadgeLine = propLineValue !== null && propLineValue !== undefined ? `${propLineValue}` : "—";
 
   return (
-    <Card style={{ marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={onCardClick}>
+    <Card
+      style={{ position: "relative", marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }}
+      onClick={onCardClick}
+      {...longPressHandlers}
+    >
+      {isLogged && (
+        <div style={{
+          position: "absolute", top: 6, right: 8,
+          fontSize: 9, color: "#3b82f6", fontWeight: 700,
+        }}>
+          ✓ logged
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         {/* Rank + score */}
         <RankScoreColumn rank={rank} score={c.score} scoreColor={sc} simConfidence={c.simConfidence} />

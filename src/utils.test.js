@@ -46,6 +46,7 @@ describe("summarizeOutcomes", () => {
     const result = summarizeOutcomes(items, v => v % 2 === 0);
     expect(result.hits).toBe(2);
     expect(result.total).toBe(4);
+    expect(result.resolved).toBe(4);
   });
 
   it("excludes null outcomes from total count", () => {
@@ -53,6 +54,43 @@ describe("summarizeOutcomes", () => {
     const result = summarizeOutcomes(items, v => v === 2 ? true : null);
     expect(result.hits).toBe(1);
     expect(result.total).toBe(3);
+    expect(result.resolved).toBe(1);
+  });
+
+  it("returns resolved counts for all-false outcomes", () => {
+    const items = [1, 2, 3];
+    expect(summarizeOutcomes(items, () => false)).toEqual({
+      hits: 0,
+      total: 3,
+      resolved: 3,
+    });
+  });
+
+  it("counts only non-null outcomes in resolved for mixed results", () => {
+    const items = [1, 2, 3, 4];
+    expect(summarizeOutcomes(items, v => (
+      v === 1 ? true : v === 2 ? false : null
+    ))).toEqual({
+      hits: 1,
+      total: 4,
+      resolved: 2,
+    });
+  });
+
+  it("handles a single true outcome", () => {
+    expect(summarizeOutcomes([1], () => true)).toEqual({
+      hits: 1,
+      total: 1,
+      resolved: 1,
+    });
+  });
+
+  it("handles a single false outcome", () => {
+    expect(summarizeOutcomes([1], () => false)).toEqual({
+      hits: 0,
+      total: 1,
+      resolved: 1,
+    });
   });
 });
 
