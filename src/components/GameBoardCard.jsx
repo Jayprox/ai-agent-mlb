@@ -11,12 +11,36 @@ export default function GameBoardCard({
   gameStatus, gameHit, finalTotalRuns,
   homeSPEra, awaySPEra,
   summaryText, isPremium, preferredBook,
-  onCardClick,
+  onCardClick, onAddPick, isLogged,
 }) {
   const resultCardStyle = resultBorderStyle(gameHit === null ? null : (gameHit ? "#22c55e" : "#ef4444"));
+  const isGameDone = gameStatus === "LIVE" || gameStatus === "FINAL";
 
   return (
-    <Card style={{ cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={onCardClick}>
+    <Card style={{ position: "relative", cursor: "pointer", padding: "10px 12px", ...resultCardStyle }} onClick={onCardClick}>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!isLogged && !isGameDone) onAddPick?.();
+        }}
+        style={{
+          position: "absolute", bottom: 6, right: 8,
+          width: 18, height: 18, borderRadius: "50%",
+          fontSize: 12, fontWeight: 800,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          border: isLogged
+            ? "1px solid rgba(59,130,246,0.4)"
+            : isGameDone
+              ? "1px solid rgba(55,65,81,0.4)"
+              : "1px solid rgba(107,114,128,0.4)",
+          background: "transparent",
+          color: isLogged ? "#3b82f6" : isGameDone ? "#374151" : "#6b7280",
+          cursor: isLogged ? "not-allowed" : isGameDone ? "default" : "pointer",
+        }}
+        title={isLogged ? "Already logged" : isGameDone ? "Game started" : "Log pick"}
+      >
+        {isLogged ? "✓" : "+"}
+      </button>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         {/* Rank + score */}
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, flexShrink: 0 }}>

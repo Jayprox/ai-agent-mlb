@@ -11,7 +11,7 @@ const MARKET_META = {
   f5ml: { label: "F5 ML",  color: "#fbbf24" },
 };
 
-export default function EdgeCard({ c, gradeResult }) {
+export default function EdgeCard({ c, gradeResult, onAddPick, isLogged, isGameDone }) {
   const meta      = MARKET_META[c.market] ?? { label: c.market, color: "#6b7280" };
   const edgePts   = Math.round(c.edge * 100);
   const edgeColor = edgePts >= 15 ? "#22c55e" : "#fbbf24";
@@ -24,7 +24,23 @@ export default function EdgeCard({ c, gradeResult }) {
   };
 
   return (
-    <Card style={{ marginBottom: 8, padding: "10px 12px", ...cardStyle }}>
+    <Card style={{ position: "relative", marginBottom: 8, padding: "10px 12px", ...cardStyle }}>
+      <button
+        onClick={(e) => { e.stopPropagation(); if (!isLogged && !isGameDone) onAddPick?.(); }}
+        style={{
+          position: "absolute", bottom: 6, right: 8,
+          width: 18, height: 18, borderRadius: "50%",
+          fontSize: 12, fontWeight: 800,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          border: isLogged ? "1px solid rgba(59,130,246,0.4)" : isGameDone ? "1px solid rgba(55,65,81,0.4)" : "1px solid rgba(107,114,128,0.4)",
+          background: "transparent",
+          color: isLogged ? "#3b82f6" : isGameDone ? "#374151" : "#6b7280",
+          cursor: isLogged ? "not-allowed" : isGameDone ? "default" : "pointer",
+        }}
+        title={isLogged ? "Already logged" : isGameDone ? "Game started" : "Log pick"}
+      >
+        {isLogged ? "✓" : "+"}
+      </button>
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
         {c.market === "f5ml" ? (
           <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{c.gameLabel}</span>

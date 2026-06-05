@@ -1898,8 +1898,12 @@ const SlateCard = ({ game, selected, onSelect, liveOddsMap = {}, bestBet = null,
                      : liveOdds?.totalMoveDir === "down" ? "under"
                      : game.odds.lineMove ?? "none";
   const gameStatus    = game.status ?? "Scheduled";
-  const isInProgress  = gameStatus === "In Progress" || gameStatus === "Warmup";
   const isFinal       = gameStatus === "Final" || gameStatus === "Game Over";
+  // liveScore.inning is a number while a game is active; use as fallback when
+  // schedule cache is stale (can lag up to 1h). Guard with !isFinal to avoid
+  // showing LIVE on games the schedule already confirmed are finished.
+  const liveScoreIsLive = !isFinal && liveScore && typeof liveScore.inning === "number";
+  const isInProgress  = gameStatus === "In Progress" || gameStatus === "Warmup" || liveScoreIsLive;
   const isDelayed     = gameStatus.startsWith("Delayed");
   const isPostponed   = gameStatus === "Postponed" || gameStatus === "Cancelled" || gameStatus === "Suspended";
 
@@ -4123,12 +4127,18 @@ export default function App() {
     if (IS_STATS_SANDBOX || !liveSlate?.length) return;
 
     const pollScores = () => {
+      const now = Date.now();
       liveSlate.forEach(sg => {
         const status = sg.status ?? "";
         const inProgress = status === "In Progress" || status === "Warmup";
         const finished   = status === "Final" || status === "Game Over";
-        // Poll in-progress every 60s; fetch final once (skip if already cached)
-        if (!inProgress && !(finished && !liveScoresRef.current[sg.gamePk])) return;
+        // Also poll games past their scheduled start time — schedule cache can be
+        // stale for up to 1 hour, so "Scheduled" status doesn't mean not started.
+        const gameTimeMs   = sg.gameTime ? Date.parse(sg.gameTime) : null;
+        const msSinceStart = gameTimeMs ? now - gameTimeMs : null;
+        const likelyActive = msSinceStart != null && msSinceStart > 0 && msSinceStart < 5 * 60 * 60 * 1000;
+        // Poll if: in-progress, past start time, or final-once
+        if (!inProgress && !likelyActive && !(finished && !liveScoresRef.current[sg.gamePk])) return;
         apiFetch(`/api/linescore/${sg.gamePk}`)
           .then(data => {
             liveScoresRef.current = { ...liveScoresRef.current, [sg.gamePk]: data };
@@ -5149,6 +5159,33 @@ export default function App() {
     };
   };
 
+  // ── Live book-line hydration for AI Board / Predict cards ──────────────────
+  // Snapshot bookLine may be null if props weren't loaded at snapshot time.
+  // This falls back to livePlayerProps at render time (same data getBookLine uses).
+  const AI_MARKET_TO_PROP = {
+    k:    "pitcher_strikeouts",
+    outs: "pitcher_outs",
+    hr:   "batter_home_runs",
+    hits: "batter_hits",
+  };
+  const getAiBookLine = (c) => {
+    if (c.bookLine != null) return c.bookLine; // snapshot already has it
+    const apiMarket = AI_MARKET_TO_PROP[c.market];
+    if (!apiMarket) return null;
+    const props = livePlayerProps[String(c.gamePk)]?.props ?? [];
+    const lastName = (c.name ?? "").split(" ").pop().toLowerCase();
+    if (!lastName) return null;
+    const match = props.find(pr =>
+      pr.market === apiMarket &&
+      (pr.player ?? "").toLowerCase().includes(lastName)
+    );
+    if (!match) return null;
+    const allLines = Object.values(match.books ?? {}).map(b => b.line).filter(l => l != null);
+    if (!allLines.length) return null;
+    // Return the consensus line (lowest = most favorable for over)
+    return Math.min(...allLines);
+  };
+
   // ── Convergence: does the Daily Card's Official Card mention this Model Pick? ──
   // Two-factor match: pitcher last name + market type (K or Outs).
   // Both must match to avoid false positives from common last names.
@@ -5214,8 +5251,46 @@ export default function App() {
           const resultCardStyle = resultBorderStyle(
             isResolved ? (modelHit ? "#22c55e" : (gameStatus === "FINAL" ? "#ef4444" : null)) : null
           );
+          const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+          const pickPlayerId = String(p.pitcherId ?? p.playerId ?? p.id ?? p.gamePk);
+          const pickMarket = (p.propType === "K" || p.market === "pitcher_strikeouts") ? "k" : "outs";
+          const pickId = `${currentUser?.userId ?? currentUser?.username}:${pickPlayerId}:${pickMarket}:${today}`;
+          const isPickLogged = loggedPickIds.has(pickId);
+          const isGameDone = gameStatus === "LIVE" || gameStatus === "FINAL";
+          const handleModelAddPick = () => {
+            if (!currentUser || isGameDone || isPickLogged) return;
+            openAddPickSheet({
+              playerId: pickPlayerId,
+              playerName: p.label,
+              gameLabel: p.game ?? "",
+              market: pickMarket,
+              side: (p.lean ?? "OVER").toLowerCase(),
+              bookLine: bookLine?.line ?? null,
+              source: "model",
+            });
+          };
           return (
-            <div key={i} style={{ background: "#0f1020", border: `1px solid ${borderColor}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6, ...resultCardStyle }}>
+            <div key={i} style={{ position: "relative", background: "#0f1020", border: `1px solid ${borderColor}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6, ...resultCardStyle }}>
+              <button
+                onClick={handleModelAddPick}
+                style={{
+                  position: "absolute", bottom: 6, right: 8,
+                  width: 18, height: 18, borderRadius: "50%",
+                  fontSize: 12, fontWeight: 800,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  border: isPickLogged
+                    ? "1px solid rgba(59,130,246,0.4)"
+                    : isGameDone
+                      ? "1px solid rgba(55,65,81,0.4)"
+                      : "1px solid rgba(107,114,128,0.4)",
+                  background: "transparent",
+                  color: isPickLogged ? "#3b82f6" : isGameDone ? "#374151" : "#6b7280",
+                  cursor: isPickLogged ? "not-allowed" : isGameDone ? "default" : "pointer",
+                }}
+                title={isPickLogged ? "Already logged" : isGameDone ? "Game started" : "Log pick"}
+              >
+                {isPickLogged ? "✓" : "+"}
+              </button>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
                 <div
                   style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
@@ -9927,6 +10002,7 @@ export default function App() {
                 return (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {gameBoardCandidates.map((c, i) => {
+                      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
                       const displayScore = displayedGameBoardScore(c);
                       const sc = boardScoreColor(displayScore);
                       const lc = leanColor(c.lean, c.leanAbbr);
@@ -9945,6 +10021,29 @@ export default function App() {
                       const summaryText = resolveCardSummaryText(c, boardSummaryRequest, { allowPremium: !useSnapshotOnly });
                       const premiumLine = !useSnapshotOnly ? aiCardSummaries[`premium:${boardSummaryRequest?.id}`] : null;
                       const isPremium = !!(premiumLine && summaryText === premiumLine);
+                      const pickId = `${currentUser?.userId ?? currentUser?.username}:${c.gamePk}:${gameSubTab}:${today}`;
+                      const isLogged = loggedPickIds.has(pickId);
+                      const handleAddPick = () => {
+                        if (!currentUser || (slateDate && slateDate < today)) return;
+                        const matchup = `${c.away?.abbr ?? "?"} @ ${c.home?.abbr ?? "?"}`;
+                        // Derive a sensible book line for the relevant market
+                        const dk = c.odds?.books?.DK;
+                        const bookLine = (() => {
+                          if (gameSubTab === "total") return dk?.total ?? null;
+                          if (gameSubTab === "spread") return c.leanAbbr === c.away?.abbr ? dk?.awaySpread : dk?.homeSpread ?? null;
+                          if (gameSubTab === "f5spread") return c.leanAbbr === c.away?.abbr ? (dk?.f5AwaySpread ?? dk?.awaySpread) : (dk?.f5HomeSpread ?? dk?.homeSpread) ?? null;
+                          return null;
+                        })();
+                        openAddPickSheet({
+                          playerId: String(c.gamePk),
+                          playerName: matchup,
+                          gameLabel: matchup,
+                          market: gameSubTab,
+                          side: c.lean ?? c.leanAbbr ?? "over",
+                          bookLine: bookLine != null && Number.isFinite(Number(bookLine)) ? Number(bookLine) : null,
+                          source: "board",
+                        });
+                      };
                       return (
                         <GameBoardCard
                           key={c.gamePk}
@@ -9963,6 +10062,8 @@ export default function App() {
                           isPremium={isPremium}
                           preferredBook={preferredBook}
                           onCardClick={() => setWhyModal({ c, type: gameSubTab, rank: i + 1 })}
+                          onAddPick={handleAddPick}
+                          isLogged={isLogged}
                         />
                       );
                     })}
@@ -9999,7 +10100,7 @@ export default function App() {
                   const todayResult = lookupBoardResult(c);
                   const pickId = `${currentUser?.userId ?? currentUser?.username}:${c.id}:${boardTab}:${today}`;
                   const isLogged = loggedPickIds.has(pickId);
-                  const handleLongPress = () => {
+                  const handleAddPick = () => {
                     if (!currentUser || (slateDate && slateDate < today)) return;
                     const rawLine = c.propLine?.books?.DK?.line ?? c.propLine?.line ?? c.suggestedLine;
                     const bookLine = rawLine != null && Number.isFinite(Number(rawLine)) ? Number(rawLine) : null;
@@ -10037,7 +10138,7 @@ export default function App() {
                         isPremium={isPremium}
                         preferredBook={preferredBook}
                         onCardClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}
-                        onLongPress={handleLongPress}
+                        onAddPick={handleAddPick}
                         isLogged={isLogged}
                       />
                     );
@@ -10057,7 +10158,7 @@ export default function App() {
                       isPremium={isPremium}
                       preferredBook={preferredBook}
                       onCardClick={() => setWhyModal({ c, type: boardTab, rank: i + 1 })}
-                      onLongPress={handleLongPress}
+                      onAddPick={handleAddPick}
                       isLogged={isLogged}
                     />
                   );
@@ -10531,8 +10632,44 @@ export default function App() {
                       ...resultBorderStyle(resultBorderColor),
                       ...(resultBorderColor ? { borderColor: resultBorderColor } : {}),
                     };
+                    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+                    const abEnrichedBookLine = getAiBookLine(c);
+                    const abPlayerId = String(c.entityId ?? c.id ?? c.gamePk);
+                    const abPickId = `${currentUser?.userId ?? currentUser?.username}:${abPlayerId}:${c.market}:${today}`;
+                    const abIsLogged = loggedPickIds.has(abPickId);
+                    const abGameStatus = getBoardGameStatus(c.gamePk);
+                    const abIsGameDone = abGameStatus === "LIVE" || abGameStatus === "FINAL";
                     return (
-                      <Card key={c.id} style={{ marginBottom: 8, padding: "10px 12px", ...resultCardStyle }}>
+                      <Card key={c.id} style={{ position: "relative", marginBottom: 8, padding: "10px 12px", ...resultCardStyle }}>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (!abIsLogged && !abIsGameDone && currentUser) {
+                              openAddPickSheet({
+                                playerId: abPlayerId,
+                                playerName: c.name ?? c.gameLabel ?? "",
+                                gameLabel: c.gameLabel ?? "",
+                                market: c.market,
+                                side: (c.lean ?? "over").toLowerCase(),
+                                bookLine: abEnrichedBookLine != null && Number.isFinite(Number(abEnrichedBookLine)) ? Number(abEnrichedBookLine) : null,
+                                source: "ai-board",
+                              });
+                            }
+                          }}
+                          style={{
+                            position: "absolute", bottom: 6, right: 8,
+                            width: 18, height: 18, borderRadius: "50%",
+                            fontSize: 12, fontWeight: 800,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            border: abIsLogged ? "1px solid rgba(59,130,246,0.4)" : abIsGameDone ? "1px solid rgba(55,65,81,0.4)" : "1px solid rgba(107,114,128,0.4)",
+                            background: "transparent",
+                            color: abIsLogged ? "#3b82f6" : abIsGameDone ? "#374151" : "#6b7280",
+                            cursor: abIsLogged ? "not-allowed" : abIsGameDone ? "default" : "pointer",
+                          }}
+                          title={abIsLogged ? "Already logged" : abIsGameDone ? "Game started" : "Log pick"}
+                        >
+                          {abIsLogged ? "✓" : "+"}
+                        </button>
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flexShrink: 0 }}>
                             <div style={{ width: 22, height: 22, borderRadius: 6, background: "#1e2030", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#6b7280" }}>{i + 1}</div>
@@ -10606,9 +10743,9 @@ export default function App() {
                                 </div>
                               );
                             })()}
-                            {c.bookLine != null && (
+                            {abEnrichedBookLine != null && (
                               <div style={{ marginTop: 4, fontSize: 9, color: "#6b7280" }}>
-                                Line: <span style={{ color: "#9ca3af", fontFamily: "monospace" }}>{c.bookLine}</span>
+                                Line: <span style={{ color: "#9ca3af", fontFamily: "monospace" }}>{abEnrichedBookLine}</span>
                               </div>
                             )}
                           </div>
@@ -10721,9 +10858,37 @@ export default function App() {
             return { ...b, hits, total, actualRate };
           });
 
-          const renderEdgeCard = (c) => (
-            <EdgeCard key={c.id} c={c} gradeResult={gradeCandidate(c)} />
-          );
+          const renderEdgeCard = (c) => {
+            const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+            const enrichedC = { ...c, bookLine: getAiBookLine(c) };
+            const ePlayerId = String(c.entityId ?? c.id ?? c.gamePk);
+            const eMarket = c.market ?? "k";
+            const ePickId = `${currentUser?.userId ?? currentUser?.username}:${ePlayerId}:${eMarket}:${today}`;
+            const eIsLogged = loggedPickIds.has(ePickId);
+            const eIsGameDone = getBoardGamePhase(c.gamePk) !== "upcoming";
+            return (
+              <EdgeCard
+                key={c.id}
+                c={enrichedC}
+                gradeResult={gradeCandidate(c)}
+                isLogged={eIsLogged}
+                isGameDone={eIsGameDone}
+                onAddPick={() => {
+                  if (!currentUser || eIsGameDone || eIsLogged) return;
+                  const bl = enrichedC.bookLine;
+                  openAddPickSheet({
+                    playerId: ePlayerId,
+                    playerName: c.playerName ?? c.name ?? c.gameLabel ?? "",
+                    gameLabel: c.gameLabel ?? "",
+                    market: eMarket,
+                    side: (c.lean ?? "over").toLowerCase(),
+                    bookLine: bl != null && Number.isFinite(Number(bl)) ? Number(bl) : null,
+                    source: "predict",
+                  });
+                }}
+              />
+            );
+          };
 
           return (
             <div style={{ padding: "12px 0" }}>
@@ -10990,6 +11155,19 @@ export default function App() {
                   {groups[dateKey].map((pick) => {
                     const marketColor = MARKET_COLORS[pick.market] ?? "#9ca3af";
                     const marketLabel = MARKET_LABELS[pick.market] ?? (pick.market ?? "—").toUpperCase();
+                    // Derive live game status for today's unresolved picks
+                    const pickGameStatus = (() => {
+                      if (pick.resultHit !== null && pick.resultHit !== undefined) return null; // already graded
+                      if (!liveSlate || !pick.gameLabel) return null;
+                      const match = liveSlate.find(g =>
+                        `${g.away?.abbr ?? ""} @ ${g.home?.abbr ?? ""}` === pick.gameLabel
+                      );
+                      if (!match) return null;
+                      const s = match.status ?? "";
+                      if (s === "In Progress" || s === "Warmup") return "LIVE";
+                      if (s === "Final" || s === "Game Over") return "FINAL";
+                      return null;
+                    })();
                     const resultText = pick.resultHit === true ? "HIT" : pick.resultHit === false ? "MISS" : "PENDING";
                     const resultColor = pick.resultHit === true ? "#22c55e" : pick.resultHit === false ? "#ef4444" : "#6b7280";
                     const oddsText = pick.odds == null ? null : `${pick.odds > 0 ? "+" : ""}${pick.odds}`;
@@ -11015,9 +11193,10 @@ export default function App() {
                               {metaParts.join(" · ") || "No pick details"}
                             </div>
                             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                              <span style={{ fontSize: 8, fontWeight: 800, color: resultColor, background: `${resultColor}18`, border: `1px solid ${resultColor}40`, borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.06em" }}>
-                                {resultText}
-                              </span>
+                              {pickGameStatus
+                                ? <GameStatusBadge status={pickGameStatus} />
+                                : <span style={{ fontSize: 8, fontWeight: 800, color: resultColor, background: `${resultColor}18`, border: `1px solid ${resultColor}40`, borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.06em" }}>{resultText}</span>
+                              }
                               {pick.actualStat != null && (
                                 <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "monospace" }}>
                                   actual {pick.actualStat}
@@ -11030,23 +11209,25 @@ export default function App() {
                               )}
                             </div>
                           </div>
-                          <button
-                            onClick={() => voidPick(pick.id)}
-                            style={{
-                              background: "transparent",
-                              border: "1px solid rgba(239,68,68,0.28)",
-                              borderRadius: 8,
-                              padding: "7px 10px",
-                              fontSize: 10,
-                              fontWeight: 800,
-                              color: "#ef4444",
-                              fontFamily: "monospace",
-                              cursor: "pointer",
-                              flexShrink: 0,
-                            }}
-                          >
-                            Void
-                          </button>
+                          {!pickGameStatus && pick.resultHit === null && (
+                            <button
+                              onClick={() => voidPick(pick.id)}
+                              style={{
+                                background: "transparent",
+                                border: "1px solid rgba(239,68,68,0.28)",
+                                borderRadius: 8,
+                                padding: "7px 10px",
+                                fontSize: 10,
+                                fontWeight: 800,
+                                color: "#ef4444",
+                                fontFamily: "monospace",
+                                cursor: "pointer",
+                                flexShrink: 0,
+                              }}
+                            >
+                              Void
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
@@ -11323,16 +11504,17 @@ export default function App() {
           style={{
             position: "fixed", inset: 0, zIndex: 9000,
             background: "rgba(0,0,0,0.55)", display: "flex",
-            alignItems: "flex-end", justifyContent: "center",
+            alignItems: "center", justifyContent: "center",
+            padding: "16px",
           }}
           onClick={() => setAddPickSheet(null)}
         >
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: "100%", maxWidth: 480,
-              background: "#13141f", borderRadius: "16px 16px 0 0",
-              padding: "20px 20px 32px", border: "1px solid rgba(255,255,255,0.08)",
+              width: "100%", maxWidth: 420,
+              background: "#13141f", borderRadius: 16,
+              padding: "20px 20px 24px", border: "1px solid rgba(255,255,255,0.08)",
             }}
           >
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>

@@ -1,6 +1,6 @@
 // src/components/BatterBoardCard.jsx
 import { Card, RankScoreColumn, GameStatusBadge } from "./shared.jsx";
-import { resultBorderStyle, formatLocalTime, useLongPress } from "../utils.js";
+import { resultBorderStyle, formatLocalTime } from "../utils.js";
 
 const BOOK_COLORS = {
   DK: "#38bdf8", FD: "#34d399", CZR: "#fb923c", MGM: "#a78bfa", BOV: "#f87171",
@@ -10,9 +10,8 @@ export default function BatterBoardCard({
   c, rank, boardTab, sc,
   boardGameStatus, todayResult, evEdge,
   summaryText, isPremium, preferredBook,
-  onCardClick, onLongPress, isLogged,
+  onCardClick, onAddPick, isLogged,
 }) {
-  const longPressHandlers = useLongPress(onLongPress ?? (() => {}));
   const l5dots = Array.from({ length: 5 }, (_, j) => c.hitRate[j] ?? null);
   const isHrBoard = boardTab === "hr";
   const hasResult   = todayResult && todayResult.ab > 0;
@@ -29,16 +28,30 @@ export default function BatterBoardCard({
     <Card
       style={{ position: "relative", marginBottom: 8, cursor: "pointer", padding: "10px 12px", ...resultCardStyle }}
       onClick={onCardClick}
-      {...longPressHandlers}
     >
-      {isLogged && (
-        <div style={{
-          position: "absolute", top: 6, right: 8,
-          fontSize: 9, color: "#3b82f6", fontWeight: 700,
-        }}>
-          ✓ logged
-        </div>
-      )}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!isLogged && boardGameStatus !== "FINAL") onAddPick?.();
+        }}
+        style={{
+          position: "absolute", bottom: 6, right: 8,
+          width: 18, height: 18, borderRadius: "50%",
+          fontSize: 12, fontWeight: 800,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          border: isLogged
+            ? "1px solid rgba(59,130,246,0.4)"
+            : boardGameStatus === "FINAL"
+              ? "1px solid rgba(55,65,81,0.4)"
+              : "1px solid rgba(107,114,128,0.4)",
+          background: "transparent",
+          color: isLogged ? "#3b82f6" : boardGameStatus === "FINAL" ? "#374151" : "#6b7280",
+          cursor: isLogged ? "not-allowed" : boardGameStatus === "FINAL" ? "default" : "pointer",
+        }}
+        title={isLogged ? "Already logged" : boardGameStatus === "FINAL" ? "Game over" : "Log pick"}
+      >
+        {isLogged ? "✓" : "+"}
+      </button>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         {/* Rank */}
         <RankScoreColumn rank={rank} score={c.score} scoreColor={sc} simConfidence={c.simConfidence} />
