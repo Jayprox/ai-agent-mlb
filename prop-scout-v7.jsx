@@ -105,6 +105,149 @@ const isHrFavorable = (windDeg, windSpd, stadiumOrientation, temp) => {
   return windOut && windSpd >= 6 && temp >= 65;
 };
 
+const GAME_MARKETS_SET = new Set(["ml", "spread", "total", "nrfi", "f5ml", "f5spread"]);
+const PROP_MARKETS_SET = new Set(["k", "outs", "hr", "hits"]);
+
+const parseIpToOutsLocal = (ip) => {
+  if (!ip) return 0;
+  const [whole, frac = "0"] = String(ip).split(".");
+  return ((parseInt(whole, 10) || 0) * 3) + (parseInt(frac, 10) || 0);
+};
+
+const calcPickPnl = (resultHit, odds, units) => {
+  if (resultHit === null || resultHit === undefined) return null;
+  if (!resultHit) return -(Number(units) || 0);
+  if (odds == null) return Number(units) || 0; // no odds logged — flat +units per win
+  const oddsNum = Number(odds);
+  const unitsNum = Number(units) || 0;
+  if (!Number.isFinite(oddsNum) || oddsNum === 0 || !Number.isFinite(unitsNum)) return null;
+  const profit = oddsNum > 0
+    ? unitsNum * (oddsNum / 100)
+    : unitsNum * (100 / Math.abs(oddsNum));
+  return Math.round(profit * 100) / 100;
+};
+
+const gradePickLocally = (pick, { liveBoxscores, liveScores, liveSlate }) => {
+  if (!pick?.market) return null;
+
+  const market = String(pick.market).toLowerCase();
+  if (!GAME_MARKETS_SET.has(market) && !PROP_MARKETS_SET.has(market)) return null;
+
+  const slateGame = GAME_MARKETS_SET.has(market)
+    ? (liveSlate ?? []).find((g) => String(g.gamePk) === String(pick.playerId))
+    : (liveSlate ?? []).find((g) => `${g.away?.abbr ?? ""} @ ${g.home?.abbr ?? ""}` === pick.gameLabel);
+  const gamePk = slateGame?.gamePk ?? (GAME_MARKETS_SET.has(market) ? pick.playerId : null);
+  if (!gamePk) return null;
+
+  const statusText = String(slateGame?.status ?? "").toLowerCase();
+  if (statusText.includes("postponed") || statusText.includes("cancelled") || statusText.includes("canceled") || statusText.includes("suspended")) {
+    return { resultHit: null, actualStat: null, gradeStatus: "ppd" };
+  }
+
+  const isFinal = statusText === "final" || statusText === "game over" || statusText === "completed early";
+  if (!isFinal) return null;
+
+  const box = liveBoxscores?.[gamePk];
+  const liveScore = liveScores?.[gamePk];
+  const linescore = box?.linescore ?? null;
+
+  const awayRuns = Number.isFinite(linescore?.away?.runs) ? Number(linescore.away.runs) : Number(liveScore?.awayScore);
+  const homeRuns = Number.isFinite(linescore?.home?.runs) ? Number(linescore.home.runs) : Number(liveScore?.homeScore);
+  const innings = Array.isArray(linescore?.innings) ? linescore.innings : null;
+  const sideText = String(pick.side ?? "").trim().toUpperCase();
+  const bookLine = pick.bookLine != null && Number.isFinite(Number(pick.bookLine)) ? Number(pick.bookLine) : null;
+
+  if (GAME_MARKETS_SET.has(market)) {
+    if (!Number.isFinite(awayRuns) || !Number.isFinite(homeRuns)) return null;
+
+    if (market === "nrfi") {
+      if (!Array.isArray(innings) || innings.length < 1) return null;
+      const first = innings[0] ?? {};
+      const firstRuns = (Number(first.away) || 0) + (Number(first.home) || 0);
+      const wantNrfi = sideText === "NRFI" || sideText === "OVER";
+      return { resultHit: wantNrfi ? firstRuns === 0 : firstRuns > 0, actualStat: firstRuns, gradeStatus: null };
+    }
+
+    if (market === "total") {
+      if (bookLine == null) return null;
+      const actualTotal = awayRuns + homeRuns;
+      if (actualTotal === bookLine) return { resultHit: null, actualStat: actualTotal, gradeStatus: "push" };
+      const wantOver = sideText === "OVER";
+      return { resultHit: wantOver ? actualTotal > bookLine : actualTotal < bookLine, actualStat: actualTotal, gradeStatus: null };
+    }
+
+    if (market === "spread") {
+      if (bookLine == null || !slateGame) return null;
+      const pickHome = sideText === "HOME" || sideText === String(slateGame.home?.abbr ?? "").toUpperCase();
+      const pickAway = sideText === "AWAY" || sideText === String(slateGame.away?.abbr ?? "").toUpperCase();
+      if (!pickHome && !pickAway) return null;
+      const spreadResult = pickHome ? (homeRuns + bookLine) - awayRuns : (awayRuns + bookLine) - homeRuns;
+      if (spreadResult === 0) return { resultHit: null, actualStat: pickHome ? homeRuns - awayRuns : awayRuns - homeRuns, gradeStatus: "push" };
+      return { resultHit: spreadResult > 0, actualStat: pickHome ? homeRuns - awayRuns : awayRuns - homeRuns, gradeStatus: null };
+    }
+
+    if (market === "ml") {
+      if (awayRuns === homeRuns || !slateGame) return { resultHit: null, actualStat: awayRuns - homeRuns, gradeStatus: "push" };
+      const pickHome = sideText === "HOME" || sideText === String(slateGame.home?.abbr ?? "").toUpperCase();
+      const pickAway = sideText === "AWAY" || sideText === String(slateGame.away?.abbr ?? "").toUpperCase();
+      if (!pickHome && !pickAway) return null;
+      return { resultHit: pickHome ? homeRuns > awayRuns : awayRuns > homeRuns, actualStat: pickHome ? homeRuns - awayRuns : awayRuns - homeRuns, gradeStatus: null };
+    }
+
+    if (market === "f5ml" || market === "f5spread") {
+      if (!Array.isArray(innings) || innings.length < 5 || !slateGame) return null;
+      const f5Away = innings.slice(0, 5).reduce((sum, inn) => sum + (Number(inn?.away) || 0), 0);
+      const f5Home = innings.slice(0, 5).reduce((sum, inn) => sum + (Number(inn?.home) || 0), 0);
+      const pickHome = sideText === "HOME" || sideText === String(slateGame.home?.abbr ?? "").toUpperCase();
+      const pickAway = sideText === "AWAY" || sideText === String(slateGame.away?.abbr ?? "").toUpperCase();
+      if (!pickHome && !pickAway) return null;
+      if (market === "f5ml") {
+        if (f5Away === f5Home) return { resultHit: null, actualStat: f5Away - f5Home, gradeStatus: "push" };
+        return { resultHit: pickHome ? f5Home > f5Away : f5Away > f5Home, actualStat: pickHome ? f5Home - f5Away : f5Away - f5Home, gradeStatus: null };
+      }
+      if (bookLine == null) return null;
+      const f5SpreadResult = pickHome ? (f5Home + bookLine) - f5Away : (f5Away + bookLine) - f5Home;
+      if (f5SpreadResult === 0) return { resultHit: null, actualStat: pickHome ? f5Home - f5Away : f5Away - f5Home, gradeStatus: "push" };
+      return { resultHit: f5SpreadResult > 0, actualStat: pickHome ? f5Home - f5Away : f5Away - f5Home, gradeStatus: null };
+    }
+
+    return null;
+  }
+
+  if (!box) return null;
+
+  const battingRows = [
+    ...(Array.isArray(box?.batting?.away) ? box.batting.away : Object.values(box?.batting?.away ?? {})),
+    ...(Array.isArray(box?.batting?.home) ? box.batting.home : Object.values(box?.batting?.home ?? {})),
+  ];
+  const pitchingRows = [
+    ...(Array.isArray(box?.pitching?.away) ? box.pitching.away : Object.values(box?.pitching?.away ?? {})),
+    ...(Array.isArray(box?.pitching?.home) ? box.pitching.home : Object.values(box?.pitching?.home ?? {})),
+  ];
+  const playerId = String(pick.playerId ?? "");
+
+  if (market === "hr" || market === "hits") {
+    const batter = battingRows.find((row) => String(row?.id ?? "") === playerId);
+    if (!batter) return { resultHit: null, actualStat: null, gradeStatus: "scratch" };
+    const actualStat = market === "hr" ? Number(batter?.hr ?? 0) : Number(batter?.h ?? 0);
+    return { resultHit: actualStat > 0, actualStat, gradeStatus: null };
+  }
+
+  if (market === "k" || market === "outs") {
+    const pitcher = pitchingRows.find((row) => String(row?.id ?? "") === playerId);
+    if (!pitcher) return { resultHit: null, actualStat: null, gradeStatus: "scratch" };
+    const actualStat = market === "k"
+      ? Number(pitcher?.so ?? pitcher?.k ?? 0)
+      : parseIpToOutsLocal(pitcher?.ip);
+    if (bookLine == null) return null;
+    if (actualStat === bookLine) return { resultHit: null, actualStat, gradeStatus: "push" };
+    const wantOver = sideText === "OVER";
+    return { resultHit: wantOver ? actualStat > bookLine : actualStat < bookLine, actualStat, gradeStatus: null };
+  }
+
+  return null;
+};
+
 // ─────────────────────────────────────────────
 // SANDBOX DETECTION
 // Claude artifact sandbox blocks outbound fetch.
@@ -2816,7 +2959,9 @@ export default function App() {
   const [picksViewStats, setPicksViewStats] = useState(null);
   const [picksViewLoading, setPicksViewLoading] = useState(false);
   const [picksViewDays, setPicksViewDays] = useState(0);
-  const [picksShowLegacy, setPicksShowLegacy] = useState(false);
+  const [picksShowLegacy,      setPicksShowLegacy]      = useState(false);
+  const [collapsedPickDates,   setCollapsedPickDates]   = useState(new Set()); // user manually closed
+  const [expandedPickDates,    setExpandedPickDates]    = useState(new Set()); // user reopened auto-archived
   const [collapsedMarkets, setCollapsedMarkets] = useState({
     pitcher_strikeouts: true,
     batter_home_runs: true,
@@ -2920,6 +3065,8 @@ export default function App() {
   const [liveNrfiData, setLiveNrfiData] = useState({});     // gamePk    → { awayFirst, homeFirst, lean, confidence }
   const [liveScores,   setLiveScores]   = useState({});     // gamePk    → { inning, halfInning, awayScore, homeScore, outs }
   const liveScoresRef = useRef({});                          // always-current mirror, avoids dep-array re-fires
+  const gradingPickIdsRef  = useRef(new Set());
+  const backfillRanRef     = useRef(false);       // run historical backfill once per session
   const [liveInjuries, setLiveInjuries] = useState([]);
   const [gameNotes,    setGameNotes]    = useState({});     // gamePk → note string
   const [liveTrends,   setLiveTrends]   = useState({});     // gamePk → summary string | "loading" | null
@@ -3100,6 +3247,182 @@ export default function App() {
       })
       .finally(() => setPicksViewLoading(false));
   }, [view, currentUser, picksViewDays]);
+
+  useEffect(() => {
+    if (!currentUser || !(picksViewData?.picks?.length > 0)) return;
+
+    const ungradedPicks = picksViewData.picks.filter((p) => (
+      !p.voided &&
+      p.resultHit === null &&
+      p.gradeStatus == null &&
+      !gradingPickIdsRef.current.has(p.id)
+    ));
+    if (ungradedPicks.length === 0) return;
+
+    ungradedPicks.forEach((pick) => {
+      const grade = gradePickLocally(pick, { liveBoxscores, liveScores, liveSlate });
+      if (!grade) return;
+
+      gradingPickIdsRef.current.add(pick.id);
+      setPicksViewData((prev) => {
+        if (!prev?.picks) return prev;
+        return {
+          ...prev,
+          picks: prev.picks.map((row) => (
+            row.id === pick.id
+              ? {
+                  ...row,
+                  resultHit: grade.resultHit,
+                  actualStat: grade.actualStat,
+                  gradeStatus: grade.gradeStatus,
+                  pnl: grade.resultHit !== null ? calcPickPnl(grade.resultHit, row.odds, row.units) : null,
+                }
+              : row
+          )),
+        };
+      });
+
+      apiFetch(`/api/picks/${encodeURIComponent(pick.id)}/grade`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resultHit: grade.resultHit,
+          actualStat: grade.actualStat,
+          gradeStatus: grade.gradeStatus,
+        }),
+      })
+        .then(() => apiFetch(`/api/picks/stats?days=${picksViewDays}`))
+        .then((stats) => setPicksViewStats(stats))
+        .catch(() => {})
+        .finally(() => {
+          gradingPickIdsRef.current.delete(pick.id);
+        });
+    });
+  }, [picksViewData, liveBoxscores, liveScores, liveSlate, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // One-time historical backfill: grade past picks whose boxscores aren't in liveBoxscores.
+  // Runs once per session when picks first load. For each ungraded historical pick:
+  //   - Game picks (ml/spread/total/nrfi/f5ml/f5spread): gamePk = playerId
+  //   - Prop picks (k/outs/hr/hits): fetch historical schedule to resolve gamePk
+  // Builds a synthetic liveSlate entry from game_label ("SEA @ DET") so gradePickLocally works.
+  useEffect(() => {
+    if (!currentUser || !picksViewData?.picks?.length || backfillRanRef.current) return;
+
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const historicalUngraded = picksViewData.picks.filter(p =>
+      !p.voided &&
+      p.resultHit === null &&
+      p.gradeStatus == null &&
+      p.slateDate &&
+      p.slateDate < today &&
+      !gradingPickIdsRef.current.has(p.id)
+    );
+    if (!historicalUngraded.length) return;
+
+    backfillRanRef.current = true;
+
+    (async () => {
+      // For prop picks we need gamePk from the historical schedule.
+      // Key: "YYYY-MM-DD:AWAY @ HOME" → gamePk
+      const gameLabelIndex = {};
+      const propPicks = historicalUngraded.filter(p => PROP_MARKETS_SET.has(p.market));
+      const uniquePropDates = [...new Set(propPicks.map(p => p.slateDate))];
+      for (const date of uniquePropDates) {
+        try {
+          const schedGames = await apiFetch(`/api/schedule?date=${date}`);
+          if (Array.isArray(schedGames)) {
+            schedGames.forEach(g => {
+              const label = `${g.away?.abbr ?? ""} @ ${g.home?.abbr ?? ""}`;
+              gameLabelIndex[`${date}:${label}`] = g.gamePk;
+            });
+          }
+        } catch (_) {}
+      }
+
+      // Collect all gamePks we need boxscores for
+      const gamePkSet = new Set();
+      historicalUngraded.forEach(p => {
+        if (GAME_MARKETS_SET.has(p.market) && p.playerId) {
+          gamePkSet.add(String(p.playerId));
+        } else if (PROP_MARKETS_SET.has(p.market) && p.gameLabel && p.slateDate) {
+          const gp = gameLabelIndex[`${p.slateDate}:${p.gameLabel}`];
+          if (gp) gamePkSet.add(String(gp));
+        }
+      });
+
+      // Fetch missing boxscores (skip any already in liveBoxscores)
+      const extraBoxscores = {};
+      for (const gamePk of gamePkSet) {
+        if (liveBoxscores[gamePk]) continue; // already loaded
+        try {
+          const box = await apiFetch(`/api/boxscore/${gamePk}`);
+          if (box?.batting) extraBoxscores[gamePk] = box;
+        } catch (_) {}
+      }
+
+      const allBoxscores = { ...liveBoxscores, ...extraBoxscores };
+
+      // Grade and persist each historical pick
+      historicalUngraded.forEach(pick => {
+        // Resolve gamePk
+        let gamePk;
+        if (GAME_MARKETS_SET.has(pick.market)) {
+          gamePk = String(pick.playerId ?? "");
+        } else {
+          const gp = gameLabelIndex[`${pick.slateDate}:${pick.gameLabel}`];
+          gamePk = gp ? String(gp) : null;
+        }
+        if (!gamePk || !allBoxscores[gamePk]) return;
+
+        // Build a synthetic liveSlate entry so gradePickLocally can resolve teams and status.
+        // Parse away/home abbrs from the stored "AWAY @ HOME" game_label.
+        const [awayAbbr = "", homeAbbr = ""] = (pick.gameLabel ?? "").split(" @ ");
+        const syntheticSlate = [{
+          gamePk: Number(gamePk),
+          status: "Final",
+          away: { abbr: awayAbbr.trim() },
+          home: { abbr: homeAbbr.trim() },
+        }];
+
+        if (gradingPickIdsRef.current.has(pick.id)) return;
+        gradingPickIdsRef.current.add(pick.id);
+
+        const grade = gradePickLocally(pick, {
+          liveBoxscores: allBoxscores,
+          liveScores: {},
+          liveSlate: syntheticSlate,
+        });
+
+        if (!grade) { gradingPickIdsRef.current.delete(pick.id); return; }
+
+        // Optimistic UI update
+        setPicksViewData(prev => {
+          if (!prev?.picks) return prev;
+          return {
+            ...prev,
+            picks: prev.picks.map(row =>
+              row.id === pick.id
+                ? { ...row, resultHit: grade.resultHit, actualStat: grade.actualStat,
+                    gradeStatus: grade.gradeStatus,
+                    pnl: grade.resultHit !== null ? calcPickPnl(grade.resultHit, row.odds, row.units) : null }
+                : row
+            ),
+          };
+        });
+
+        // Persist
+        apiFetch(`/api/picks/${encodeURIComponent(pick.id)}/grade`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ resultHit: grade.resultHit, actualStat: grade.actualStat, gradeStatus: grade.gradeStatus }),
+        })
+          .then(() => apiFetch(`/api/picks/stats?days=${picksViewDays}`))
+          .then(stats => setPicksViewStats(stats))
+          .catch(() => {})
+          .finally(() => gradingPickIdsRef.current.delete(pick.id));
+      });
+    })();
+  }, [picksViewData?.picks?.length, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const voidPick = useCallback(async (pickId) => {
     try {
@@ -11046,12 +11369,56 @@ export default function App() {
             totalPnl: picks.some((pick) => pick.pnl != null) ? stats.totalPnl : null,
           };
           const groups = picks.reduce((acc, pick) => {
-            const key = pick.slateDate || "Unknown";
+            const key = pick.slateDate ? String(pick.slateDate).slice(0, 10) : "Unknown";
             if (!acc[key]) acc[key] = [];
             acc[key].push(pick);
             return acc;
           }, {});
           const orderedDates = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+          const todayKey = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+
+          // A date is "fully resolved" when every pick has a definitive result
+          const isDateFullyResolved = (dateKey) =>
+            (groups[dateKey] ?? []).every(p =>
+              p.resultHit !== null || p.gradeStatus === "ppd" || p.gradeStatus === "scratch" || p.gradeStatus === "push"
+            );
+
+          // Compute whether a date section is expanded:
+          //   - Today → always open unless user manually closed it
+          //   - Past date, fully resolved → auto-archive (closed) unless user manually opened it
+          //   - Past date, has pending picks → open unless user manually closed it
+          const isDateExpanded = (dateKey) => {
+            if (expandedPickDates.has(dateKey)) return true;  // user force-opened
+            if (collapsedPickDates.has(dateKey)) return false; // user force-closed
+            if (dateKey === todayKey) return true;             // today always open
+            if (isDateFullyResolved(dateKey)) return false;    // auto-archive resolved past dates
+            return true;                                        // pending picks → open
+          };
+
+          const togglePickDate = (dateKey) => {
+            const currentlyExpanded = isDateExpanded(dateKey);
+            if (currentlyExpanded) {
+              // Close it: add to collapsed, remove from expanded
+              setCollapsedPickDates(prev => new Set([...prev, dateKey]));
+              setExpandedPickDates(prev => { const n = new Set(prev); n.delete(dateKey); return n; });
+            } else {
+              // Open it: add to expanded, remove from collapsed
+              setExpandedPickDates(prev => new Set([...prev, dateKey]));
+              setCollapsedPickDates(prev => { const n = new Set(prev); n.delete(dateKey); return n; });
+            }
+          };
+
+          // Summary stats for a date's picks (used in the collapsed bar)
+          const dateSummary = (dateKey) => {
+            const datePicks = groups[dateKey] ?? [];
+            const wins = datePicks.filter(p => p.resultHit === true).length;
+            const losses = datePicks.filter(p => p.resultHit === false).length;
+            const resolved = wins + losses;
+            const pending = datePicks.filter(p => p.resultHit === null && !p.gradeStatus).length;
+            const pnl = datePicks.reduce((sum, p) => sum + (p.pnl ?? 0), 0);
+            const hasPnl = datePicks.some(p => p.pnl != null);
+            return { wins, losses, resolved, pending, total: datePicks.length, pnl: hasPnl ? pnl : null };
+          };
           const rangeOptions = [
             { days: 0, label: "ALL" },
             { days: 7, label: "7D" },
@@ -11147,17 +11514,57 @@ export default function App() {
                 </div>
               )}
 
-              {!picksViewLoading && orderedDates.map((dateKey) => (
-                <div key={dateKey} style={{ marginBottom: 18 }}>
-                  <div style={{ fontSize: 10, fontWeight: 800, color: "#6b7280", fontFamily: "monospace", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
-                    {dateKey}
-                  </div>
-                  {groups[dateKey].map((pick) => {
+              {!picksViewLoading && orderedDates.map((dateKey) => {
+                const expanded = isDateExpanded(dateKey);
+                const summary  = dateSummary(dateKey);
+                const isToday  = dateKey === todayKey;
+                const hitColor = summary.wins > summary.losses ? "#22c55e" : summary.losses > summary.wins ? "#ef4444" : "#6b7280";
+                const pnlColor = summary.pnl != null ? (summary.pnl >= 0 ? "#22c55e" : "#ef4444") : "#6b7280";
+
+                return (
+                <div key={dateKey} style={{ marginBottom: 14 }}>
+                  {/* Date header — always visible, tappable to collapse/expand */}
+                  <button
+                    onClick={() => togglePickDate(dateKey)}
+                    style={{
+                      width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+                      background: "transparent", border: "none", cursor: "pointer",
+                      padding: "4px 0 8px", gap: 8,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 10, fontWeight: 800, color: isToday ? "#f9fafb" : "#6b7280", fontFamily: "monospace", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                        {isToday ? "Today" : dateKey}
+                      </span>
+                      {/* Summary chips — always shown in header */}
+                      {summary.resolved > 0 && (
+                        <span style={{ fontSize: 8, fontWeight: 800, color: hitColor, background: `${hitColor}18`, border: `1px solid ${hitColor}40`, borderRadius: 999, padding: "1px 6px", fontFamily: "monospace" }}>
+                          {summary.wins}/{summary.resolved} hit
+                        </span>
+                      )}
+                      {summary.pending > 0 && (
+                        <span style={{ fontSize: 8, fontWeight: 700, color: "#6b7280", background: "rgba(107,114,128,0.1)", border: "1px solid rgba(107,114,128,0.25)", borderRadius: 999, padding: "1px 6px", fontFamily: "monospace" }}>
+                          {summary.pending} pending
+                        </span>
+                      )}
+                      {summary.pnl != null && summary.resolved > 0 && (
+                        <span style={{ fontSize: 8, fontWeight: 800, color: pnlColor, fontFamily: "monospace" }}>
+                          {summary.pnl >= 0 ? "+" : ""}{summary.pnl.toFixed(2)}u
+                        </span>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 10, color: "#4b5563", lineHeight: 1 }}>{expanded ? "▲" : "▼"}</span>
+                  </button>
+
+                  {/* Pick cards — only rendered when expanded */}
+                  {expanded && groups[dateKey].map((pick) => {
                     const marketColor = MARKET_COLORS[pick.market] ?? "#9ca3af";
                     const marketLabel = MARKET_LABELS[pick.market] ?? (pick.market ?? "—").toUpperCase();
+                    const pickGradeStatus = pick.gradeStatus ?? null;
                     // Derive live game status for today's unresolved picks
                     const pickGameStatus = (() => {
-                      if (pick.resultHit !== null && pick.resultHit !== undefined) return null; // already graded
+                      if (pick.resultHit !== null && pick.resultHit !== undefined) return null;
+                      if (pickGradeStatus) return null;
                       if (!liveSlate || !pick.gameLabel) return null;
                       const match = liveSlate.find(g =>
                         `${g.away?.abbr ?? ""} @ ${g.home?.abbr ?? ""}` === pick.gameLabel
@@ -11168,12 +11575,37 @@ export default function App() {
                       if (s === "Final" || s === "Game Over") return "FINAL";
                       return null;
                     })();
-                    const resultText = pick.resultHit === true ? "HIT" : pick.resultHit === false ? "MISS" : "PENDING";
-                    const resultColor = pick.resultHit === true ? "#22c55e" : pick.resultHit === false ? "#ef4444" : "#6b7280";
+                    const pickStatusBadge = (() => {
+                      if (pick.resultHit === true) {
+                        return { text: "HIT", color: "#22c55e" };
+                      }
+                      if (pick.resultHit === false) {
+                        return { text: "MISS", color: "#ef4444" };
+                      }
+                      if (pickGradeStatus === "push") {
+                        return { text: "PUSH", color: "#f59e0b" };
+                      }
+                      if (pickGradeStatus === "ppd") {
+                        return { text: "PPD", color: "#f59e0b" };
+                      }
+                      if (pickGradeStatus === "scratch") {
+                        return { text: "SCRATCH", color: "#6b7280" };
+                      }
+                      return null;
+                    })();
                     const oddsText = pick.odds == null ? null : `${pick.odds > 0 ? "+" : ""}${pick.odds}`;
                     const unitsText = pick.units != null ? `${pick.units}u` : null;
+                    // Replace HOME/AWAY with actual team abbr parsed from gameLabel ("SEA @ DET")
+                    const displaySide = (() => {
+                      const s = (pick.side ?? "").toUpperCase();
+                      if ((s === "HOME" || s === "AWAY") && pick.gameLabel) {
+                        const [awayAbbr = "", homeAbbr = ""] = pick.gameLabel.split(" @ ");
+                        return s === "HOME" ? homeAbbr.trim() : awayAbbr.trim();
+                      }
+                      return pick.side;
+                    })();
                     const metaParts = [
-                      [pick.side, pick.bookLine].filter(Boolean).join(" "),
+                      [displaySide, pick.bookLine].filter(Boolean).join(" "),
                       pick.gameLabel,
                       oddsText,
                       unitsText,
@@ -11193,13 +11625,36 @@ export default function App() {
                               {metaParts.join(" · ") || "No pick details"}
                             </div>
                             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                              {pickGameStatus
-                                ? <GameStatusBadge status={pickGameStatus} />
-                                : <span style={{ fontSize: 8, fontWeight: 800, color: resultColor, background: `${resultColor}18`, border: `1px solid ${resultColor}40`, borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.06em" }}>{resultText}</span>
-                              }
+                              {pickStatusBadge ? (
+                                <span style={{ fontSize: 8, fontWeight: 800, color: pickStatusBadge.color, background: `${pickStatusBadge.color}18`, border: `1px solid ${pickStatusBadge.color}40`, borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.06em" }}>
+                                  {pickStatusBadge.text}
+                                </span>
+                              ) : pickGameStatus ? (
+                                <GameStatusBadge status={pickGameStatus} />
+                              ) : (
+                                <span style={{ fontSize: 8, fontWeight: 800, color: "#6b7280", background: "rgba(107,114,128,0.1)", border: "1px solid rgba(107,114,128,0.25)", borderRadius: 999, padding: "2px 7px", fontFamily: "monospace", letterSpacing: "0.06em" }}>
+                                  PENDING
+                                </span>
+                              )}
                               {pick.actualStat != null && (
                                 <span style={{ fontSize: 10, color: "#6b7280", fontFamily: "monospace" }}>
-                                  actual {pick.actualStat}
+                                  {(() => {
+                                    const m = (pick.market ?? "").toLowerCase();
+                                    const v = pick.actualStat;
+                                    if (m === "ml" || m === "f5ml")
+                                      return v === 0 ? "tied" : `won by ${Math.abs(v)}`;
+                                    if (m === "spread" || m === "f5spread")
+                                      return v >= 0 ? `+${v} margin` : `${v} margin`;
+                                    if (m === "total")
+                                      return `${v} total runs`;
+                                    if (m === "nrfi")
+                                      return `${v} F1 run${v !== 1 ? "s" : ""}`;
+                                    if (m === "hr")  return `${v} HR`;
+                                    if (m === "hits") return `${v} hit${v !== 1 ? "s" : ""}`;
+                                    if (m === "k")   return `${v} K`;
+                                    if (m === "outs") return `${v} outs`;
+                                    return `actual ${v}`;
+                                  })()}
                                 </span>
                               )}
                               {pick.pnl != null && (
@@ -11209,7 +11664,7 @@ export default function App() {
                               )}
                             </div>
                           </div>
-                          {!pickGameStatus && pick.resultHit === null && (
+                          {pick.resultHit === null && pickGameStatus !== "LIVE" && (pickGradeStatus === "ppd" || pickGradeStatus === "scratch" || !pickGradeStatus) && (
                             <button
                               onClick={() => voidPick(pick.id)}
                               style={{
@@ -11233,7 +11688,8 @@ export default function App() {
                     );
                   })}
                 </div>
-              ))}
+              );
+              })}
             </div>
           );
         })()}

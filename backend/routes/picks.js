@@ -36,7 +36,7 @@ function writeStore(store) {
 function calcPnl(resultHit, odds, units) {
   if (resultHit === null || resultHit === undefined) return null;
   if (!resultHit) return -(units);
-  if (!odds) return null;
+  if (!odds) return units; // no odds logged — flat +units per win
   const profit = odds > 0
     ? units * (odds / 100)
     : units * (100 / Math.abs(odds));
@@ -154,6 +154,9 @@ async function ensurePicksSchema() {
     await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS player_name TEXT`);
     await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS snapshot JSONB NOT NULL DEFAULT '{}'`);
     await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS data JSONB NOT NULL DEFAULT '{}'`);
+    await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS result_hit BOOLEAN`);
+    await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS actual_stat NUMERIC`);
+    await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS grade_status TEXT`);
 
     await query(`
       CREATE TABLE IF NOT EXISTS board_card_snapshots (
@@ -186,8 +189,9 @@ router.get("/stats", async (req, res) => {
           p.result,
           p.odds,
           p.units,
-          bcs.result_hit,
-          bcs.actual_stat
+          COALESCE(p.result_hit, bcs.result_hit) AS result_hit,
+          COALESCE(p.actual_stat, bcs.actual_stat) AS actual_stat,
+          p.grade_status
        FROM picks p
        LEFT JOIN board_card_snapshots bcs
          ON bcs.card_id = p.player_id
@@ -289,7 +293,9 @@ router.get("/", async (req, res) => {
           p.id, p.player_id, p.player_name, p.game_label, p.market, p.side,
           p.book_line, p.odds, p.units, p.slate_date, p.source,
           p.voided, p.voided_at, p.created_at, p.snapshot, p.data, p.result,
-          bcs.result_hit, bcs.actual_stat
+          COALESCE(p.result_hit, bcs.result_hit) AS result_hit,
+          COALESCE(p.actual_stat, bcs.actual_stat) AS actual_stat,
+          p.grade_status
        FROM picks p
        LEFT JOIN board_card_snapshots bcs
          ON bcs.card_id = p.player_id
@@ -320,6 +326,7 @@ router.get("/", async (req, res) => {
         addedAt: normalized.addedAt,
         resultHit,
         actualStat: row.actual_stat != null ? Number(row.actual_stat) : null,
+        gradeStatus: row.grade_status ?? null,
         pnl: calcPnl(resultHit, normalized.odds, normalized.units),
         snapshot: normalized.snapshot,
       };
@@ -353,6 +360,7 @@ router.get("/", async (req, res) => {
           addedAt: pick.addedAt ?? null,
           resultHit,
           actualStat: pick.actualStat != null ? Number(pick.actualStat) : null,
+          gradeStatus: pick.gradeStatus ?? null,
           pnl: calcPnl(resultHit, pick.odds != null ? Number(pick.odds) : null, Number(pick.units) || 1),
           snapshot: pick.snapshot ?? null,
         };
@@ -440,6 +448,74 @@ router.post("/", async (req, res) => {
   store.picks.push(entry);
   writeStore(store);
   return res.status(201).json({ ok: true, id });
+});
+
+router.patch("/:id/grade", async (req, res) => {
+  const { resultHit, actualStat, gradeStatus } = req.body ?? {};
+
+  if (resultHit !== null && typeof resultHit !== "boolean") {
+    return res.status(400).json({ error: "resultHit must be boolean or null" });
+  }
+  if (gradeStatus != null && !["ppd", "scratch", "push"].includes(gradeStatus)) {
+    return res.status(400).json({ error: "gradeStatus must be null, ppd, scratch, or push" });
+  }
+
+  const nextActualStat = actualStat == null || actualStat === "" ? null : Number(actualStat);
+  if (nextActualStat != null && !Number.isFinite(nextActualStat)) {
+    return res.status(400).json({ error: "actualStat must be numeric or null" });
+  }
+
+  const nextResult = resultHit === true ? "hit" : resultHit === false ? "miss" : null;
+
+  if (isConnected()) {
+    await ensurePicksSchema();
+    const updated = await query(
+      `UPDATE picks
+          SET result_hit = $1,
+              actual_stat = $2,
+              grade_status = $3,
+              result = $4
+        WHERE id = $5
+          AND user_id = $6
+          AND voided = FALSE
+        RETURNING id`,
+      [resultHit, nextActualStat, gradeStatus ?? null, nextResult, req.params.id, req.userId]
+    );
+    if (!updated?.rows?.length) return res.status(404).json({ error: "Pick not found" });
+
+    return res.json({
+      ok: true,
+      resultHit,
+      actualStat: nextActualStat,
+      gradeStatus: gradeStatus ?? null,
+      result: nextResult,
+    });
+  }
+
+  const store = readStore();
+  const index = store.picks.findIndex((pick) => (
+    pick.id === req.params.id &&
+    pick.userId === req.userId &&
+    !pick.voided
+  ));
+  if (index === -1) return res.status(404).json({ error: "Pick not found" });
+
+  store.picks[index] = {
+    ...store.picks[index],
+    resultHit,
+    actualStat: nextActualStat,
+    gradeStatus: gradeStatus ?? null,
+    result: nextResult,
+  };
+  writeStore(store);
+
+  return res.json({
+    ok: true,
+    resultHit,
+    actualStat: nextActualStat,
+    gradeStatus: gradeStatus ?? null,
+    result: nextResult,
+  });
 });
 
 router.patch("/:id/void", async (req, res) => {
