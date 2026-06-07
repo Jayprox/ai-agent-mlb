@@ -12489,6 +12489,41 @@ export default function App() {
                   </div>
                 </Section>
 
+                <Section title="📋 Picks Tab — Logging & Tracking Your Plays">
+                  <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
+                    The <span style={{ color: "#3b82f6", fontWeight: 700 }}>Picks</span> tab is your personal betting log — track every play you act on, see live grading as games finish, and monitor your running record and P&amp;L over time.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {[
+                      ["+ icon", "Every card on the Board, Games, Model, AI Board, and Predict tabs has a small + circle in the bottom-right corner. Tap it to log that play. The icon turns blue ✓ once it's in your log. Disabled (muted) once a game has started."],
+                      ["Log Pick sheet", "After tapping +, a sheet opens with the player/game pre-filled. Choose OVER or UNDER, optionally enter your odds and units, then tap Add Pick. Odds are used to calculate P&L — if you skip them, flat units are used instead."],
+                      ["PENDING → LIVE → HIT/MISS", "Pick cards update automatically as games progress. PENDING before the game, a pulsing LIVE badge once it starts, then HIT or MISS graded the moment the game goes final — no refresh needed."],
+                      ["PPD", "If a game is postponed or cancelled, the pick is marked PPD. The Void button stays visible so you can remove it from your log manually."],
+                      ["SCRATCH", "If your player (batter or pitcher) doesn't appear in the final boxscore — a late scratch or did not play — the pick is marked SCRATCH. Void button stays visible."],
+                      ["PUSH", "Exact line hits (e.g. total is exactly 8.0 on an 8-run line) are marked PUSH and don't count toward wins or losses."],
+                      ["VOID button", "Removes a pick from your log. Only available before a game starts, or for PPD/SCRATCH edge cases. Hidden once a game is live or graded."],
+                      ["Record tile", "Shows your win-loss record across the selected date range (ALL / 7D / 30D)."],
+                      ["Hit Rate tile", "Win percentage across resolved picks (excludes pending, push, PPD, scratch)."],
+                      ["P&L tile", "Units profit/loss. When odds are logged: vig-adjusted (e.g. −110 win = +0.91u). When no odds: flat +1u per win, −units per loss. Negative is red, positive is green."],
+                      ["Collapsible dates", "Picks are grouped by date. Today's section is always open. Past dates where every pick is graded automatically collapse to a summary line (e.g. Jun 5 · 3/5 hit · +1.2u). Tap any date header to expand or collapse it."],
+                      ["Historical backfill", "If you had pending picks from previous days, the app automatically fetches the game results on your next session and grades them in the background. No manual action needed."],
+                    ].map(([label, desc]) => (
+                      <div key={label} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ background: "#1a1c2e", border: "1px solid #2d3148", borderRadius: 6, padding: "3px 8px", fontSize: 9, fontWeight: 700, color: "#3b82f6", fontFamily: "monospace", flexShrink: 0, minWidth: 70, textAlign: "center", whiteSpace: "nowrap" }}>{label}</div>
+                        <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.5 }}>{desc}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ background: "rgba(59,130,246,0.07)", border: "1px solid rgba(59,130,246,0.2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "#93c5fd", fontWeight: 700, marginBottom: 4 }}>💡 Tips for getting the most out of Picks</div>
+                    <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.7 }}>
+                      <span style={{ color: "#f9fafb" }}>Log odds when you have them.</span> Even approximate odds (−110 is standard for most props) give you a more accurate P&amp;L than flat units.<br />
+                      <span style={{ color: "#f9fafb" }}>Use the 7D or 30D filters</span> to track your recent performance vs all-time. Keeps the view clean during the season.<br />
+                      <span style={{ color: "#f9fafb" }}>Collapsed date sections are still counted</span> in the RECORD, HIT RATE, and P&amp;L tiles — collapsing them doesn't exclude them from your stats.
+                    </div>
+                  </div>
+                </Section>
+
                 <Section title="⚙ Settings">
                   <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
                     Access Settings by tapping the <span style={{ color: "#fbbf24", fontWeight: 700 }}>⚙</span> gear icon in the bottom footer bar. Settings are saved to your account server-side — they persist across devices and sessions.

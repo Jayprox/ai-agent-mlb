@@ -565,6 +565,120 @@ If no snapshot has run yet today, returns `{ "edges": [], "generatedAt": null, "
 
 ---
 
+## Picks
+
+### `POST /api/picks`
+Logs a new pick for the authenticated user.
+
+**Auth:** required
+
+**Request body:**
+```json
+{
+  "playerId": 592450,
+  "playerName": "Aaron Judge",
+  "market": "hr",
+  "side": "OVER",
+  "bookLine": 0.5,
+  "odds": "-130",
+  "units": 1,
+  "slateDate": "2026-06-07",
+  "gameLabel": "NYY @ PHI",
+  "source": "board"
+}
+```
+
+**Response (success):** `201 { ok: true, id: 42 }`
+
+**Response (duplicate):** `409 { error: "already_logged", id: 42 }`
+
+Duplicate detection is keyed on `(userId, playerId, market, slateDate)`. A second tap on the same card returns the existing pick's `id` rather than creating a new row.
+
+---
+
+### `GET /api/picks?days=N`
+Returns picks for the authenticated user.
+
+**Auth:** required
+
+**Query params:** `days` — `0` returns all-time; `7` returns last 7 days; `30` returns last 30 days. Defaults to `0`.
+
+**Response:**
+```json
+{
+  "picks": [
+    {
+      "id": 42,
+      "playerId": 592450,
+      "playerName": "Aaron Judge",
+      "market": "hr",
+      "side": "OVER",
+      "bookLine": 0.5,
+      "odds": "-130",
+      "units": 1,
+      "slateDate": "2026-06-07",
+      "gameLabel": "NYY @ PHI",
+      "resultHit": true,
+      "actualStat": 1,
+      "gradeStatus": null,
+      "pnl": 0.77,
+      "voided": false
+    }
+  ]
+}
+```
+
+`resultHit` is `COALESCE(picks.result_hit, board_card_snapshots.result_hit)` — the frontend grading engine writes to `picks.result_hit` directly; the board snapshot provides a fallback.
+
+---
+
+### `GET /api/picks/stats?days=N`
+Returns aggregate record stats for the authenticated user.
+
+**Auth:** required
+
+**Query params:** `days` — same as `GET /api/picks`.
+
+**Response:**
+```json
+{ "wins": 14, "losses": 9, "pending": 3, "hitRate": 0.609, "totalPnl": 4.23 }
+```
+
+`pending` count excludes voided, PPD, scratch, and push picks. `hitRate` excludes pending/push/ppd/scratch. `totalPnl` uses vig-adjusted calculation when odds are present, flat units otherwise.
+
+---
+
+### `PATCH /api/picks/:id/void`
+Marks a pick as voided and removes it from the active picks list.
+
+**Auth:** required
+
+**Response:** `{ ok: true }`
+
+Void is only permitted before a game starts, or for PPD/SCRATCH edge cases. Once a game is LIVE the Void button is hidden in the UI, but the endpoint itself does not enforce this — it is a UI-level guard.
+
+---
+
+### `PATCH /api/picks/:id/grade`
+Writes a grading result directly to the picks table. Called by the frontend grading engine after a game goes final.
+
+**Auth:** required
+
+**Request body:**
+```json
+{ "resultHit": true, "actualStat": 9, "gradeStatus": null }
+```
+
+- `resultHit` — `true` (hit), `false` (miss), `null` (unresolved)
+- `actualStat` — the raw stat value used to grade (e.g. `9` for 9 strikeouts)
+- `gradeStatus` — `"ppd"` (postponed/cancelled), `"scratch"` (player did not play), `"push"` (exact line), or `null` (standard hit/miss)
+
+**Response:** `{ ok: true, resultHit: true, actualStat: 9, gradeStatus: null, result: "hit" }`
+
+Also writes legacy `result` text field (`"hit"` / `"miss"`) for backwards compatibility with existing pick rows.
+
+---
+
 ## Recommended Research Flow
 
 For a full pre-game picture, call endpoints in this order:

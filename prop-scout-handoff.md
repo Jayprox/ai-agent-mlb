@@ -7036,3 +7036,117 @@ Toggle chip labeled **"TOP 20"** on the Hits and HR board tabs that limits the d
 - `npm run build` passed
 
 *Updated 2026-05-16 — Session 126 complete · CODEX TASK 126 implemented*
+
+---
+
+## 🗒 Session 127 — Picks System (Tasks 138–143 + Polish)
+
+**Files changed this session:**
+- `prop-scout-v7.jsx`
+- `backend/server.js`
+- `backend/routes/picks.js` (new)
+- `backend/db.js` (migration)
+- `src/board/tabHitBadge.test.js` (new)
+- `src/utils.test.js`
+- `railway.json`
+
+---
+
+**Task 138 — Picks Backend (DB migration + route upgrade)**
+
+- `picks` table: added 12 new columns — `player_id`, `market`, `side`, `book_line`, `odds`, `units`, `slate_date`, `voided`, `voided_at`, `source`, `game_label`, `player_name`
+- `GET /api/picks` LEFT JOINs `board_card_snapshots` for auto-grading
+- `POST /api/picks` with duplicate guard (HTTP 409 `{ error: "already_logged", id }`)
+- `PATCH /api/picks/:id/void`
+- `calcPnl(resultHit, odds, units)` helper
+- Flat-file fallback preserved throughout
+
+---
+
+**Task 139 — Add Pick Flow (long-press removed, replaced with tap icon)**
+
+- Originally implemented with `useLongPress` hook; later replaced with a `+`/`✓` circle icon at bottom-right of every board card
+- Icon states: `+` gray (upcoming), `+` muted (FINAL/game done), `✓` blue (already logged)
+- `openAddPickSheet` opens a centered modal with side toggle, odds/units inputs, book line pre-filled
+- `loggedPickIds` Set prevents duplicate API calls
+- `submitAddPick` calls `POST /api/picks`
+
+---
+
+**Task 140 — Picks Tab UI**
+
+- 📋 PICKS tab (gated behind `currentUser`)
+- Summary tiles: RECORD, HIT RATE, P&L
+- Picks grouped by `slateDate`, each pick card shows: market badge, player name, side/line/units, result badge, actual stat, P&L, Void button
+- ALL / 7D / 30D range filter
+- `voidPick` removes pick optimistically then calls `PATCH /api/picks/:id/void`
+
+---
+
+**Task 141 — Regression tests**
+
+- `src/board/tabHitBadge.test.js`: tests for `lookupBoardResult`, `boardOutcome`, `lockedCandidatesForType`
+- Additional `summarizeOutcomes` edge cases in `src/utils.test.js`
+
+---
+
+**Task 142 — Tap icon replaces long-press**
+
+- Removed `useLongPress` from `BatterBoardCard` and `PitcherBoardCard`
+- New `onAddPick` prop on all three card components (Batter, Pitcher, Game)
+- Icon `bottom: 6, right: 8` on all cards; disabled (muted) when game is FINAL or already logged
+
+---
+
+**Task 143 — Frontend-first picks grading**
+
+- Added `result_hit BOOLEAN`, `actual_stat NUMERIC`, `grade_status TEXT` columns to `picks` table
+- New `PATCH /api/picks/:id/grade` endpoint
+- `GET /api/picks` now uses `COALESCE(p.result_hit, bcs.result_hit)`
+- Module-level `gradePickLocally(pick, { liveBoxscores, liveScores, liveSlate })` handles all 10 markets: `ml`, `spread`, `total`, `nrfi`, `f5ml`, `f5spread`, `k`, `outs`, `hr`, `hits`
+- Background `useEffect` (no `view` condition) grades picks as games go final
+- Historical backfill `useEffect` runs once per session: fetches historical schedule + boxscores for past ungraded picks, builds synthetic slate entry from `gameLabel`, grades and persists
+- `grade_status` values: `null` (pending), `"ppd"` (postponed), `"scratch"` (player not in boxscore), `"push"` (exact line)
+- `gradingPickIdsRef` prevents double-grading
+
+---
+
+**Polish / bug fixes:**
+
+- **Live LIVE badge on Slate tab:** score poller now polls games past their scheduled start time (`msSinceStart > 0 && < 5h`) regardless of stale schedule cache status; `SlateCard` uses `liveScore.inning` as LIVE fallback (guarded by `!isFinal`)
+- **Collapsible pick date sections:** today always open; fully resolved past dates auto-collapse; summary bar shows `Jun 5 · 3/5 hit · +1.2u`; user can toggle any date
+- **Market-aware `actualStat` labels:** `won by X`, `X total runs`, `X K`, `X outs`, `X hits`, `X HR`, `0 F1 runs`
+- **`HOME`/`AWAY` in pick meta** replaced with actual team abbreviation parsed from `gameLabel`
+- **P&L flat-unit fallback:** wins with no odds logged now count as `+units` instead of null (Option B — vig-adjusted when odds available, flat otherwise)
+- **`+` icon added** to `GameBoardCard`, `EdgeCard` (Predict), AI Board inline cards, Model TierSection cards
+- **`getAiBookLine(c)` helper:** hydrates `bookLine` from `livePlayerProps` at render time for AI Board and Predict cards when snapshot `bookLine` is null
+- **`pickGameStatus` on picks tab:** shows `GameStatusBadge` (LIVE/FINAL) for today's unresolved picks
+- **Void button** hidden once game is LIVE; visible for PPD/SCRATCH edge cases
+- **`slateDate` normalization:** ISO timestamp normalized to `YYYY-MM-DD` for display (`String(pick.slateDate).slice(0, 10)`)
+- **`railway.json` fixed:** `buildCommand: "npm install --include=dev && npm run build && cd backend && npm install"` (Nixpacks production install fix)
+
+---
+
+**Architecture notes:**
+
+- Game picks store `player_id = gamePk` (numeric); grading uses `player_id` directly as gamePk for game markets
+- Prop picks store `player_id = MLB player ID`; backfill resolves gamePk by fetching `/api/schedule?date=YYYY-MM-DD` and matching `gameLabel`
+- `gradePickLocally` returns `{ resultHit, actualStat, gradeStatus }` — null if game not final yet
+- Backend `gradePicksJob.js` remains as nightly catch-up for picks logged while app was closed
+
+---
+
+**Feature freeze notice:**
+
+As of this session, the app is entering a feature-freeze period. Only bug fixes and enhancements to existing features will be accepted. No new features.
+
+---
+
+**Remaining backlog:**
+
+- Task 70: Fix Baseball Savant scraping
+- Task 72: Backtesting Phase 3 — History replay UI
+- Task 73: Backtesting Phase 4 — Performance dashboard
+- Task 137: Mobile Scoring Parity (not implemented, no mobile/src/ directory)
+
+*Updated 2026-06-07 — Session 127 complete · CODEX TASKS 138–143 implemented*
