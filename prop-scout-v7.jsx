@@ -2997,6 +2997,7 @@ export default function App() {
   const [aiBoardEdgesMeta, setAiBoardEdgesMeta] = useState({ fallback: false, generatedAt: null });
   const [boardDailySnapshot, setBoardDailySnapshot] = useState(null);
   const [boardSnapshotLoading, setBoardSnapshotLoading] = useState(false);
+  const [boardSnapshotRefreshing, setBoardSnapshotRefreshing] = useState(false);
 
   const boardSnapshotCoversToday = useCallback(() => {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
@@ -3010,6 +3011,29 @@ export default function App() {
     const snapshotCards = boardDailySnapshot[market];
     return Array.isArray(snapshotCards) ? snapshotCards : [];
   }, [boardDailySnapshot, boardSnapshotCoversToday]);
+
+  /** Mirrors backend BOARD_MARKETS (boardSnapshotDb.js) — used only to detect stale-empty markets. */
+  const BOARD_SNAPSHOT_MARKETS = ["k", "outs", "hits", "hr", "nrfi", "total", "spread", "ml", "f5ml", "f5spread"];
+
+  /** True if `snapshot` covers today but at least one market is still an empty array. */
+  const boardSnapshotHasEmptyMarket = useCallback((snapshot) => {
+    if (!snapshot || snapshot.empty === true) return false;
+    return BOARD_SNAPSHOT_MARKETS.some(
+      (market) => Array.isArray(snapshot[market]) && snapshot[market].length === 0
+    );
+  }, []);
+
+  /** Manual "force refresh" — bypasses both the response cache and the negative cache (CODEX TASK 145). */
+  const refreshBoardSnapshot = useCallback(() => {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    setBoardSnapshotRefreshing(true);
+    apiFetch(`/api/board/snapshot?date=${today}&refresh=1`)
+      .then(data => {
+        if (data && !data.empty) setBoardDailySnapshot({ ...data, date: today });
+      })
+      .catch(() => {})
+      .finally(() => setBoardSnapshotRefreshing(false));
+  }, []);
 
   const [aiBoardTab, setAiBoardTab] = useState("all");
   const [showLabTrackRecord, setShowLabTrackRecord] = useState(true);
@@ -3546,11 +3570,14 @@ export default function App() {
     return () => { cancelled = true; };
   }, [view, slateDate]);
 
-  // Poll until today's shared board snapshot exists (midnight / 10 AM HI jobs)
+  // Poll until today's shared board snapshot exists AND every market has data
+  // (midnight / 10 AM HI jobs, plus the on-demand fallback filling in
+  // stale-empty markets like hits/hr once lineups post — see CODEX TASK 145).
   useEffect(() => {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
     const isHistoricalBoard = !!(slateDate && slateDate < today);
-    if (view !== "board" || isHistoricalBoard || boardSnapshotCoversToday()) return;
+    if (view !== "board" || isHistoricalBoard) return;
+    if (boardSnapshotCoversToday() && !boardSnapshotHasEmptyMarket(boardDailySnapshot)) return;
 
     const poll = () => {
       apiFetch(`/api/board/snapshot?date=${today}`)
@@ -3562,7 +3589,7 @@ export default function App() {
 
     const interval = setInterval(poll, 90_000);
     return () => clearInterval(interval);
-  }, [view, slateDate, boardDailySnapshot]);
+  }, [view, slateDate, boardDailySnapshot, boardSnapshotCoversToday, boardSnapshotHasEmptyMarket]);
 
   useEffect(() => {
     if (!researchMode || view !== "research-perf") return;
@@ -10243,14 +10270,31 @@ export default function App() {
                   marginBottom: 10, padding: "8px 10px", borderRadius: 8,
                   background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.28)",
                   fontSize: 10, color: "#9ca3af", lineHeight: 1.45, fontFamily: "monospace",
+                  display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
                 }}>
-                  <span style={{ fontWeight: 800, color: "#22c55e" }}>Shared daily board</span>
-                  {boardDailySnapshot?.generatedAt && (
-                    <span style={{ color: "#6b7280" }}>
-                      {" "}· snapshot {formatBoardSnapshotTime(boardDailySnapshot.generatedAt)} HI
-                    </span>
-                  )}
-                  <span style={{ color: "#4b5563" }}> — same scores &amp; text for all users. Refreshes 10 AM HI + pregame.</span>
+                  <div>
+                    <span style={{ fontWeight: 800, color: "#22c55e" }}>Shared daily board</span>
+                    {boardDailySnapshot?.generatedAt && (
+                      <span style={{ color: "#6b7280" }}>
+                        {" "}· snapshot {formatBoardSnapshotTime(boardDailySnapshot.generatedAt)} HI
+                      </span>
+                    )}
+                    <span style={{ color: "#4b5563" }}> — same scores &amp; text for all users. Refreshes 10 AM HI + pregame.</span>
+                  </div>
+                  <button
+                    onClick={refreshBoardSnapshot}
+                    disabled={boardSnapshotRefreshing}
+                    style={{
+                      flexShrink: 0, background: "rgba(34,197,94,0.12)",
+                      border: "1px solid rgba(34,197,94,0.35)", borderRadius: 6,
+                      padding: "3px 9px", fontSize: 9, fontWeight: 700,
+                      color: boardSnapshotRefreshing ? "#6b7280" : "#22c55e",
+                      fontFamily: "monospace", cursor: boardSnapshotRefreshing ? "default" : "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {boardSnapshotRefreshing ? "Refreshing…" : "↻ Refresh"}
+                  </button>
                 </div>
               ) : allowLiveBoardFallback ? (
                 <div style={{
