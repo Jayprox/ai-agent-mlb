@@ -37,22 +37,38 @@ function withTimeout(promise, ms) {
   ]);
 }
 
-async function fillMissingMarkets(date, payload) {
-  const missing = BOARD_MARKETS.filter((market) => !(market in payload));
-  if (!missing.length) return;
-
+/**
+ * Fills in missing and stale-empty board markets for `date`, mutating `payload`
+ * in place. For today's date, markets that are either absent from `payload` or
+ * present-but-empty (`[]`) are candidates for on-demand recompute, subject to
+ * the `_emptyMarketAt` negative cache unless `force` is set.
+ */
+async function fillMissingMarkets(date, payload, { force = false } = {}) {
   const isToday = date === todayHonolulu();
+
+  const missing = BOARD_MARKETS.filter((market) => !(market in payload));
+
   if (!isToday) {
     for (const market of missing) payload[market] = [];
     return;
   }
 
+  const emptyToday = BOARD_MARKETS.filter(
+    (market) =>
+      market in payload &&
+      Array.isArray(payload[market]) &&
+      payload[market].length === 0
+  );
+
+  const recheckCandidates = [...missing, ...emptyToday];
+  if (!recheckCandidates.length) return;
+
   const stillMissing = [];
-  for (const market of missing) {
+  for (const market of recheckCandidates) {
     const negKey = `${date}:${market}`;
     const negAt = _emptyMarketAt.get(negKey);
-    if (negAt && Date.now() - negAt < NEGATIVE_CACHE_TTL_MS) {
-      payload[market] = [];
+    if (!force && negAt && Date.now() - negAt < NEGATIVE_CACHE_TTL_MS) {
+      if (!(market in payload)) payload[market] = [];
     } else {
       stillMissing.push(market);
     }
@@ -71,13 +87,19 @@ async function fillMissingMarkets(date, payload) {
   }
 
   if (!activeSlate.length) {
-    for (const market of stillMissing) payload[market] = [];
+    for (const market of stillMissing) {
+      if (!(market in payload)) payload[market] = [];
+      _emptyMarketAt.set(`${date}:${market}`, Date.now());
+    }
     return;
   }
 
   const liveData = await withTimeout(getLiveData(date, activeSlate), FALLBACK_BUDGET_MS);
   if (liveData === "__timeout__" || !liveData) {
-    for (const market of stillMissing) payload[market] = [];
+    for (const market of stillMissing) {
+      if (!(market in payload)) payload[market] = [];
+      _emptyMarketAt.set(`${date}:${market}`, Date.now());
+    }
     return;
   }
 
@@ -100,12 +122,15 @@ async function fillMissingMarkets(date, payload) {
 
 router.get("/snapshot", async (req, res) => {
   const date = req.query.date ?? todayHonolulu();
+  const force = ["1", "true", "yes"].includes(String(req.query.refresh ?? "").toLowerCase());
   const cacheKey = `board-daily-snapshot:${date}`;
 
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    res.setHeader("X-Cache", "HIT");
-    return res.json(cached);
+  if (!force) {
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      res.setHeader("X-Cache", "HIT");
+      return res.json(cached);
+    }
   }
 
   if (!db.isConnected()) {
@@ -131,10 +156,21 @@ router.get("/snapshot", async (req, res) => {
     }
 
     const hadAnyRows = (result?.rows?.length ?? 0) > 0;
+
+    const hasMissing = BOARD_MARKETS.some((market) => !(market in payload));
+    const hasEmptyToday =
+      date === todayHonolulu() &&
+      BOARD_MARKETS.some(
+        (market) =>
+          market in payload &&
+          Array.isArray(payload[market]) &&
+          payload[market].length === 0
+      );
+
     let usedFallback = false;
-    if (BOARD_MARKETS.some((market) => !(market in payload))) {
+    if (hasMissing || hasEmptyToday || force) {
       usedFallback = true;
-      await fillMissingMarkets(date, payload);
+      await fillMissingMarkets(date, payload, { force });
     }
 
     if (!hadAnyRows && !Object.keys(payload).some((key) => BOARD_MARKETS.includes(key) && payload[key]?.length)) {
