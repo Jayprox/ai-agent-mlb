@@ -9843,11 +9843,26 @@ export default function App() {
             k:    computePitcherBoard("k", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal),
             outs: computePitcherBoard("outs", activeSlate, livePitcherStats, liveGameLog, liveUmpires, livePlayerProps, liveTeamStats, pitcherArsenal),
           };
+          const sharedMarketOrLive = (market, liveCandidates) => {
+            if (!useSharedBoard) return liveCandidates;
+            const snapshotCandidates = getBoardMarketSnapshot(market);
+            if (snapshotCandidates === null) return liveCandidates;
+            if (Array.isArray(snapshotCandidates) && snapshotCandidates.length > 0) return snapshotCandidates;
+            return liveCandidates.length > 0 ? liveCandidates : snapshotCandidates;
+          };
           const boardCandidatesByType = {
-            hr:   useSharedBoard && snapshotPropCandidates !== null && boardTab === "hr"   ? snapshotPropCandidates : (useSharedBoard && getBoardMarketSnapshot("hr")   !== null ? getBoardMarketSnapshot("hr")   : livePropBoardCandidatesByType.hr),
-            hits: useSharedBoard && snapshotPropCandidates !== null && boardTab === "hits" ? snapshotPropCandidates : (useSharedBoard && getBoardMarketSnapshot("hits") !== null ? getBoardMarketSnapshot("hits") : livePropBoardCandidatesByType.hits),
-            k:    useSharedBoard && snapshotPropCandidates !== null && boardTab === "k"    ? snapshotPropCandidates : (useSharedBoard && getBoardMarketSnapshot("k")    !== null ? getBoardMarketSnapshot("k")    : livePropBoardCandidatesByType.k),
-            outs: useSharedBoard && snapshotPropCandidates !== null && boardTab === "outs" ? snapshotPropCandidates : (useSharedBoard && getBoardMarketSnapshot("outs") !== null ? getBoardMarketSnapshot("outs") : livePropBoardCandidatesByType.outs),
+            hr:   boardTab === "hr"   && useSharedBoard && snapshotPropCandidates !== null
+              ? (Array.isArray(snapshotPropCandidates) && snapshotPropCandidates.length > 0 ? snapshotPropCandidates : (livePropBoardCandidatesByType.hr.length > 0 ? livePropBoardCandidatesByType.hr : snapshotPropCandidates))
+              : sharedMarketOrLive("hr", livePropBoardCandidatesByType.hr),
+            hits: boardTab === "hits" && useSharedBoard && snapshotPropCandidates !== null
+              ? (Array.isArray(snapshotPropCandidates) && snapshotPropCandidates.length > 0 ? snapshotPropCandidates : (livePropBoardCandidatesByType.hits.length > 0 ? livePropBoardCandidatesByType.hits : snapshotPropCandidates))
+              : sharedMarketOrLive("hits", livePropBoardCandidatesByType.hits),
+            k:    boardTab === "k"    && useSharedBoard && snapshotPropCandidates !== null
+              ? (Array.isArray(snapshotPropCandidates) && snapshotPropCandidates.length > 0 ? snapshotPropCandidates : (livePropBoardCandidatesByType.k.length > 0 ? livePropBoardCandidatesByType.k : snapshotPropCandidates))
+              : sharedMarketOrLive("k", livePropBoardCandidatesByType.k),
+            outs: boardTab === "outs" && useSharedBoard && snapshotPropCandidates !== null
+              ? (Array.isArray(snapshotPropCandidates) && snapshotPropCandidates.length > 0 ? snapshotPropCandidates : (livePropBoardCandidatesByType.outs.length > 0 ? livePropBoardCandidatesByType.outs : snapshotPropCandidates))
+              : sharedMarketOrLive("outs", livePropBoardCandidatesByType.outs),
           };
           const allPropBoardCandidates = boardCandidatesByType[boardTab] ?? [];
           const liveBoardCandidates = allPropBoardCandidates.filter(c =>
@@ -10020,7 +10035,9 @@ export default function App() {
           // but swapped with locked snapshots once games go live/final.
           const gameBoardCandidates = (() => {
             if (!isGameBoard) return [];
-            if (useSharedBoard && snapshotGameCandidates !== null) return snapshotGameCandidates;
+            if (useSharedBoard && snapshotGameCandidates !== null) {
+              if (Array.isArray(snapshotGameCandidates) && snapshotGameCandidates.length > 0) return snapshotGameCandidates;
+            }
             const live = computeGameBoard(
               gameSubTab, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires, liveLineups
             );
@@ -10187,10 +10204,16 @@ export default function App() {
             summarizeOutcomes(items, item => gameBoardOutcome(type, item));
 
           const getGameBoardCandidatesForSubTab = (sub) => {
-            if (useSharedBoard) return getBoardMarketSnapshot(sub) ?? [];
             const live = computeGameBoard(
               sub, activeSlate, liveNrfiData, liveWeather, effectiveOddsMap, blendedPitcherStatsForGameBoard, liveUmpires, liveLineups
             );
+            if (useSharedBoard) {
+              const snapshot = getBoardMarketSnapshot(sub);
+              if (snapshot !== null) {
+                if (Array.isArray(snapshot) && snapshot.length > 0) return snapshot;
+                return live.length > 0 ? live : snapshot;
+              }
+            }
             return live.map(c => {
               const locked = lockedGameBoardCandidates[c.gamePk]?.[sub];
               const phase = getBoardGamePhase(c.gamePk);
