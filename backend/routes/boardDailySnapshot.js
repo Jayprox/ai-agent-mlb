@@ -10,6 +10,11 @@ const router = express.Router();
 const SNAPSHOT_TTL = 5 * 60 * 1000;
 const FALLBACK_BUDGET_MS = 9000;
 const NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
+// On a request timeout (gatherLiveBoardData still running in the background),
+// only block re-attempts for this long, not the full negative-cache TTL —
+// the background compute kicked off in the timeout branch should persist
+// real data well within this window if the slate has any.
+const TIMEOUT_RETRY_MS = 45 * 1000;
 
 function todayHonolulu() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
@@ -99,8 +104,37 @@ async function fillMissingMarkets(date, payload, { force = false } = {}) {
     return;
   }
 
-  const liveData = await withTimeout(getLiveData(date, activeSlate), FALLBACK_BUDGET_MS);
-  if (liveData === "__timeout__" || !liveData) {
+  const liveDataPromise = getLiveData(date, activeSlate);
+  const liveData = await withTimeout(liveDataPromise, FALLBACK_BUDGET_MS);
+
+  if (liveData === "__timeout__") {
+    // gatherLiveBoardData() is still running (it's cached in `_inFlight` by
+    // getLiveData and isn't cancelled). Don't discard that work — let it
+    // finish in the background, compute the still-missing markets from it,
+    // and persist them so the *next* poll/refresh reads real data instead of
+    // being stuck behind a 10-minute negative cache. See CODEX TASK 148.
+    liveDataPromise
+      .then((bgLiveData) => {
+        if (!bgLiveData) return null;
+        return computeAndPersistMarkets(stillMissing, activeSlate, bgLiveData, date);
+      })
+      .catch((err) => {
+        console.warn(`  ⚠ board/snapshot: background recompute failed: ${err.message}`);
+      });
+
+    // Shorter retry window than the standard negative cache: the background
+    // compute above should persist real data well within this, so the next
+    // poll/refresh re-reads the DB (and finds the market non-empty) instead
+    // of re-triggering another recompute attempt.
+    const retryAt = Date.now() - (NEGATIVE_CACHE_TTL_MS - TIMEOUT_RETRY_MS);
+    for (const market of stillMissing) {
+      if (!(market in payload)) payload[market] = [];
+      _emptyMarketAt.set(`${date}:${market}`, retryAt);
+    }
+    return;
+  }
+
+  if (!liveData) {
     for (const market of stillMissing) {
       if (!(market in payload)) payload[market] = [];
       _emptyMarketAt.set(`${date}:${market}`, Date.now());
@@ -108,14 +142,26 @@ async function fillMissingMarkets(date, payload, { force = false } = {}) {
     return;
   }
 
-  await Promise.allSettled(stillMissing.map(async (market) => {
+  await computeAndPersistMarkets(stillMissing, activeSlate, liveData, date, payload);
+}
+
+/**
+ * Computes candidates for `markets` from already-gathered `liveData` and
+ * persists each to `board_daily_snapshots`. Updates the `_emptyMarketAt`
+ * negative cache based on the actual outcome (cleared on success, set on
+ * genuine empty result). If `payload` is provided, also writes the computed
+ * candidates into it (used by the synchronous request path; omitted for the
+ * background/timeout path since the response has already been sent).
+ */
+async function computeAndPersistMarkets(markets, activeSlate, liveData, date, payload) {
+  await Promise.allSettled(markets.map(async (market) => {
     let candidates = [];
     try {
       candidates = await computeMarketCandidates(market, activeSlate, liveData);
     } catch (err) {
       console.warn(`  ⚠ board/snapshot: on-demand compute failed for ${market}: ${err.message}`);
     }
-    payload[market] = candidates;
+    if (payload) payload[market] = candidates;
     if (!candidates.length) {
       _emptyMarketAt.set(`${date}:${market}`, Date.now());
     } else {
