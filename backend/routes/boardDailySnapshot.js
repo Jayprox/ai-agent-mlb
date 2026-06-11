@@ -77,10 +77,15 @@ async function fillMissingMarkets(date, payload, { force = false } = {}) {
 
   let activeSlate;
   try {
-    const schedule = await buildSchedulePayloadForJob(date);
-    activeSlate = schedule.filter((game) =>
-      ["Scheduled", "Pre-Game", "Warmup", "In Progress"].includes(game.status)
-    );
+    // Use the full day's schedule, unfiltered by status — mirrors the web
+    // client's `activeSlate` (prop-scout-v7.jsx). computeBatterBoard /
+    // computePitcherBoard / computeGameBoard don't filter by game status
+    // themselves (they key off lineup/data availability), and excluding
+    // Final games here meant gatherLiveBoardData never fetched lineups for
+    // games that finished earlier today — producing `[]` for hits/hr even
+    // when the web's live fallback could compute real, graded candidates
+    // for those same games. See CODEX TASK 147.
+    activeSlate = await buildSchedulePayloadForJob(date);
   } catch (err) {
     console.warn(`  ⚠ board/snapshot: schedule fetch failed: ${err.message}`);
     activeSlate = [];
