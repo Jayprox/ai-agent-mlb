@@ -217,7 +217,7 @@ async function gatherLiveBoardData(activeSlate) {
       group: "hitting",
     });
     if (batchData && typeof batchData === "object") {
-      Object.assign(liveHittingLog, batchData);
+      Object.assign(liveHittingLog, batchData.results ?? {});
     }
 
     const topBatterIds = batterIds.slice(0, 60);
