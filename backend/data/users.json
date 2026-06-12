@@ -51,5 +51,10 @@
     "preferences": {
       "preferredBook": "DK"
     }
+  },
+  {
+    "id": "user11",
+    "username": "appledemo",
+    "passwordHash": "$2b$10$Nhi/ra4BgSgM6fi4HniKR.sE2Uf6eaWjRlWAYWvFxBh5pPsR.Yo4C"
   }
 ]
