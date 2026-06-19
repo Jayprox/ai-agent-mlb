@@ -5791,8 +5791,8 @@ export default function App() {
             {/* Logo / branding */}
             <div style={{ textAlign: "center", marginBottom: 28 }}>
               <div style={{ fontSize: 28, marginBottom: 6 }}>⚾</div>
-              <div style={{ fontSize: 20, fontWeight: 800, color: "#f9fafb", letterSpacing: "0.05em" }}>PROP SCOUT</div>
-              <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4, textTransform: "uppercase", letterSpacing: "0.1em" }}>MLB Research</div>
+              <div style={{ fontSize: 20, fontWeight: 800, color: "#f9fafb", letterSpacing: "0.05em" }}>CHALK THAT</div>
+              <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4, textTransform: "uppercase", letterSpacing: "0.1em" }}>AI Props Research</div>
             </div>
 
             {/* Login card */}
@@ -5849,7 +5849,7 @@ export default function App() {
         {/* ── APP HEADER ── */}
         <div style={{ display: "flex", flexDirection: isNarrowPhone ? "column" : "row", justifyContent: "space-between", alignItems: isNarrowPhone ? "flex-start" : "center", gap: isNarrowPhone ? 10 : 0, marginBottom: 16 }}>
           <div>
-            <div style={{ fontSize: isNarrowPhone ? 10 : 11, color: "#6b7280", letterSpacing: "0.1em" }}>MLB RESEARCH</div>
+            <div style={{ fontSize: isNarrowPhone ? 10 : 11, color: "#6b7280", letterSpacing: "0.1em" }}>AI PROPS RESEARCH</div>
             <div
               style={{ fontSize: isNarrowPhone ? 18 : 20, lineHeight: 1.05, fontWeight: 800, color: "#f9fafb", cursor: "default", userSelect: "none" }}
               onClick={() => {
@@ -5860,7 +5860,7 @@ export default function App() {
                   setLogoClicks(0);
                 }
               }}
-            >⚾ Prop Scout</div>
+            >⚾ Chalk That</div>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, width: isNarrowPhone ? "100%" : "auto" }}>
             <button onClick={() => setView("slate")} style={{ background: view === "slate" ? "#22c55e" : "#161827", border: `1px solid ${view === "slate" ? "#22c55e" : "#1f2437"}`, borderRadius: 8, padding: isNarrowPhone ? "6px 10px" : "6px 12px", fontSize: isNarrowPhone ? 9 : 10, color: view === "slate" ? "#000" : "#9ca3af", fontFamily: "monospace", fontWeight: 700, cursor: "pointer", textTransform: "uppercase" }}>Slate</button>
@@ -6615,7 +6615,7 @@ export default function App() {
                     handleChatSend();
                   }
                 }}
-                placeholder={chatMessagesLeft > 0 ? "Ask Prop Scout about today's slate..." : "Daily chat limit reached"}
+                placeholder={chatMessagesLeft > 0 ? "Ask Chalk That about today's slate..." : "Daily chat limit reached"}
                 disabled={chatLoading || chatMessagesLeft <= 0}
                 style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#f9fafb", fontSize: 12, fontFamily: "monospace" }}
               />
@@ -12496,7 +12496,7 @@ export default function App() {
 
                 <Section title="💬 Chat — AI Prop Assistant">
                   <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
-                    The <span style={{ color: "#60a5fa", fontWeight: 700 }}>Chat</span> tab is an AI assistant with full access to today's Prop Scout data — board candidates, AI scores, pitcher stats, sportsbook lines, umpire tendencies, weather, park factors, lineup data, and injury reports. Ask it anything from a quick question to a full parlay build.
+                    The <span style={{ color: "#60a5fa", fontWeight: 700 }}>Chat</span> tab is an AI assistant with full access to today's Chalk That data — board candidates, AI scores, pitcher stats, sportsbook lines, umpire tendencies, weather, park factors, lineup data, and injury reports. Ask it anything from a quick question to a full parlay build.
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {[
@@ -12528,7 +12528,7 @@ export default function App() {
 
                 <Section title="⚡ Predict Tab — Edge-Based Plays">
                   <div style={{ fontSize: 11, color: "#9ca3af", lineHeight: 1.6 }}>
-                    The <span style={{ color: "#fbbf24", fontWeight: 700 }}>Predict</span> tab surfaces plays where the Prop Scout simulation model believes there is a meaningful pricing gap — the model's win probability is materially higher than what the sportsbook is implying. Only plays with a gap of 8 points or more are shown.
+                    The <span style={{ color: "#fbbf24", fontWeight: 700 }}>Predict</span> tab surfaces plays where the Chalk That simulation model believes there is a meaningful pricing gap — the model's win probability is materially higher than what the sportsbook is implying. Only plays with a gap of 8 points or more are shown.
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {[
