@@ -62,7 +62,9 @@ app.use("/api/advisor", require("./routes/advisor"));
 app.use("/api/model", require("./routes/modelF5"));
 app.use("/api/board", require("./routes/boardDailySnapshot"));
 app.use("/api/board-snapshot", require("./routes/boardSnapshot"));
-app.use("/api/slate-bundle",  require("./routes/slateBundle"));  // Mobile: schedule + odds + nrfi + weather in one call
+app.use("/api/slate", require("./routes/slate"));
+app.use("/api/slate-bundle", require("./routes/slate"));  // backward-compat alias for iOS
+app.use("/api/game", require("./routes/gameDetail"));
 
 // Health check — also shows cache state
 app.get("/health", (_req, res) => {

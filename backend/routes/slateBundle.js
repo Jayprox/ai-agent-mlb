@@ -23,9 +23,10 @@ const express = require("express");
 const axios   = require("axios");
 const router  = express.Router();
 const cache   = require("../services/cache");
-const { buildSchedulePayloadForJob } = require("./schedule");
-const { getNrfiForGame }             = require("./nrfi");
-const { getOddsMap }                 = require("./odds");
+const { buildSchedulePayloadForJob }  = require("./schedule");
+const { getNrfiForGame }              = require("./nrfi");
+const { getOddsMap }                  = require("./odds");
+const { fetchPitcherStatsSummary }    = require("./players");
 
 const BUNDLE_TTL_MS  = 5  * 60 * 1000; // 5 min
 const WEATHER_TTL_MS = 60 * 60 * 1000; // 1 hr — matches weather.js
@@ -43,7 +44,7 @@ const STADIUMS = {
   "Fenway Park":               { lat: 42.3467,  lon: -71.0972,  tz: "America/New_York",    roof: false },
   "Wrigley Field":             { lat: 41.9484,  lon: -87.6553,  tz: "America/Chicago",     roof: false },
   "Busch Stadium":             { lat: 38.6226,  lon: -90.1928,  tz: "America/Chicago",     roof: false },
-  "T-Mobile Park":             { lat: 47.5914,  lon: -122.3325, tz: "America/Los_Angeles", roof: false },
+  "T-Mobile Park":             { lat: 47.5914,  lon: -122.3325, tz: "America/Los_Angeles", roof: true  },
   "Camden Yards":              { lat: 39.2838,  lon: -76.6218,  tz: "America/New_York",    roof: false },
   "Petco Park":                { lat: 32.7076,  lon: -117.1570, tz: "America/Los_Angeles", roof: false },
   "Truist Park":               { lat: 33.8907,  lon: -84.4677,  tz: "America/New_York",    roof: false },
@@ -90,7 +91,19 @@ async function fetchWeatherMap(schedule) {
     const sd = STADIUMS[game.stadium];
     if (!sd) continue;
     if (sd.roof) {
-      weatherMap[game.gamePk] = null; // dome — mobile uses its DOME_RESULT
+      // Return a minimal object with isDome: true so clients don't have to
+      // infer dome status from a null temp (open-meteo returns outdoor temps
+      // even for dome locations, making temp == nil an unreliable signal).
+      weatherMap[game.gamePk] = {
+        isDome: true,
+        temp: null,
+        windspeed: null,
+        winddirection: null,
+        weathercode: null,
+        precipitation_probability: null,
+        relativehumidity: null,
+        fetchedAt: null,
+      };
       continue;
     }
 
@@ -117,6 +130,7 @@ async function fetchWeatherMap(schedule) {
           const idx = h.time.findIndex(t => new Date(t).getHours() === hour);
           const i   = idx >= 0 ? idx : Math.min(hour, h.time.length - 1);
           const result = {
+            isDome:                    false,
             temp:                      Math.round(h.temperature_2m[i]),
             windspeed:                 h.windspeed_10m[i],
             winddirection:             h.winddirection_10m[i],
@@ -169,7 +183,26 @@ router.get("/", async (req, res) => {
       nrfiMap[g.gamePk] = r.status === "fulfilled" ? r.value : null;
     });
 
-    const bundle = { schedule, oddsMap, nrfiMap, weatherMap, fetchedAt: new Date().toISOString() };
+    // ── 4. Pitcher season stats (ERA / WHIP / K9) ─────────────────────────
+    // Collect unique pitcher IDs across all games, then batch-fetch.
+    // fetchPitcherStatsSummary shares the same 3-layer cache as /api/players/:id/stats
+    // so this adds zero extra MLB API calls when the stats are already warm.
+    const pitcherStatsMap = {};
+    const pitcherIds = new Set();
+    schedule.forEach(g => {
+      if (g.probablePitchers?.home?.id) pitcherIds.add(g.probablePitchers.home.id);
+      if (g.probablePitchers?.away?.id) pitcherIds.add(g.probablePitchers.away.id);
+    });
+
+    await Promise.allSettled(
+      [...pitcherIds].map(id =>
+        fetchPitcherStatsSummary(id)
+          .then(stats => { if (stats) pitcherStatsMap[String(id)] = stats; })
+          .catch(() => {})
+      )
+    );
+
+    const bundle = { schedule, oddsMap, nrfiMap, weatherMap, pitcherStatsMap, fetchedAt: new Date().toISOString() };
     cache.set(cacheKey, bundle, BUNDLE_TTL_MS);
 
     res.setHeader("X-Cache", "MISS");
@@ -177,7 +210,8 @@ router.get("/", async (req, res) => {
       `  ✓ slate-bundle  games=${schedule.length}` +
       `  nrfi=${Object.values(nrfiMap).filter(Boolean).length}` +
       `  weather=${Object.values(weatherMap).filter(Boolean).length}` +
-      `  odds=${oddsMap ? Object.keys(oddsMap).length + " games" : "cold"}`
+      `  odds=${oddsMap ? Object.keys(oddsMap).length + " games" : "cold"}` +
+      `  pitchers=${Object.keys(pitcherStatsMap).length}`
     );
     return res.json(bundle);
 
@@ -188,3 +222,6 @@ router.get("/", async (req, res) => {
 });
 
 module.exports = router;
+module.exports.STADIUMS = STADIUMS;
+module.exports.stadiumHour = stadiumHour;
+module.exports.fetchWeatherMap = fetchWeatherMap;

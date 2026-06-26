@@ -65,26 +65,12 @@ const emptyRbiContext = () => ({
   extraBaseHits: 0,
 });
 
-// ── GET /api/players/:playerId/stats?group=hitting|pitching ──
-// Returns season stats + player info for a given MLB player ID.
-// `group` defaults to "hitting". Pass "pitching" for pitchers.
-//
-// Known IDs (from handoff doc):
-//   Zack Wheeler  554430
-//   Aaron Judge   592450
-router.get("/:playerId/stats", async (req, res) => {
-  const { playerId } = req.params;
-  const group        = req.query.group ?? "hitting";
-  const cacheKey     = `player:${playerId}:${group}`;
+async function fetchPlayerStatsPayload(playerId, group = "hitting") {
+  const cacheKey = `player:${playerId}:${group}`;
 
-  // 1. In-memory cache
   const cached = cache.get(cacheKey);
-  if (cached) {
-    res.setHeader("X-Cache", "HIT");
-    return res.json(cached);
-  }
+  if (cached) return cached;
 
-  // 2. DB snapshot (today's pre-fetched stats from snapshotPitcherGamelogs job)
   if (db.isConnected()) {
     try {
       const today = todayHonolulu();
@@ -96,69 +82,195 @@ router.get("/:playerId/stats", async (req, res) => {
       if (snap?.rows?.[0]?.data) {
         const result = snap.rows[0].data;
         cache.set(cacheKey, result, 6 * 60 * 60 * 1000);
-        res.setHeader("X-Cache", "DB-HIT");
-        return res.json(result);
+        return result;
       }
     } catch (dbErr) {
       console.warn(`  ⚠ player stats DB read failed for ${playerId}: ${dbErr.message}`);
     }
   }
 
-  // 3. Live MLB API fallback (only fires if snapshot is missing)
+  const [personRes, statsRes] = await Promise.all([
+    mlb.get(`/people/${playerId}`, {
+      params: { hydrate: "currentTeam" },
+    }),
+    mlb.get(`/people/${playerId}/stats`, {
+      params: { stats: "season", group, season: SEASON },
+    }),
+  ]);
+
+  const person = personRes.data.people?.[0];
+  if (!person) {
+    const error = new Error("Player not found");
+    error.status = 404;
+    throw error;
+  }
+
+  const seasonSplit = statsRes.data.stats?.[0]?.splits?.[0]?.stat ?? {};
+
+  const result = {
+    id:       parseInt(playerId, 10),
+    name:     person.fullName,
+    number:   person.primaryNumber ?? "?",
+    team:     TEAM_ABBR[person.currentTeam?.id] ?? person.currentTeam?.abbreviation ?? "?",
+    position: person.primaryPosition?.abbreviation ?? "?",
+    hand:     group === "hitting"
+      ? person.batSide?.code ?? "?"
+      : person.pitchHand?.code ?? "?",
+    season: seasonSplit,
+    ...(group === "hitting" && {
+      avg: seasonSplit.avg ?? ".000",
+      ops: seasonSplit.ops ?? ".000",
+      hr:  seasonSplit.homeRuns ?? 0,
+      rbi: seasonSplit.rbi ?? 0,
+    }),
+    ...(group === "pitching" && {
+      era:    seasonSplit.era ?? "0.00",
+      whip:   seasonSplit.whip ?? "0.00",
+      kPer9:  seasonSplit.strikeoutsPer9Inn ?? "0.0",
+      bbPer9: seasonSplit.walksPer9Inn ?? "0.0",
+      wins:   seasonSplit.wins ?? 0,
+      losses: seasonSplit.losses ?? 0,
+      ip:     seasonSplit.inningsPitched ?? "0.0",
+      k:      seasonSplit.strikeOuts ?? 0,
+      bb:     seasonSplit.baseOnBalls ?? 0,
+    }),
+  };
+
+  cache.set(cacheKey, result, 6 * 60 * 60 * 1000);
+  return result;
+}
+
+async function fetchPlayerGamelogPayload(playerId, group = "hitting") {
+  const cacheKey = `gamelog:${playerId}:${group}`;
+  const today = todayHonolulu();
+
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  if (db.isConnected()) {
+    try {
+      const dbResult = await db.query(
+        `SELECT data FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = $2 AND slate_date = $3`,
+        [parseInt(playerId, 10), group, today]
+      );
+      if (dbResult?.rows?.length) {
+        const result = dbResult.rows[0].data;
+        cache.set(cacheKey, result, GAMELOG_TTL_MS);
+        return result;
+      }
+    } catch (dbErr) {
+      console.warn(`gamelog DB read failed for ${playerId}:`, dbErr.message);
+    }
+  }
+
+  let season = SEASON;
+  let splits = await gamelogStatsFor(playerId, group, season);
+
+  if (!splits.length) {
+    season -= 1;
+    splits = await gamelogStatsFor(playerId, group, season);
+  }
+
+  const { person, seasonSplit } = await seasonStatsFor(playerId, group, season);
+  if (!person) {
+    const error = new Error("Player not found");
+    error.status = 404;
+    throw error;
+  }
+
+  const sorted = [...splits].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+
+  const result = group === "pitching"
+    ? (() => {
+        const starts = sorted
+          .filter(g => (g.stat?.gamesStarted ?? 0) > 0)
+          .slice(0, 5);
+        const games = starts.map(g => ({
+          date:     g.date,
+          opponent: TEAM_ABBR[g.opponent?.id] ?? g.opponent?.name ?? "?",
+          ip:       g.stat?.inningsPitched ?? "0.0",
+          k:        g.stat?.strikeOuts ?? 0,
+          er:       g.stat?.earnedRuns ?? 0,
+          pc:       g.stat?.numberOfPitches ?? null,
+          era:      g.stat?.era ?? "0.00",
+          result:   (g.stat?.wins ?? 0) > 0 ? "W" : (g.stat?.losses ?? 0) > 0 ? "L" : "ND",
+        }));
+        const totalOuts = games.reduce((sum, g) => sum + parseIpToOuts(g.ip), 0);
+        const avgIPOuts  = games.length > 0 ? totalOuts / games.length : 0;
+        const avgIPWhole  = Math.floor(avgIPOuts / 3);
+        const avgIPThirds = Math.round(avgIPOuts % 3);
+        const avgIP = games.length > 0 ? `${avgIPWhole}.${avgIPThirds}` : "—";
+        return { group: "pitching", games, avgIP, seasonEra: seasonSplit?.era ?? "0.00" };
+      })()
+    : (() => {
+        const games = sorted
+          .slice(0, 10)
+          .map(g => ({
+            date:     g.date,
+            opponent: TEAM_ABBR[g.opponent?.id] ?? g.opponent?.name ?? "?",
+            ab:       g.stat?.atBats ?? 0,
+            h:        g.stat?.hits ?? 0,
+            hr:       g.stat?.homeRuns ?? 0,
+            rbi:      g.stat?.rbi ?? 0,
+            avg:      g.stat?.avg ?? ".000",
+          }));
+
+        const last7Games = sorted
+          .filter(g => (g.stat?.atBats ?? 0) > 0)
+          .slice(0, 7);
+        const last7Hits = last7Games.reduce((sum, g) => sum + (g.stat?.hits ?? 0), 0);
+        const last7Abs = last7Games.reduce((sum, g) => sum + (g.stat?.atBats ?? 0), 0);
+
+        const gp    = Number(seasonSplit?.gamesPlayed) || 0;
+        const tbTot = Number(seasonSplit?.totalBases) || 0;
+        return {
+          group:     "hitting",
+          games,
+          seasonAvg: seasonSplit?.avg    ?? ".000",
+          last7Avg:  last7Abs > 0 ? `${(last7Hits / last7Abs).toFixed(3).replace(/^0/, "")}` : ".000",
+          avg:    seasonSplit?.avg      ?? ".000",
+          ops:    seasonSplit?.ops      ?? ".000",
+          slg:    seasonSplit?.sluggingPercentage ?? ".000",
+          hr:     seasonSplit?.homeRuns ?? 0,
+          avgTB:  gp > 0 ? (tbTot / gp).toFixed(1) : "—",
+          hand:   person?.batSide?.code ?? null,
+          hitRate: games.slice(0, 5).map(g => g.h > 0 ? 1 : 0),
+        };
+      })();
+
+  if (db.isConnected()) {
+    db.query(
+      `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
+       VALUES ($1, $2, $3, NOW(), $4)
+       ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
+         SET fetched_at = NOW(), data = $4`,
+      [parseInt(playerId, 10), group, today, JSON.stringify(result)]
+    ).catch(err => console.warn(`gamelog DB write failed for ${playerId}:`, err.message));
+  }
+
+  cache.set(cacheKey, result, GAMELOG_TTL_MS);
+  return result;
+}
+
+// ── GET /api/players/:playerId/stats?group=hitting|pitching ──
+// Returns season stats + player info for a given MLB player ID.
+// `group` defaults to "hitting". Pass "pitching" for pitchers.
+//
+// Known IDs (from handoff doc):
+//   Zack Wheeler  554430
+//   Aaron Judge   592450
+router.get("/:playerId/stats", async (req, res) => {
+  const { playerId } = req.params;
+  const group        = req.query.group ?? "hitting";
   try {
-    // Fetch person info + season stats in parallel
-    const [personRes, statsRes] = await Promise.all([
-      mlb.get(`/people/${playerId}`, {
-        params: { hydrate: "currentTeam" },
-      }),
-      mlb.get(`/people/${playerId}/stats`, {
-        params: { stats: "season", group, season: SEASON },
-      }),
-    ]);
-
-    const person = personRes.data.people?.[0];
-    if (!person) return res.status(404).json({ error: "Player not found" });
-
-    const seasonSplit = statsRes.data.stats?.[0]?.splits?.[0]?.stat ?? {};
-
-    // Shape the response to mirror our mock data structure
-    const result = {
-      id:       parseInt(playerId),
-      name:     person.fullName,
-      number:   person.primaryNumber ?? "?",
-      team:     TEAM_ABBR[person.currentTeam?.id] ?? person.currentTeam?.abbreviation ?? "?",
-      position: person.primaryPosition?.abbreviation ?? "?",
-      hand:     group === "hitting"
-        ? person.batSide?.code ?? "?"
-        : person.pitchHand?.code ?? "?",
-      season: seasonSplit,
-      // Hitting-specific computed fields for the app
-      ...(group === "hitting" && {
-        avg: seasonSplit.avg ?? ".000",
-        ops: seasonSplit.ops ?? ".000",
-        hr:  seasonSplit.homeRuns ?? 0,
-        rbi: seasonSplit.rbi ?? 0,
-      }),
-      // Pitching-specific computed fields
-      ...(group === "pitching" && {
-        era:    seasonSplit.era ?? "0.00",
-        whip:   seasonSplit.whip ?? "0.00",
-        kPer9:  seasonSplit.strikeoutsPer9Inn ?? "0.0",
-        bbPer9: seasonSplit.walksPer9Inn ?? "0.0",
-        wins:   seasonSplit.wins ?? 0,
-        losses: seasonSplit.losses ?? 0,
-        ip:     seasonSplit.inningsPitched ?? "0.0",
-        k:      seasonSplit.strikeOuts ?? 0,
-        bb:     seasonSplit.baseOnBalls ?? 0,
-      }),
-    };
-
-    // Stats update nightly — cache for 6 hours
-    cache.set(cacheKey, result, 6 * 60 * 60 * 1000);
-    res.setHeader("X-Cache", "MISS");
+    const cacheKey = `player:${playerId}:${group}`;
+    const cacheHit = !!cache.get(cacheKey);
+    const result = await fetchPlayerStatsPayload(playerId, group);
+    res.setHeader("X-Cache", cacheHit ? "HIT" : "MISS");
     res.json(result);
   } catch (err) {
-    res.status(502).json({ error: "MLB API unavailable", detail: err.message });
+    res.status(err.status ?? 502).json({ error: err.status === 404 ? "Player not found" : "MLB API unavailable", detail: err.message });
   }
 });
 
@@ -303,129 +415,14 @@ router.post("/gamelogs/batch", async (req, res) => {
 router.get("/:playerId/gamelog", async (req, res) => {
   const { playerId } = req.params;
   const group = req.query.group === "pitching" ? "pitching" : "hitting";
-  const cacheKey = `gamelog:${playerId}:${group}`;
-  const today = todayHonolulu();
-
-  // 1. In-memory cache (fastest — same-request dedup within one process lifetime)
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    res.setHeader("X-Cache", "HIT");
-    return res.json(cached);
-  }
-
-  // 2. DB snapshot for today (survives dyno restarts)
-  if (db.isConnected()) {
-    try {
-      const dbResult = await db.query(
-        `SELECT data FROM player_gamelog_snapshots
-         WHERE player_id = $1 AND stat_group = $2 AND slate_date = $3`,
-        [parseInt(playerId, 10), group, today]
-      );
-      if (dbResult?.rows?.length) {
-        const result = dbResult.rows[0].data;
-        cache.set(cacheKey, result, GAMELOG_TTL_MS);
-        res.setHeader("X-Cache", "DB_HIT");
-        return res.json(result);
-      }
-    } catch (dbErr) {
-      console.warn(`gamelog DB read failed for ${playerId}:`, dbErr.message);
-      // fall through to MLB API
-    }
-  }
-
-  // 3. MLB API fetch — write through to DB and in-memory cache
   try {
-    let season = SEASON;
-    let splits = await gamelogStatsFor(playerId, group, season);
-
-    if (!splits.length) {
-      season -= 1;
-      splits = await gamelogStatsFor(playerId, group, season);
-    }
-
-    const { person, seasonSplit } = await seasonStatsFor(playerId, group, season);
-    if (!person) return res.status(404).json({ error: "Player not found" });
-
-    const sorted = [...splits].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
-
-    const result = group === "pitching"
-      ? (() => {
-          const starts = sorted
-            .filter(g => (g.stat?.gamesStarted ?? 0) > 0)
-            .slice(0, 5);
-          const games = starts.map(g => ({
-            date:     g.date,
-            opponent: TEAM_ABBR[g.opponent?.id] ?? g.opponent?.name ?? "?",
-            ip:       g.stat?.inningsPitched ?? "0.0",
-            k:        g.stat?.strikeOuts ?? 0,
-            er:       g.stat?.earnedRuns ?? 0,
-            pc:       g.stat?.numberOfPitches ?? null,
-            era:      g.stat?.era ?? "0.00",
-            result:   (g.stat?.wins ?? 0) > 0 ? "W" : (g.stat?.losses ?? 0) > 0 ? "L" : "ND",
-          }));
-          // avgIP from actual recent starts — avoids relying on gamesStarted in season stats
-          const totalOuts = games.reduce((sum, g) => sum + parseIpToOuts(g.ip), 0);
-          const avgIPOuts  = games.length > 0 ? totalOuts / games.length : 0;
-          const avgIPWhole  = Math.floor(avgIPOuts / 3);
-          const avgIPThirds = Math.round(avgIPOuts % 3);
-          const avgIP = games.length > 0 ? `${avgIPWhole}.${avgIPThirds}` : "—";
-          return { group: "pitching", games, avgIP, seasonEra: seasonSplit?.era ?? "0.00" };
-        })()
-      : (() => {
-          const games = sorted
-            .slice(0, 10)
-            .map(g => ({
-              date:     g.date,
-              opponent: TEAM_ABBR[g.opponent?.id] ?? g.opponent?.name ?? "?",
-              ab:       g.stat?.atBats ?? 0,
-              h:        g.stat?.hits ?? 0,
-              hr:       g.stat?.homeRuns ?? 0,
-              rbi:      g.stat?.rbi ?? 0,
-              avg:      g.stat?.avg ?? ".000",
-            }));
-
-          const last7Games = sorted
-            .filter(g => (g.stat?.atBats ?? 0) > 0)
-            .slice(0, 7);
-          const last7Hits = last7Games.reduce((sum, g) => sum + (g.stat?.hits ?? 0), 0);
-          const last7Abs = last7Games.reduce((sum, g) => sum + (g.stat?.atBats ?? 0), 0);
-
-          const gp    = Number(seasonSplit?.gamesPlayed) || 0;
-          const tbTot = Number(seasonSplit?.totalBases) || 0;
-          return {
-            group:     "hitting",
-            games,
-            seasonAvg: seasonSplit?.avg    ?? ".000",
-            last7Avg:  last7Abs > 0 ? `${(last7Hits / last7Abs).toFixed(3).replace(/^0/, "")}` : ".000",
-            // Season-level stats used by batter stat boxes in the Lineup tab
-            avg:    seasonSplit?.avg      ?? ".000",
-            ops:    seasonSplit?.ops      ?? ".000",
-            slg:    seasonSplit?.sluggingPercentage ?? ".000",
-            hr:     seasonSplit?.homeRuns ?? 0,
-            avgTB:  gp > 0 ? (tbTot / gp).toFixed(1) : "—",
-            // Batting hand from person data — lineup API sometimes misses batSide
-            hand:   person?.batSide?.code ?? null,
-            // Last-5 hit indicator (1 = got a hit, 0 = hitless) for the dot row
-            hitRate: games.slice(0, 5).map(g => g.h > 0 ? 1 : 0),
-          };
-        })();
-
-    // Write through to DB (best-effort — never block the response)
-    if (db.isConnected()) {
-      db.query(
-        `INSERT INTO player_gamelog_snapshots (player_id, stat_group, slate_date, fetched_at, data)
-         VALUES ($1, $2, $3, NOW(), $4)
-         ON CONFLICT (player_id, stat_group, slate_date) DO UPDATE
-           SET fetched_at = NOW(), data = $4`,
-        [parseInt(playerId, 10), group, today, JSON.stringify(result)]
-      ).catch(err => console.warn(`gamelog DB write failed for ${playerId}:`, err.message));
-    }
-
-    cache.set(cacheKey, result, GAMELOG_TTL_MS);
-    res.setHeader("X-Cache", "MISS");
+    const cacheKey = `gamelog:${playerId}:${group}`;
+    const cacheHit = !!cache.get(cacheKey);
+    const result = await fetchPlayerGamelogPayload(playerId, group);
+    res.setHeader("X-Cache", cacheHit ? "HIT" : "MISS");
     return res.json(result);
   } catch (err) {
-    return res.status(502).json({ error: "MLB API unavailable", detail: err.message });
+    return res.status(err.status ?? 502).json({ error: err.status === 404 ? "Player not found" : "MLB API unavailable", detail: err.message });
   }
 });
 
@@ -542,4 +539,63 @@ router.get("/:batterId/vs/:pitcherId", async (req, res) => {
   }
 });
 
+/**
+ * Lightweight pitcher season stats for the slate bundle.
+ * Returns { era, whip, k9 } or null on failure.
+ * Uses the same 3-layer cache as GET /api/players/:id/stats so no duplicate
+ * MLB API calls are made when both the route and the bundle hit the same pitcher.
+ */
+async function fetchPitcherStatsSummary(pitcherId) {
+  const id       = parseInt(pitcherId, 10);
+  const cacheKey = `player-stats:${id}:pitching`;
+
+  // L1 — in-memory cache (populated by the /stats route or a prior bundle build)
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    return {
+      era:  cached.era    ?? "—",
+      whip: cached.whip   ?? "—",
+      k9:   cached.kPer9  ?? "—",
+    };
+  }
+
+  // L2 — DB snapshot (written nightly by snapshotPitcherGamelogs job)
+  if (db.isConnected()) {
+    try {
+      const today = todayHonolulu();
+      const snap  = await db.query(
+        `SELECT data FROM player_gamelog_snapshots
+         WHERE player_id = $1 AND stat_group = $2 AND slate_date = $3`,
+        [id, "season:pitching", today]
+      );
+      if (snap?.rows?.[0]?.data) {
+        const d = snap.rows[0].data;
+        return {
+          era:  d.era    ?? "—",
+          whip: d.whip   ?? "—",
+          k9:   d.kPer9  ?? "—",
+        };
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // L3 — live MLB Stats API
+  try {
+    const statsRes = await mlb.get(`/people/${id}/stats`, {
+      params: { stats: "season", group: "pitching", season: SEASON },
+    });
+    const stat = statsRes.data.stats?.[0]?.splits?.[0]?.stat ?? {};
+    return {
+      era:  stat.era                ?? "—",
+      whip: stat.whip               ?? "—",
+      k9:   stat.strikeoutsPer9Inn  ?? "—",
+    };
+  } catch {
+    return null;
+  }
+}
+
 module.exports = router;
+module.exports.fetchPitcherStatsSummary = fetchPitcherStatsSummary;
+module.exports.fetchPlayerStatsPayload = fetchPlayerStatsPayload;
+module.exports.fetchPlayerGamelogPayload = fetchPlayerGamelogPayload;

@@ -284,8 +284,8 @@ async function generateDailyAiSnapshot(label = "scheduled") {
     ...c,
     aiScore:  aiScores[c.id]?.aiScore  ?? Math.round((c.score ?? 50) * 0.6 + (c.simConfidence ?? 50) * 0.4),
     aiReason: aiScores[c.id]?.aiReason ?? null,
-    bookLine: c.propLine?.books?.DK?.line ?? c.propLine?.books?.FD?.line ?? c.suggestedLine ?? null,
-    bookOdds: c.propLine?.books?.DK?.overOdds ?? null,
+    bookLine: c.bookLine ?? c._candidate?.propLine?.books?.DK?.line ?? c._candidate?.propLine?.books?.FD?.line ?? c._candidate?.suggestedLine ?? null,
+    bookOdds: c.bookOdds ?? c._candidate?.propLine?.books?.DK?.overOdds ?? null,
   })).filter(c => (c.aiScore ?? 0) >= 55) // only meaningful edges
     .sort((a, b) => (b.aiScore ?? 0) - (a.aiScore ?? 0));
 

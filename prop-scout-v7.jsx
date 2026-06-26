@@ -1667,7 +1667,7 @@ const SLATE = [
 
 // ─────────────────────────────────────────────
 // LIVE GAME BUILDER
-// Converts a /api/schedule response object into a game-card-compatible
+// Converts a slate schedule entry into a game-card-compatible
 // object. SLATE[0] fills gaps until Baseball Savant + prop engine land.
 // ─────────────────────────────────────────────
 const buildLiveGame = (sg) => {
@@ -1707,6 +1707,51 @@ const buildLiveGame = (sg) => {
     lineups:          { away: [], home: [] },
     props:            [],
   };
+};
+
+const formatSlateWeatherEntry = (game, rawWeather) => {
+  const stadium = STADIUMS[game?.stadium];
+  if (stadium?.roof && !rawWeather) {
+    return {
+      condition: "Dome",
+      wind: "N/A",
+      humidity: "N/A",
+      rainChance: "N/A",
+      roof: true,
+      hrFavorable: false,
+      live: false,
+    };
+  }
+  if (!rawWeather || !stadium) {
+    return {
+      condition: "Unavailable",
+      wind: "N/A",
+      humidity: "N/A",
+      rainChance: "N/A",
+      roof: !!stadium?.roof,
+      hrFavorable: false,
+      live: false,
+    };
+  }
+  return {
+    temp:        rawWeather.temp,
+    condition:   WMO_CODES[rawWeather.weathercode] ?? "Unknown",
+    wind:        windDescription(rawWeather.winddirection, rawWeather.windspeed, stadium.orientation),
+    humidity:    `${Math.round(rawWeather.relativehumidity ?? 0)}%`,
+    rainChance:  `${rawWeather.precipitation_probability ?? 0}%`,
+    roof:        !!stadium.roof,
+    hrFavorable: isHrFavorable(rawWeather.winddirection, rawWeather.windspeed, stadium.orientation, rawWeather.temp),
+    live:        true,
+    fetchedAt:   rawWeather.fetchedAt,
+  };
+};
+
+const formatSlateWeatherMap = (games, weatherMap) => {
+  const next = {};
+  (games ?? []).forEach((game) => {
+    next[game.gamePk] = formatSlateWeatherEntry(game, weatherMap?.[game.gamePk] ?? null);
+  });
+  return next;
 };
 
 const SLabel = ({ children }) => (
@@ -3104,6 +3149,7 @@ export default function App() {
   const [dailyCard,      setDailyCard]      = useState(null);  // null | "loading" | { card, date, gamesAnalyzed, cap, ... }
   const [dailyCardOpen,  setDailyCardOpen]  = useState(false); // controls panel visibility
   const playerPropsFetched = useRef(new Set());               // guards sportsbook lines fetch
+  const gameDetailFetched = useRef(new Set());                // prevents repeat unified game-detail fetches
   const [pitcherPlatoonSplits, setPitcherPlatoonSplits] = useState({}); // pitcherId → {vsL,vsR} | "loading" | null
   const [liveStatSplits,       setLiveStatSplits]       = useState({}); // `${id}:${group}` → splits obj | "loading" | null
   const [boardTab,             setBoardTab]             = useState("hr"); // "hr" | "hits" | "k" | "outs" | "games"
@@ -3271,6 +3317,33 @@ export default function App() {
       })
       .finally(() => setPicksViewLoading(false));
   }, [view, currentUser, picksViewDays]);
+
+  // Pre-fetch player props for today's pending prop picks so the live-line lookup works in the Picks tab
+  useEffect(() => {
+    if (!picksViewData?.picks?.length || !liveSlate?.length) return;
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
+    const pendingPropPicks = picksViewData.picks.filter(p =>
+      !p.voided &&
+      p.resultHit === null &&
+      p.gradeStatus == null &&
+      p.slateDate === today &&
+      PROP_MARKETS_SET.has((p.market ?? "").toLowerCase()) &&
+      p.bookLine == null &&
+      p.gameLabel
+    );
+    const gamePksToFetch = new Set();
+    pendingPropPicks.forEach(pick => {
+      const g = liveSlate.find(g => `${g.away?.abbr ?? ""} @ ${g.home?.abbr ?? ""}` === pick.gameLabel);
+      if (g?.gamePk && !livePlayerProps[String(g.gamePk)]) gamePksToFetch.add(String(g.gamePk));
+    });
+    gamePksToFetch.forEach(gamePk => {
+      const game = liveSlate.find(g => String(g.gamePk) === gamePk);
+      if (!game) return;
+      fetchPlayerPropsDirect(game.away?.name ?? "", game.home?.name ?? "", gamePk)
+        .then(data => setLivePlayerProps(prev => ({ ...prev, [gamePk]: data })))
+        .catch(() => {});
+    });
+  }, [picksViewData, liveSlate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!currentUser || !(picksViewData?.picks?.length > 0)) return;
@@ -3492,20 +3565,27 @@ export default function App() {
     setSlateLoading(true);
     setScheduleError(null);
     setLiveSlate(null);
-    const url = slateDate ? `/api/schedule?date=${slateDate}` : "/api/schedule";
+    const url = slateDate ? `/api/slate?date=${slateDate}` : "/api/slate";
     apiFetch(url)
-      .then(games => {
-        setLiveSlate(Array.isArray(games) ? games : []);
+      .then(bundle => {
+        const games = Array.isArray(bundle?.schedule) ? bundle.schedule : (Array.isArray(bundle) ? bundle : []);
+        setLiveSlate(games);
+        if (bundle?.oddsMap) setLiveOddsMap(bundle.oddsMap);
+        if (bundle?.nrfiMap) setLiveNrfiData(bundle.nrfiMap);
+        if (bundle?.weatherMap) setLiveWeather(formatSlateWeatherMap(games, bundle.weatherMap));
+        if (bundle?.pitcherStatsMap) {
+          setLivePitcherStats(prev => ({ ...prev, ...bundle.pitcherStatsMap }));
+        }
         if (games?.length > 0) setSelectedId(games[0].gamePk);
       })
       .catch(err => {
-        console.error("Schedule fetch failed:", err);
-        const msg = err.message ?? "Schedule unavailable";
+        console.error("Slate fetch failed:", err);
+        const msg = err.message ?? "Slate unavailable";
         const friendly = /failed to fetch|networkerror|load failed/i.test(msg)
           ? "Cannot reach API — is the backend running? (npm start on port 3001)"
           : msg.startsWith("HTTP ")
           ? msg.includes("502")
-            ? "Schedule service temporarily unavailable — retry in a moment"
+            ? "Slate service temporarily unavailable — retry in a moment"
             : `${msg} — check that npm start is running on port 3001`
           : msg;
         setScheduleError(friendly);
@@ -3599,14 +3679,15 @@ export default function App() {
       .catch(() => setPerfStats({ days: perfDays, rows: [] }));
   }, [researchMode, view, perfDays]);
 
-  // Auto-refresh schedule every 5 min to keep game statuses current for board locking.
-  // Merges status fields into existing liveSlate without wiping other state.
+  // Auto-refresh slate every 5 min to keep game statuses current and bundled
+  // data reasonably fresh without fan-out calls from the client.
   useEffect(() => {
     if (IS_STATS_SANDBOX) return;
     const interval = setInterval(() => {
-      const url = slateDate ? `/api/schedule?date=${slateDate}` : "/api/schedule";
+      const url = slateDate ? `/api/slate?date=${slateDate}` : "/api/slate";
       apiFetch(url)
-        .then(games => {
+        .then(bundle => {
+          const games = Array.isArray(bundle?.schedule) ? bundle.schedule : [];
           setLiveSlate(prev => {
             if (!prev || !games?.length) return prev;
             // Merge updated statuses without replacing the full slate (avoids re-fetch cascade)
@@ -3615,6 +3696,12 @@ export default function App() {
               return fresh ? { ...g, status: fresh.status } : g;
             });
           });
+          if (bundle?.oddsMap) setLiveOddsMap(bundle.oddsMap);
+          if (bundle?.nrfiMap) setLiveNrfiData(prev => ({ ...prev, ...bundle.nrfiMap }));
+          if (bundle?.weatherMap) setLiveWeather(prev => ({ ...prev, ...formatSlateWeatherMap(games, bundle.weatherMap) }));
+          if (bundle?.pitcherStatsMap) {
+            setLivePitcherStats(prev => ({ ...prev, ...bundle.pitcherStatsMap }));
+          }
         })
         .catch(() => {});
     }, 5 * 60 * 1000); // every 5 minutes
@@ -4290,30 +4377,21 @@ export default function App() {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [chatHistory, chatLoading]);
 
-  // Background prefetch: home + away pitcher stats + lineups for ALL slate games
-  // so the cross-slate Best Bets card and Games board can compute and update reactively.
+  // Background prefetch: pitcher gamelogs + lineups for ALL slate games so the
+  // Games board and cross-slate cards can compute reactively. Slate bundle
+  // already seeds odds, NRFI, weather, and pitcher season stats on load.
   useEffect(() => {
     if (IS_STATS_SANDBOX || !liveSlate?.length) return;
     liveSlate.forEach(sg => {
-      // Home pitcher stats + game log
+      // Home pitcher game log
       const pid = sg.probablePitchers?.home?.id;
-      if (pid && !livePitcherStats[pid]) {
-        apiFetch(`/api/players/${pid}/stats?group=pitching`)
-          .then(data => setLivePitcherStats(prev => ({ ...prev, [pid]: data })))
-          .catch(() => {});
-      }
       if (pid && !liveGameLog[pid]) {
         apiFetch(`/api/players/${pid}/gamelog?group=pitching`)
           .then(data => setLiveGameLog(prev => ({ ...prev, [pid]: data })))
           .catch(() => {});
       }
-      // Away pitcher stats + game log (needed for Games board scoring)
+      // Away pitcher game log (needed for Games board scoring)
       const apid = sg.probablePitchers?.away?.id;
-      if (apid && !livePitcherStats[apid]) {
-        apiFetch(`/api/players/${apid}/stats?group=pitching`)
-          .then(data => setLivePitcherStats(prev => ({ ...prev, [apid]: data })))
-          .catch(() => {});
-      }
       if (apid && !liveGameLog[apid]) {
         apiFetch(`/api/players/${apid}/gamelog?group=pitching`)
           .then(data => setLiveGameLog(prev => ({ ...prev, [apid]: data })))
@@ -4325,97 +4403,7 @@ export default function App() {
           .then(data => setLiveLineups(prev => ({ ...prev, [sg.gamePk]: data })))
           .catch(() => {});
       }
-      // NRFI first-inning tendencies
-      if (!liveNrfiData[sg.gamePk]) {
-        apiFetch(`/api/nrfi/${sg.gamePk}`)
-          .then(data => setLiveNrfiData(prev => ({ ...prev, [sg.gamePk]: data })))
-          .catch(() => {});
-      }
     });
-
-    // Weather batch — one call for all games missing weather (live mode only)
-    if (IS_SANDBOX) {
-      liveSlate.forEach(sg => {
-        if (!liveWeather[sg.gamePk]) {
-          fetchWeather(sg.gamePk, sg.stadium, sg.time, SLATE[0].weather)
-            .then(data => setLiveWeather(prev => ({ ...prev, [sg.gamePk]: data })))
-            .catch(() => {});
-        }
-      });
-    } else {
-      const weatherNeeded = liveSlate.filter(sg => {
-        if (liveWeather[sg.gamePk]) return false; // already fetched
-        const stadium = STADIUMS[sg.stadium];
-        if (!stadium || stadium.roof) {
-          // Dome — set immediately, no fetch needed
-          setLiveWeather(prev => ({
-            ...prev,
-            [sg.gamePk]: { condition: "Dome", wind: "N/A", humidity: "N/A", rainChance: "N/A", roof: true, hrFavorable: false, live: false },
-          }));
-          return false;
-        }
-        return true;
-      });
-
-      if (weatherNeeded.length > 0) {
-        const parseHour = (timeStr, tz) => {
-          try {
-            const now     = new Date();
-            const dateStr = now.toLocaleDateString("en-CA", { timeZone: tz });
-            const clean   = timeStr.replace(/ [A-Z]{2,3}$/, "");
-            const d       = new Date(`${dateStr} ${clean}`);
-            return isNaN(d) ? now : d;
-          } catch { return new Date(); }
-        };
-
-        const payload = weatherNeeded.map(sg => {
-          const stadium = STADIUMS[sg.stadium];
-          return {
-            gamePk: sg.gamePk,
-            lat:    stadium.lat,
-            lon:    stadium.lon,
-            tz:     stadium.tz,
-            hour:   parseHour(sg.time, stadium.tz).getHours(),
-            key:    sg.stadium,
-          };
-        });
-
-        fetch(`${API_BASE}/api/weather/batch`, {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify(payload),
-        })
-          .then(r => r.ok ? r.json() : Promise.reject(r.status))
-          .then(batchResult => {
-            const updates = {};
-            weatherNeeded.forEach(sg => {
-              const w = batchResult[sg.gamePk];
-              if (!w) return;
-              const stadium = STADIUMS[sg.stadium];
-              updates[sg.gamePk] = {
-                temp:        w.temp,
-                condition:   WMO_CODES[w.weathercode] ?? "Unknown",
-                wind:        windDescription(w.winddirection, w.windspeed, stadium.orientation),
-                humidity:    `${Math.round(w.relativehumidity)}%`,
-                rainChance:  `${w.precipitation_probability}%`,
-                roof:        false,
-                hrFavorable: isHrFavorable(w.winddirection, w.windspeed, stadium.orientation, w.temp),
-                live:        true,
-                fetchedAt:   w.fetchedAt,
-              };
-            });
-            setLiveWeather(prev => ({ ...prev, ...updates }));
-          })
-          .catch(() => {
-            // Fallback — set non-live placeholder so cards don't stay blank
-            const fallbacks = {};
-            weatherNeeded.forEach(sg => {
-              fallbacks[sg.gamePk] = { condition: "Unavailable", wind: "N/A", humidity: "N/A", rainChance: "N/A", roof: false, hrFavorable: false, live: false };
-            });
-            setLiveWeather(prev => ({ ...prev, ...fallbacks }));
-          });
-      }
-    }
   }, [liveSlate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll unconfirmed lineups every 3 minutes so Model Picks update automatically
@@ -4566,72 +4554,157 @@ export default function App() {
     });
   }, [view, liveSlate]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fetch lineups, umpire, + pitcher stats when a live game card opens
+  // Fetch unified game detail bundle when a live game card opens; fall back to
+  // individual endpoints only for any missing sub-components.
   useEffect(() => {
     if (IS_STATS_SANDBOX || view !== "game" || !liveSlate) return;
     const sg = liveSlate.find(g => g.gamePk === selectedId);
     if (!sg) return;
     const { gamePk } = sg;
+    const detailKey = String(gamePk);
+    const pitcherId = sg.probablePitchers?.home?.id;
+    const awayPitcherId = sg.probablePitchers?.away?.id;
+    const homeTeamId = sg.home?.id;
+    const awayTeamId = sg.away?.id;
+    const homeAbbr = sg.home?.abbr;
+    const awayAbbr = sg.away?.abbr;
 
-    if (!liveLineups[gamePk]) {
+    const needsLineups = !liveLineups[gamePk];
+    const needsUmpires = !liveUmpires[gamePk];
+    const needsBullpen = !liveBullpen[gamePk];
+    const needsNrfi = !liveNrfiData[gamePk];
+    const needsWeather = !liveWeather[gamePk];
+    const needsHomeStats = pitcherId && !livePitcherStats[pitcherId];
+    const needsAwayStats = awayPitcherId && !livePitcherStats[awayPitcherId];
+    const needsHomeGamelog = pitcherId && !liveGameLog[pitcherId];
+    const needsAwayGamelog = awayPitcherId && !liveGameLog[awayPitcherId];
+    const needsHomeArsenal = !IS_SAVANT_SANDBOX && pitcherId && !pitcherArsenal[pitcherId];
+    const needsAwayArsenal = !IS_SAVANT_SANDBOX && awayPitcherId && !pitcherArsenal[awayPitcherId];
+    const needsHomeTeamStats = homeTeamId && homeAbbr && !liveTeamStats[homeAbbr];
+    const needsAwayTeamStats = awayTeamId && awayAbbr && !liveTeamStats[awayAbbr];
+    const needsDetail = [
+      needsLineups,
+      needsUmpires,
+      needsBullpen,
+      needsNrfi,
+      needsWeather,
+      needsHomeStats,
+      needsAwayStats,
+      needsHomeGamelog,
+      needsAwayGamelog,
+      needsHomeArsenal,
+      needsAwayArsenal,
+      needsHomeTeamStats,
+      needsAwayTeamStats,
+    ].some(Boolean);
+
+    let kickedOffUnifiedDetail = false;
+    if (needsDetail && !gameDetailFetched.current.has(detailKey)) {
+      kickedOffUnifiedDetail = true;
+      gameDetailFetched.current.add(detailKey);
+      const detailUrl = slateDate ? `/api/game/${gamePk}?date=${slateDate}` : `/api/game/${gamePk}`;
+      apiFetch(detailUrl)
+        .then(detail => {
+          if (detail?.lineups) {
+            setLiveLineups(prev => ({ ...prev, [gamePk]: detail.lineups }));
+          }
+          if (detail?.umpire) {
+            setLiveUmpires(prev => ({ ...prev, [gamePk]: detail.umpire }));
+          }
+          if (detail?.nrfi) {
+            setLiveNrfiData(prev => ({ ...prev, [gamePk]: detail.nrfi }));
+          }
+          if (detail?.weather) {
+            setLiveWeather(prev => ({ ...prev, [gamePk]: formatSlateWeatherEntry(sg, detail.weather) }));
+          }
+          if (detail?.bullpen) {
+            setLiveBullpen(prev => ({ ...prev, [gamePk]: detail.bullpen }));
+          }
+          if (pitcherId && detail?.homePitcher?.stats) {
+            setLivePitcherStats(prev => ({ ...prev, [pitcherId]: detail.homePitcher.stats }));
+          }
+          if (pitcherId && detail?.homePitcher?.gamelog) {
+            setLiveGameLog(prev => ({ ...prev, [pitcherId]: detail.homePitcher.gamelog }));
+          }
+          if (!IS_SAVANT_SANDBOX && pitcherId && detail?.homePitcher?.arsenal) {
+            setPitcherArsenal(prev => ({ ...prev, [pitcherId]: detail.homePitcher.arsenal }));
+          }
+          if (awayPitcherId && detail?.awayPitcher?.stats) {
+            setLivePitcherStats(prev => ({ ...prev, [awayPitcherId]: detail.awayPitcher.stats }));
+          }
+          if (awayPitcherId && detail?.awayPitcher?.gamelog) {
+            setLiveGameLog(prev => ({ ...prev, [awayPitcherId]: detail.awayPitcher.gamelog }));
+          }
+          if (!IS_SAVANT_SANDBOX && awayPitcherId && detail?.awayPitcher?.arsenal) {
+            setPitcherArsenal(prev => ({ ...prev, [awayPitcherId]: detail.awayPitcher.arsenal }));
+          }
+          if (homeAbbr && detail?.teamStats?.home) {
+            setLiveTeamStats(prev => ({ ...prev, [homeAbbr]: detail.teamStats.home }));
+          }
+          if (awayAbbr && detail?.teamStats?.away) {
+            setLiveTeamStats(prev => ({ ...prev, [awayAbbr]: detail.teamStats.away }));
+          }
+        })
+        .catch(() => {
+          gameDetailFetched.current.delete(detailKey);
+        });
+    }
+
+    if (kickedOffUnifiedDetail) return;
+
+    if (needsLineups) {
       apiFetch(`/api/lineups/${gamePk}`)
         .then(data => setLiveLineups(prev => ({ ...prev, [gamePk]: data })))
         .catch(err => console.error("Lineups:", err));
     }
-    if (!liveUmpires[gamePk]) {
+    if (needsUmpires) {
       apiFetch(`/api/umpires/${gamePk}`)
         .then(data => setLiveUmpires(prev => ({ ...prev, [gamePk]: data })))
         .catch(err => console.error("Umpires:", err));
     }
-    const pitcherId     = sg.probablePitchers?.home?.id;
-    const awayPitcherId = sg.probablePitchers?.away?.id;
-    // Home pitcher stats + arsenal
-    if (pitcherId && !livePitcherStats[pitcherId]) {
+    if (needsHomeStats) {
       apiFetch(`/api/players/${pitcherId}/stats?group=pitching`)
         .then(data => setLivePitcherStats(prev => ({ ...prev, [pitcherId]: data })))
         .catch(err => console.error("Home pitcher stats:", err));
     }
-    if (pitcherId && !liveGameLog[pitcherId]) {
+    if (needsHomeGamelog) {
       apiFetch(`/api/players/${pitcherId}/gamelog?group=pitching`)
         .then(data => setLiveGameLog(prev => ({ ...prev, [pitcherId]: data })))
         .catch(err => console.error("Home pitcher gamelog:", err));
     }
-    if (!IS_SAVANT_SANDBOX && pitcherId && !pitcherArsenal[pitcherId]) {
+    if (needsHomeArsenal) {
       apiFetch(`/api/arsenal/${pitcherId}`)
         .then(data => { if (data?.arsenal?.length || data?.pitcherStats) setPitcherArsenal(prev => ({ ...prev, [pitcherId]: data })); })
         .catch(err => console.error("Home arsenal fetch:", err));
     }
-    // Away pitcher stats + arsenal
-    if (awayPitcherId && !livePitcherStats[awayPitcherId]) {
+    if (needsAwayStats) {
       apiFetch(`/api/players/${awayPitcherId}/stats?group=pitching`)
         .then(data => setLivePitcherStats(prev => ({ ...prev, [awayPitcherId]: data })))
         .catch(err => console.error("Away pitcher stats:", err));
     }
-    if (awayPitcherId && !liveGameLog[awayPitcherId]) {
+    if (needsAwayGamelog) {
       apiFetch(`/api/players/${awayPitcherId}/gamelog?group=pitching`)
         .then(data => setLiveGameLog(prev => ({ ...prev, [awayPitcherId]: data })))
         .catch(err => console.error("Away pitcher gamelog:", err));
     }
-    if (!IS_SAVANT_SANDBOX && awayPitcherId && !pitcherArsenal[awayPitcherId]) {
+    if (needsAwayArsenal) {
       apiFetch(`/api/arsenal/${awayPitcherId}`)
         .then(data => { if (data?.arsenal?.length || data?.pitcherStats) setPitcherArsenal(prev => ({ ...prev, [awayPitcherId]: data })); })
         .catch(err => console.error("Away arsenal fetch:", err));
     }
-    // Fetch bullpen data via gamePk — one call returns both away + home
-    if (!liveBullpen[gamePk]) {
+    if (needsBullpen) {
       apiFetch(`/api/bullpen/${gamePk}`)
         .then(data => setLiveBullpen(prev => ({ ...prev, [gamePk]: data })))
         .catch(err => console.error("Bullpen:", err));
     }
-    // Fetch live NRFI first-inning scoring tendencies
-    if (!liveNrfiData[gamePk]) {
+    if (needsNrfi) {
       apiFetch(`/api/nrfi/${gamePk}`)
         .then(data => setLiveNrfiData(prev => ({ ...prev, [gamePk]: data })))
         .catch(err => console.error("NRFI:", err));
     }
     [
-      { id: sg.away?.id, abbr: sg.away?.abbr },
-      { id: sg.home?.id, abbr: sg.home?.abbr },
+      { id: awayTeamId, abbr: awayAbbr },
+      { id: homeTeamId, abbr: homeAbbr },
     ].forEach(({ id, abbr }) => {
       if (id && abbr && !liveTeamStats[abbr]) {
         apiFetch(`/api/team-stats/${id}`)
@@ -4641,7 +4714,7 @@ export default function App() {
           .catch(() => {});
       }
     });
-  }, [selectedId, view, liveSlate]);
+  }, [selectedId, view, liveSlate, liveLineups, liveUmpires, liveBullpen, liveNrfiData, liveWeather, livePitcherStats, liveGameLog, liveTeamStats, pitcherArsenal, slateDate]);
 
 
   // Fetch live odds on mount (and on manual refresh)
@@ -6290,20 +6363,26 @@ export default function App() {
           {!IS_STATS_SANDBOX && !slateLoading && liveSlate === null && scheduleError && (
             <Card>
               <div style={{ padding: "16px 0", fontSize: 11, color: "#ef4444", lineHeight: 1.5 }}>
-                Could not load today&apos;s schedule: {scheduleError}
+                Could not load today&apos;s slate: {scheduleError}
               </div>
               <button
                 type="button"
                 onClick={() => {
-                  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
                   setSlateLoading(true);
                   setScheduleError(null);
-                  apiFetch(slateDate ? `/api/schedule?date=${slateDate}` : "/api/schedule")
-                    .then(games => {
+                  apiFetch(slateDate ? `/api/slate?date=${slateDate}` : "/api/slate")
+                    .then(bundle => {
+                      const games = Array.isArray(bundle?.schedule) ? bundle.schedule : (Array.isArray(bundle) ? bundle : []);
                       setLiveSlate(Array.isArray(games) ? games : []);
+                      if (bundle?.oddsMap) setLiveOddsMap(bundle.oddsMap);
+                      if (bundle?.nrfiMap) setLiveNrfiData(bundle.nrfiMap);
+                      if (bundle?.weatherMap) setLiveWeather(formatSlateWeatherMap(games, bundle.weatherMap));
+                      if (bundle?.pitcherStatsMap) {
+                        setLivePitcherStats(prev => ({ ...prev, ...bundle.pitcherStatsMap }));
+                      }
                       if (games?.length > 0) setSelectedId(games[0].gamePk);
                     })
-                    .catch(err => setScheduleError(err.message ?? "Schedule unavailable"))
+                    .catch(err => setScheduleError(err.message ?? "Slate unavailable"))
                     .finally(() => setSlateLoading(false));
                 }}
                 style={{ fontSize: 10, fontWeight: 700, color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontFamily: "monospace" }}
@@ -11628,6 +11707,27 @@ export default function App() {
                     const marketColor = MARKET_COLORS[pick.market] ?? "#9ca3af";
                     const marketLabel = MARKET_LABELS[pick.market] ?? (pick.market ?? "—").toUpperCase();
                     const pickGradeStatus = pick.gradeStatus ?? null;
+                    // Live-props fallback: if bookLine wasn't stored at log time, look it up now
+                    const resolvedBookLine = (() => {
+                      if (pick.bookLine != null) return pick.bookLine;
+                      if (GAME_MARKETS_SET.has((pick.market ?? "").toLowerCase())) return null;
+                      const apiMarket = AI_MARKET_TO_PROP[(pick.market ?? "").toLowerCase()];
+                      if (!apiMarket || !liveSlate || !pick.gameLabel) return null;
+                      const slateGame = liveSlate.find(g =>
+                        `${g.away?.abbr ?? ""} @ ${g.home?.abbr ?? ""}` === pick.gameLabel
+                      );
+                      if (!slateGame) return null;
+                      const props = livePlayerProps[String(slateGame.gamePk)]?.props ?? [];
+                      const lastName = (pick.playerName ?? "").split(" ").pop().toLowerCase();
+                      if (!lastName) return null;
+                      const match = props.find(pr =>
+                        pr.market === apiMarket &&
+                        (pr.player ?? "").toLowerCase().includes(lastName)
+                      );
+                      if (!match) return null;
+                      const allLines = Object.values(match.books ?? {}).map(b => b.line).filter(l => l != null);
+                      return allLines.length ? Math.min(...allLines) : null;
+                    })();
                     // Derive live game status for today's unresolved picks
                     const pickGameStatus = (() => {
                       if (pick.resultHit !== null && pick.resultHit !== undefined) return null;
@@ -11662,7 +11762,8 @@ export default function App() {
                     })();
                     const oddsText = pick.odds == null ? null : `${pick.odds > 0 ? "+" : ""}${pick.odds}`;
                     const unitsText = pick.units != null ? `${pick.units}u` : null;
-                    // Replace HOME/AWAY with actual team abbr parsed from gameLabel ("SEA @ DET")
+                    const isGamePick = GAME_MARKETS_SET.has((pick.market ?? "").toLowerCase());
+                    // For game picks: replace HOME/AWAY with actual team abbr
                     const displaySide = (() => {
                       const s = (pick.side ?? "").toUpperCase();
                       if ((s === "HOME" || s === "AWAY") && pick.gameLabel) {
@@ -11671,8 +11772,12 @@ export default function App() {
                       }
                       return pick.side;
                     })();
+                    // For prop picks: lean+line shown in title row; game picks keep side+line in meta
+                    const propLeanText = !isGamePick
+                      ? `${(pick.side ?? "").toUpperCase()} ${resolvedBookLine != null ? resolvedBookLine : "—"}`
+                      : null;
                     const metaParts = [
-                      [displaySide, pick.bookLine].filter(Boolean).join(" "),
+                      isGamePick ? [displaySide, pick.bookLine].filter(Boolean).join(" ") : null,
                       pick.gameLabel,
                       oddsText,
                       unitsText,
@@ -11687,6 +11792,11 @@ export default function App() {
                                 {marketLabel}
                               </span>
                               <span style={{ fontSize: 13, fontWeight: 800, color: "#f9fafb" }}>{pick.playerName ?? "Unknown player"}</span>
+                              {propLeanText && (
+                                <span style={{ fontSize: 11, fontWeight: 800, color: (pick.side ?? "").toUpperCase() === "OVER" ? "#22c55e" : "#f87171", fontFamily: "monospace", letterSpacing: "0.04em" }}>
+                                  {propLeanText}
+                                </span>
+                              )}
                             </div>
                             <div style={{ fontSize: 10, color: "#9ca3af", lineHeight: 1.5 }}>
                               {metaParts.join(" · ") || "No pick details"}

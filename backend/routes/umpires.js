@@ -39,21 +39,12 @@ function getUmpireStatsByName(name) {
   return store.byName[name] ?? store.normalized[normalizeName(name)] ?? null;
 }
 
-// ── GET /api/umpires/:gamePk ─────────────────────────────────
-// Returns the umpire crew for a given game.
-// The `homePlate` object is the one the app cares about most —
-// it drives the umpire card in the Intel tab.
-//
-// Note: umpire assignments aren't always available until day-of.
-// Returns { homePlate: null, all: [] } rather than erroring when pending.
-router.get("/:gamePk", async (req, res) => {
-  const { gamePk } = req.params;
+async function fetchUmpiresForGame(gamePk) {
   const cacheKey   = `umpires:${gamePk}`;
 
   const cached = cache.get(cacheKey);
   if (cached) {
-    res.setHeader("X-Cache", "HIT");
-    return res.json(cached);
+    return cached;
   }
 
   if (isConnected()) {
@@ -65,8 +56,7 @@ router.get("/:gamePk", async (req, res) => {
       const entry = row?.rows?.[0];
       if (entry && (Date.now() - new Date(entry.fetched_at).getTime()) < UMPIRES_TTL) {
         cache.set(cacheKey, entry.data, UMPIRES_TTL);
-        res.setHeader("X-Cache", "DB-HIT");
-        return res.json(entry.data);
+        return entry.data;
       }
     } catch (dbErr) {
       console.warn(`Umpire DB lookup skipped: ${dbErr.message}`);
@@ -99,15 +89,34 @@ router.get("/:gamePk", async (req, res) => {
 
     // Cache for 1 hour — assigned day-of and doesn't change
     cache.set(cacheKey, result, UMPIRES_TTL);
-    res.setHeader("X-Cache", "MISS");
-    res.json(result);
+    return result;
   } catch (err) {
     // Boxscore can be unavailable before game loads — short TTL so we retry
     const empty = { gamePk: parseInt(gamePk), homePlate: null, all: [] };
     cache.set(cacheKey, empty, 3 * 60 * 1000); // retry in 3 min
-    res.setHeader("X-Cache", "MISS");
-    res.json(empty);
+    return empty;
+  }
+}
+
+// ── GET /api/umpires/:gamePk ─────────────────────────────────
+// Returns the umpire crew for a given game.
+// The `homePlate` object is the one the app cares about most —
+// it drives the umpire card in the Intel tab.
+//
+// Note: umpire assignments aren't always available until day-of.
+// Returns { homePlate: null, all: [] } rather than erroring when pending.
+router.get("/:gamePk", async (req, res) => {
+  const { gamePk } = req.params;
+  try {
+    const cacheKey = `umpires:${gamePk}`;
+    const cacheHit = !!cache.get(cacheKey);
+    const result = await fetchUmpiresForGame(gamePk);
+    res.setHeader("X-Cache", cacheHit ? "HIT" : "MISS");
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ error: "Umpire lookup unavailable", detail: err.message });
   }
 });
 
 module.exports = router;
+module.exports.fetchUmpiresForGame = fetchUmpiresForGame;
