@@ -118,6 +118,40 @@ const buildOddsPayload = (games, meta = {}) => {
   };
 };
 
+async function loadOddsPayloadFromDb() {
+  if (!isConnected()) return null;
+  try {
+    const today = todayHonolulu();
+    const row = await query(
+      `SELECT game_key, fetched_at, odds, opening_total
+       FROM odds_snapshots
+       WHERE slate_date = $1
+       ORDER BY fetched_at DESC`,
+      [today]
+    );
+    const rows = row?.rows ?? [];
+    if (!rows.length) return null;
+
+    const freshestMs = Math.max(...rows.map(r => new Date(r.fetched_at).getTime()));
+    const ageMs = Date.now() - freshestMs;
+    if (ageMs >= TTL_MS) return null;
+
+    const games = rows.map(r => r.odds).filter(Boolean);
+    const openingTotalsMap = {};
+    rows.forEach(r => {
+      if (r.opening_total != null) openingTotalsMap[r.game_key] = Number(r.opening_total);
+    });
+
+    return buildOddsPayload(games, {
+      fetchedAt: new Date(freshestMs).toISOString(),
+      openingTotalsMap,
+    });
+  } catch (dbErr) {
+    console.warn(`Odds DB lookup skipped: ${dbErr.message}`);
+    return null;
+  }
+}
+
 // ── GET /api/odds ─────────────────────────────────────────────────────────
 // Returns h2h + totals + spreads for all today's MLB games.
 // Shared server-side cache (20 min) — all users share one fetch.
@@ -130,37 +164,12 @@ router.get("/", async (req, res) => {
     return res.json(cached);
   }
 
-  if (isConnected()) {
-    try {
-      const today = todayHonolulu();
-      const row = await query(
-        `SELECT game_key, fetched_at, odds, opening_total
-         FROM odds_snapshots
-         WHERE slate_date = $1
-         ORDER BY fetched_at DESC`,
-        [today]
-      );
-      const rows = row?.rows ?? [];
-      if (rows.length) {
-        const freshestMs = Math.max(...rows.map(r => new Date(r.fetched_at).getTime()));
-        const ageMs = Date.now() - freshestMs;
-        if (ageMs < TTL_MS) {
-          const games = rows.map(r => r.odds).filter(Boolean);
-          const openingTotalsMap = {};
-          rows.forEach(r => { if (r.opening_total != null) openingTotalsMap[r.game_key] = Number(r.opening_total); });
-          const result = buildOddsPayload(games, {
-            fetchedAt: new Date(freshestMs).toISOString(),
-            openingTotalsMap,
-          });
-          cache.set(cacheKey, result, TTL_MS);
-          res.setHeader("X-Cache", "DB-HIT");
-          console.log(`  ✓ odds DB-HIT  games=${games.length}  age=${Math.round(ageMs / 1000)}s`);
-          return res.json(result);
-        }
-      }
-    } catch (dbErr) {
-      console.warn(`Odds DB lookup skipped: ${dbErr.message}`);
-    }
+  const dbPayload = await loadOddsPayloadFromDb();
+  if (dbPayload) {
+    cache.set(cacheKey, dbPayload, TTL_MS);
+    res.setHeader("X-Cache", "DB-HIT");
+    console.log(`  ✓ odds DB-HIT  games=${Object.keys(dbPayload.map ?? {}).length}`);
+    return res.json(dbPayload);
   }
 
   const apiKey = process.env.ODDS_API_KEY;
@@ -221,6 +230,12 @@ module.exports.getOddsMap = async function getOddsMap() {
   const cacheKey = "odds:mlb:today";
   const hit = cache.get(cacheKey);
   if (hit) return hit.map ?? null;
+
+  const dbPayload = await loadOddsPayloadFromDb();
+  if (dbPayload) {
+    cache.set(cacheKey, dbPayload, TTL_MS);
+    return dbPayload.map ?? null;
+  }
 
   const apiKey = process.env.ODDS_API_KEY;
   if (!apiKey) return null;
