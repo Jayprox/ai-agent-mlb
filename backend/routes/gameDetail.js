@@ -10,6 +10,7 @@ const { buildGameBullpenForJob } = require("./bullpen");
 const { fetchPlayerStatsPayload, fetchPlayerGamelogPayload } = require("./players");
 const { buildArsenalPayloadForJob } = require("./arsenal");
 const { fetchTeamStats } = require("./teamStats");
+const { buildMatchupsForGame } = require("./matchups");
 
 // ── Concurrency-limited allSettled ─────────────────────────────────────────
 // Runs an array of thunks (() => Promise) with at most `limit` concurrent
@@ -133,6 +134,19 @@ async function _buildGameDetail(gamePk, slateDate) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+router.get("/:gamePk/matchups", async (req, res) => {
+  try {
+    const limit  = Math.min(10, Math.max(1, parseInt(req.query.limit ?? "5", 10)));
+    const result = await buildMatchupsForGame(req.params.gamePk, { limit });
+    return res.json(result);
+  } catch (err) {
+    return res.status(err.status ?? 502).json({
+      error: err.status === 404 ? "Game not found" : "matchups unavailable",
+      detail: err.message,
+    });
+  }
+});
 
 router.get("/:gamePk", async (req, res) => {
   try {
