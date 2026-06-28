@@ -1,18 +1,21 @@
 /**
  * GET /api/pitcher-splits/:pitcherId
  *
- * Returns a pitcher's platoon splits (vs LHH and vs RHH) sourced from the
- * MLB Stats API statSplits endpoint — same source as /api/stat-splits but
- * shaped for the iOS pitcher card UI.
+ * Returns a pitcher's splits sourced from the MLB Stats API statSplits
+ * endpoint — shaped for the iOS pitcher card UI.
  *
  * Response shape (iOS-compatible):
  * {
  *   pitcherId: number,
  *   season:    number,
- *   vsLeft:  { avg, ops, k9, bb9 } | null,   ← vs left-handed hitters
- *   vsRight: { avg, ops, k9, bb9 } | null,   ← vs right-handed hitters
- *   vsL: <same as vsLeft>,                    ← backward-compat alias
- *   vsR: <same as vsRight>,
+ *   vsLeft:    { avg, ops, k9, bb9 } | null,   ← vs left-handed hitters
+ *   vsRight:   { avg, ops, k9, bb9 } | null,   ← vs right-handed hitters
+ *   vsL:       <alias for vsLeft>,              ← backward-compat
+ *   vsR:       <alias for vsRight>,
+ *   home:      { era, whip, ip, k9, bb9 } | null,
+ *   away:      { era, whip, ip, k9, bb9 } | null,
+ *   dayGame:   { era, whip, ip, k9, bb9 } | null,
+ *   nightGame: { era, whip, ip, k9, bb9 } | null,
  * }
  *
  * All stat values are strings. k9 and bb9 are computed from strikeOuts /
@@ -35,17 +38,24 @@ function parseIP(ip) {
   return parseInt(whole, 10) + (parseInt(outs ?? 0, 10) / 3);
 }
 
-// Format a decimal rate to one decimal place, or "—" if insufficient sample.
+// Format a decimal rate to one decimal place, or "—" if not finite.
 function fmtRate(val) {
   return isFinite(val) ? val.toFixed(1) : "—";
 }
 
-// Shape a raw MLB API stat block into the iOS SplitLine struct.
-function formatSplitLine(stat) {
+// Prefix with "." if MLB returned a bare number like "724" instead of ".724"
+function fmt3(v) {
+  if (!v || v === "---" || v === ".---") return "—";
+  const s = String(v);
+  return s.startsWith(".") ? s : `.${s}`;
+}
+
+// Shape a raw MLB API stat block into the iOS SplitLine struct (platoon).
+function formatPlatoonLine(stat) {
   if (!stat) return null;
-  const ip   = parseIP(stat.inningsPitched);
-  const k9   = ip > 0 ? fmtRate((stat.strikeOuts  ?? 0) / ip * 9) : "—";
-  const bb9  = ip > 0 ? fmtRate((stat.baseOnBalls ?? 0) / ip * 9) : "—";
+  const ip  = parseIP(stat.inningsPitched);
+  const k9  = ip > 0 ? fmtRate((stat.strikeOuts  ?? 0) / ip * 9) : "—";
+  const bb9 = ip > 0 ? fmtRate((stat.baseOnBalls ?? 0) / ip * 9) : "—";
 
   // Opponent OPS: prefer the field if present, else derive from obp + slg
   let ops = stat.ops ?? null;
@@ -53,16 +63,29 @@ function formatSplitLine(stat) {
     const derived = parseFloat(stat.obp) + parseFloat(stat.slg);
     ops = isFinite(derived) ? derived.toFixed(3) : null;
   }
-  // Prefix with "." if MLB returned a bare number like "724" instead of ".724"
-  const fmt3 = (v) => {
-    if (!v || v === "---" || v === ".---") return "—";
-    const s = String(v);
-    return s.startsWith(".") ? s : `.${s}`;
-  };
 
   return {
     avg: fmt3(stat.avg),
     ops: fmt3(ops),
+    k9,
+    bb9,
+  };
+}
+
+// Shape a raw MLB API stat block into the iOS GameSiteSplits struct (home/away/day/night).
+function formatGameSiteLine(stat) {
+  if (!stat) return null;
+  const ip  = parseIP(stat.inningsPitched);
+  const k9  = ip > 0 ? fmtRate((stat.strikeOuts  ?? 0) / ip * 9) : "—";
+  const bb9 = ip > 0 ? fmtRate((stat.baseOnBalls ?? 0) / ip * 9) : "—";
+
+  // Require at least 5 IP to return a meaningful split
+  if (ip < 5) return null;
+
+  return {
+    era:  stat.era  ?? "—",
+    whip: stat.whip ?? "—",
+    ip:   stat.inningsPitched ?? "—",
     k9,
     bb9,
   };
@@ -75,7 +98,7 @@ async function fetchPitcherSplitsFromMlb(pitcherId, season) {
       stats:    "statSplits",
       group:    "pitching",
       season,
-      sitCodes: "vl,vr",
+      sitCodes: "vl,vr,h,a,d,n",
     },
   });
 
@@ -97,14 +120,17 @@ async function fetchPitcherSplitsFromMlb(pitcherId, season) {
     return found?.stat ?? null;
   };
 
-  const vsLeftStat  = matchSplit(["vl", "vs. left",  "vs left",  "left"]);
-  const vsRightStat = matchSplit(["vr", "vs. right", "vs right", "right"]);
+  const vsLeft   = formatPlatoonLine(matchSplit(["vl", "vs. left",  "vs left",  "left"]));
+  const vsRight  = formatPlatoonLine(matchSplit(["vr", "vs. right", "vs right", "right"]));
+  const home     = formatGameSiteLine(matchSplit(["h",  "home"]));
+  const away     = formatGameSiteLine(matchSplit(["a",  "away"]));
+  const dayGame  = formatGameSiteLine(matchSplit(["d",  "day"]));
+  const nightGame = formatGameSiteLine(matchSplit(["n",  "night"]));
 
-  const vsLeft  = formatSplitLine(vsLeftStat);
-  const vsRight = formatSplitLine(vsRightStat);
-
+  // Require at least platoon splits to count as a valid result
   if (!vsLeft && !vsRight) return null;
-  return { vsLeft, vsRight };
+
+  return { vsLeft, vsRight, home, away, dayGame, nightGame };
 }
 
 // ── GET /api/pitcher-splits/:pitcherId ───────────────────────────────────
@@ -127,20 +153,28 @@ router.get("/:pitcherId", async (req, res) => {
       const splits = await fetchPitcherSplitsFromMlb(pitcherId, yr);
       if (splits) {
         const result = {
-          pitcherId: parseInt(pitcherId),
-          season:    yr,
-          vsLeft:    splits.vsLeft,
-          vsRight:   splits.vsRight,
-          // Backward-compat aliases for any web consumers using vsL / vsR
-          vsL:       splits.vsLeft,
-          vsR:       splits.vsRight,
+          pitcherId:  parseInt(pitcherId),
+          season:     yr,
+          vsLeft:     splits.vsLeft,
+          vsRight:    splits.vsRight,
+          vsL:        splits.vsLeft,   // backward-compat alias
+          vsR:        splits.vsRight,  // backward-compat alias
+          home:       splits.home,
+          away:       splits.away,
+          dayGame:    splits.dayGame,
+          nightGame:  splits.nightGame,
         };
         cache.set(cacheKey, result, TTL);
         res.setHeader("X-Cache", "MISS");
-        console.log(`  ✓ Pitcher splits (MLB)  pitcherId=${pitcherId} season=${yr}  vsL=${!!splits.vsLeft} vsR=${!!splits.vsRight}`);
+        console.log(
+          `  ✓ Pitcher splits (MLB)  pitcherId=${pitcherId} season=${yr}` +
+          `  vsL=${!!splits.vsLeft} vsR=${!!splits.vsRight}` +
+          `  home=${!!splits.home} away=${!!splits.away}` +
+          `  day=${!!splits.dayGame} night=${!!splits.nightGame}`
+        );
         return res.json(result);
       }
-      console.log(`  · No platoon splits for pitcherId=${pitcherId} season=${yr}`);
+      console.log(`  · No splits for pitcherId=${pitcherId} season=${yr}`);
     } catch (err) {
       console.error(`  ✗ Pitcher splits failed  pitcherId=${pitcherId} year=${yr}: ${err.message}`);
     }
@@ -160,12 +194,16 @@ module.exports.buildPitcherSplitsForJob = async (pitcherId, season = SEASON) => 
       const splits = await fetchPitcherSplitsFromMlb(pitcherId, yr);
       if (splits) {
         return {
-          pitcherId: parseInt(pitcherId),
-          season:    yr,
-          vsLeft:  splits.vsLeft,
-          vsRight: splits.vsRight,
-          vsL:     splits.vsLeft,
-          vsR:     splits.vsRight,
+          pitcherId:  parseInt(pitcherId),
+          season:     yr,
+          vsLeft:     splits.vsLeft,
+          vsRight:    splits.vsRight,
+          vsL:        splits.vsLeft,
+          vsR:        splits.vsRight,
+          home:       splits.home,
+          away:       splits.away,
+          dayGame:    splits.dayGame,
+          nightGame:  splits.nightGame,
         };
       }
     } catch {
