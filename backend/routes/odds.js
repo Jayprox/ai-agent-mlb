@@ -118,7 +118,7 @@ const buildOddsPayload = (games, meta = {}) => {
   };
 };
 
-async function loadOddsPayloadFromDb() {
+async function loadOddsPayloadFromDb({ allowStale = false } = {}) {
   if (!isConnected()) return null;
   try {
     const today = todayHonolulu();
@@ -134,7 +134,7 @@ async function loadOddsPayloadFromDb() {
 
     const freshestMs = Math.max(...rows.map(r => new Date(r.fetched_at).getTime()));
     const ageMs = Date.now() - freshestMs;
-    if (ageMs >= TTL_MS) return null;
+    if (!allowStale && ageMs >= TTL_MS) return null;
 
     const games = rows.map(r => r.odds).filter(Boolean);
     const openingTotalsMap = {};
@@ -231,7 +231,7 @@ module.exports.getOddsMap = async function getOddsMap() {
   const hit = cache.get(cacheKey);
   if (hit) return hit.map ?? null;
 
-  const dbPayload = await loadOddsPayloadFromDb();
+  const dbPayload = await loadOddsPayloadFromDb({ allowStale: true });
   if (dbPayload) {
     cache.set(cacheKey, dbPayload, TTL_MS);
     return dbPayload.map ?? null;
@@ -256,6 +256,11 @@ module.exports.getOddsMap = async function getOddsMap() {
     cache.set(cacheKey, result, TTL_MS);
     return result.map ?? null;
   } catch {
+    const staleDbPayload = await loadOddsPayloadFromDb({ allowStale: true });
+    if (staleDbPayload) {
+      cache.set(cacheKey, staleDbPayload, TTL_MS);
+      return staleDbPayload.map ?? null;
+    }
     return null;
   }
 };

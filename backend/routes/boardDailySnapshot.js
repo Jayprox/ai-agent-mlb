@@ -45,8 +45,10 @@ function withTimeout(promise, ms) {
 /**
  * Fills in missing and stale-empty board markets for `date`, mutating `payload`
  * in place. For today's date, markets that are either absent from `payload` or
- * present-but-empty (`[]`) are candidates for on-demand recompute, subject to
- * the `_emptyMarketAt` negative cache unless `force` is set.
+ * present-but-empty (`[]`) are candidates for on-demand recompute. When
+ * `force` is set, recompute every board market for today, even if the market
+ * already exists and is non-empty — this lets the manual Refresh button repair
+ * stale candidate contents like missing game lines/odds, not just empty arrays.
  */
 async function fillMissingMarkets(date, payload, { force = false } = {}) {
   const isToday = date === todayHonolulu();
@@ -65,7 +67,9 @@ async function fillMissingMarkets(date, payload, { force = false } = {}) {
       payload[market].length === 0
   );
 
-  const recheckCandidates = [...missing, ...emptyToday];
+  const recheckCandidates = force
+    ? [...BOARD_MARKETS]
+    : [...missing, ...emptyToday];
   if (!recheckCandidates.length) return;
 
   const stillMissing = [];
@@ -232,9 +236,11 @@ router.get("/snapshot", async (req, res) => {
 
     if (payload.generatedAt == null) payload.generatedAt = new Date().toISOString();
 
-    if (!usedFallback) {
-      cache.set(cacheKey, payload, SNAPSHOT_TTL);
-    }
+    // Always refresh the in-memory cache with the final payload. When a
+    // manual `refresh=1` request or an on-demand fallback recompute repairs
+    // stale markets, the next plain GET must see the updated snapshot
+    // immediately instead of serving the old cached version for 5 minutes.
+    cache.set(cacheKey, payload, SNAPSHOT_TTL);
     res.setHeader("X-Cache", usedFallback ? "FALLBACK" : "MISS");
     return res.json(payload);
   } catch (err) {

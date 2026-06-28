@@ -1,97 +1,117 @@
+/**
+ * GET /api/pitcher-splits/:pitcherId
+ *
+ * Returns a pitcher's platoon splits (vs LHH and vs RHH) sourced from the
+ * MLB Stats API statSplits endpoint — same source as /api/stat-splits but
+ * shaped for the iOS pitcher card UI.
+ *
+ * Response shape (iOS-compatible):
+ * {
+ *   pitcherId: number,
+ *   season:    number,
+ *   vsLeft:  { avg, ops, k9, bb9 } | null,   ← vs left-handed hitters
+ *   vsRight: { avg, ops, k9, bb9 } | null,   ← vs right-handed hitters
+ *   vsL: <same as vsLeft>,                    ← backward-compat alias
+ *   vsR: <same as vsRight>,
+ * }
+ *
+ * All stat values are strings. k9 and bb9 are computed from strikeOuts /
+ * baseOnBalls counts and inningsPitched returned by the MLB API.
+ */
+
 const express = require("express");
-const router  = require("express").Router();
-const axios   = require("axios");
+const router  = express.Router();
+const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
-const db      = require("../services/db");
 
 const SEASON   = new Date().getFullYear();
-const TTL           = 6 * 60 * 60 * 1000; // 6 hours
-const MISS_TTL      = 30 * 60 * 1000;      // 30 min — cache "no data" to avoid hammering Savant
+const TTL      = 6 * 60 * 60 * 1000;  // 6 hours
+const MISS_TTL = 30 * 60 * 1000;      // 30 min for "no data" entries
 
-const SAVANT_HEADERS = {
-  "User-Agent":       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept":           "application/json, text/javascript, */*; q=0.01",
-  "Accept-Language":  "en-US,en;q=0.9",
-  "Referer":          "https://baseballsavant.mlb.com/",
-  "X-Requested-With": "XMLHttpRequest",
-};
-
-const fmtAvg = (val) => {
-  if (val <= 0) return ".000";
-  return `.${String(Math.round(val * 1000)).padStart(3, "0")}`;
-};
-
-function parseCSV(text) {
-  const cleaned = String(text || "").replace(/^\uFEFF/, "").trim();
-  const lines = cleaned.split(/\r?\n/);
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, "").toLowerCase().replace(/\s+/g, "_"));
-  return lines.slice(1).map(line => {
-    const values = [];
-    let cur = "", inQ = false;
-    for (const ch of line) {
-      if (ch === '"') { inQ = !inQ; continue; }
-      if (ch === "," && !inQ) { values.push(cur.trim()); cur = ""; } else cur += ch;
-    }
-    values.push(cur.trim());
-    const row = {};
-    headers.forEach((h, i) => { row[h] = values[i] ?? ""; });
-    return row;
-  });
+// Parse MLB inningsPitched string ("45.1" = 45⅓ innings = 45.333...)
+function parseIP(ip) {
+  if (!ip) return 0;
+  const [whole, outs] = String(ip).split(".");
+  return parseInt(whole, 10) + (parseInt(outs ?? 0, 10) / 3);
 }
 
-async function fetchPitcherVsHand(pitcherId, hand, year) {
-  const url = [
-    `https://baseballsavant.mlb.com/statcast_search/csv`,
-    `?hfGT=R%7C`,
-    `&hfSea=${year}%7C`,
-    `&player_type=pitcher`,
-    `&pitchers_lookup%5B%5D=${pitcherId}`,
-    `&player_id=${pitcherId}`,
-    `&stand=${hand}`,
-    `&type=details`,
-    `&min_pitches=0`,
-    `&min_results=0`,
-  ].join("");
+// Format a decimal rate to one decimal place, or "—" if insufficient sample.
+function fmtRate(val) {
+  return isFinite(val) ? val.toFixed(1) : "—";
+}
 
-  console.log(`  → Savant pitcher splits  stand=${hand}  ${url.slice(0, 80)}…`);
-  const res  = await axios.get(url, { headers: { ...SAVANT_HEADERS, Accept: "text/csv,*/*" }, timeout: 15000 });
-  const rows = parseCSV(String(res.data));
-  if (!rows.length || !rows[0].pitch_type) return null;
+// Shape a raw MLB API stat block into the iOS SplitLine struct.
+function formatSplitLine(stat) {
+  if (!stat) return null;
+  const ip   = parseIP(stat.inningsPitched);
+  const k9   = ip > 0 ? fmtRate((stat.strikeOuts  ?? 0) / ip * 9) : "—";
+  const bb9  = ip > 0 ? fmtRate((stat.baseOnBalls ?? 0) / ip * 9) : "—";
 
-  let hits = 0, ab = 0, walks = 0, hbp = 0, k = 0;
-  const HIT_EVENTS = new Set(["single", "double", "triple", "home_run"]);
-  const K_EVENTS   = new Set(["strikeout", "strikeout_double_play"]);
-  const OUT_EVENTS = new Set(["field_out", "grounded_into_double_play", "force_out", "double_play",
-                              "fielders_choice", "fielders_choice_out", "other_out", "triple_play",
-                              "sac_fly", "sac_bunt", "fielders_choice_out"]);
-
-  rows.forEach(r => {
-    const ev = (r.events || "").toLowerCase().trim();
-    if (!ev) return; // non-terminal pitch
-    if (HIT_EVENTS.has(ev))  { hits++; ab++; }
-    else if (K_EVENTS.has(ev))  { ab++; k++; }
-    else if (OUT_EVENTS.has(ev)) { ab++; }
-    else if (ev === "walk")         { walks++; }
-    else if (ev === "hit_by_pitch") { hbp++; }
-  });
-
-  const pa = ab + walks + hbp;
-  if (pa < 15) return null; // too small a sample
+  // Opponent OPS: prefer the field if present, else derive from obp + slg
+  let ops = stat.ops ?? null;
+  if (!ops && stat.obp && stat.slg) {
+    const derived = parseFloat(stat.obp) + parseFloat(stat.slg);
+    ops = isFinite(derived) ? derived.toFixed(3) : null;
+  }
+  // Prefix with "." if MLB returned a bare number like "724" instead of ".724"
+  const fmt3 = (v) => {
+    if (!v || v === "---" || v === ".---") return "—";
+    const s = String(v);
+    return s.startsWith(".") ? s : `.${s}`;
+  };
 
   return {
-    avg:   fmtAvg(ab > 0 ? hits / ab : 0),
-    kPct:  `${pa > 0 ? Math.round((k    / pa) * 100) : 0}%`,
-    bbPct: `${pa > 0 ? Math.round((walks / pa) * 100) : 0}%`,
-    pa,
+    avg: fmt3(stat.avg),
+    ops: fmt3(ops),
+    k9,
+    bb9,
   };
+}
+
+// ── Core fetch ────────────────────────────────────────────────────────────
+async function fetchPitcherSplitsFromMlb(pitcherId, season) {
+  const { data } = await mlb.get(`/people/${pitcherId}/stats`, {
+    params: {
+      stats:    "statSplits",
+      group:    "pitching",
+      season,
+      sitCodes: "vl,vr",
+    },
+  });
+
+  // MLB may return multiple stat blocks — pick the one with the most splits
+  const allStats = data.stats ?? [];
+  let splits = [];
+  for (const block of allStats) {
+    if ((block.splits ?? []).length > splits.length) splits = block.splits;
+  }
+
+  if (!splits.length) return null;
+
+  const matchSplit = (candidates) => {
+    const found = splits.find(sp => {
+      const code = (sp.split?.code ?? "").toLowerCase();
+      const desc = (sp.split?.description ?? "").toLowerCase();
+      return candidates.some(c => code === c || desc.includes(c));
+    });
+    return found?.stat ?? null;
+  };
+
+  const vsLeftStat  = matchSplit(["vl", "vs. left",  "vs left",  "left"]);
+  const vsRightStat = matchSplit(["vr", "vs. right", "vs right", "right"]);
+
+  const vsLeft  = formatSplitLine(vsLeftStat);
+  const vsRight = formatSplitLine(vsRightStat);
+
+  if (!vsLeft && !vsRight) return null;
+  return { vsLeft, vsRight };
 }
 
 // ── GET /api/pitcher-splits/:pitcherId ───────────────────────────────────
 router.get("/:pitcherId", async (req, res) => {
   const { pitcherId } = req.params;
-  const year      = parseInt(req.query.year ?? SEASON, 10);
-  const cacheKey  = `splits:pitcher:${pitcherId}:${year}`;
+  const season    = parseInt(req.query.season ?? SEASON, 10);
+  const cacheKey  = `splits:pitcher:mlb:${pitcherId}:${season}`;
 
   const cached = cache.get(cacheKey);
   if (cached !== undefined) {
@@ -100,63 +120,53 @@ router.get("/:pitcherId", async (req, res) => {
     return res.json(cached);
   }
 
-  if (db.isConnected()) {
+  const yearsToTry = [season, season - 1];
+
+  for (const yr of yearsToTry) {
     try {
-      const today = new Date().toLocaleDateString("en-CA", { timeZone: "Pacific/Honolulu" });
-      const snap = await db.query(
-        `SELECT splits FROM pitcher_savant_snapshots
-         WHERE player_id = $1 AND slate_date = $2 AND splits IS NOT NULL`,
-        [parseInt(pitcherId, 10), today]
-      );
-      if (snap?.rows?.[0]?.splits) {
-        const result = snap.rows[0].splits;
-        cache.set(cacheKey, result, TTL);
-        res.setHeader("X-Cache", "HIT");
-        console.log(`  ✓ Pitcher splits DB hit  pitcherId=${pitcherId}`);
-        return res.json(result);
-      }
-    } catch (err) {
-      console.warn(`  ⚠ Pitcher splits DB read failed  pitcherId=${pitcherId}: ${err.message}`);
-    }
-  }
-
-  const yearsToTry = [year, year - 1];
-
-  for (const candidateYear of yearsToTry) {
-    try {
-      const [vsL, vsR] = await Promise.all([
-        fetchPitcherVsHand(pitcherId, "L", candidateYear).catch(() => null),
-        fetchPitcherVsHand(pitcherId, "R", candidateYear).catch(() => null),
-      ]);
-
-      if (vsL || vsR) {
-        const result = { pitcherId: parseInt(pitcherId), season: candidateYear, vsL, vsR };
+      const splits = await fetchPitcherSplitsFromMlb(pitcherId, yr);
+      if (splits) {
+        const result = {
+          pitcherId: parseInt(pitcherId),
+          season:    yr,
+          vsLeft:    splits.vsLeft,
+          vsRight:   splits.vsRight,
+          // Backward-compat aliases for any web consumers using vsL / vsR
+          vsL:       splits.vsLeft,
+          vsR:       splits.vsRight,
+        };
         cache.set(cacheKey, result, TTL);
         res.setHeader("X-Cache", "MISS");
-        console.log(`  ✓ Pitcher splits cached  pitcherId=${pitcherId} season=${candidateYear} vsL=${!!vsL} vsR=${!!vsR}`);
+        console.log(`  ✓ Pitcher splits (MLB)  pitcherId=${pitcherId} season=${yr}  vsL=${!!splits.vsLeft} vsR=${!!splits.vsRight}`);
         return res.json(result);
       }
+      console.log(`  · No platoon splits for pitcherId=${pitcherId} season=${yr}`);
     } catch (err) {
-      console.error(`  ✗ Pitcher splits failed  pitcherId=${pitcherId} year=${candidateYear}: ${err.message}`);
+      console.error(`  ✗ Pitcher splits failed  pitcherId=${pitcherId} year=${yr}: ${err.message}`);
     }
   }
 
-  // Cache the miss so the warm-cache job and rapid retries don't keep hitting Savant
   cache.set(cacheKey, null, MISS_TTL);
   return res.status(502).json({ error: "No platoon splits available", pitcherId });
 });
 
 module.exports = router;
-module.exports.buildPitcherSplitsForJob = async (pitcherId, year = SEASON) => {
-  const yearsToTry = [year, year - 1];
-  for (const candidateYear of yearsToTry) {
+
+// Exported for use by pre-warming jobs
+module.exports.buildPitcherSplitsForJob = async (pitcherId, season = SEASON) => {
+  const yearsToTry = [season, season - 1];
+  for (const yr of yearsToTry) {
     try {
-      const [vsL, vsR] = await Promise.all([
-        fetchPitcherVsHand(pitcherId, "L", candidateYear).catch(() => null),
-        fetchPitcherVsHand(pitcherId, "R", candidateYear).catch(() => null),
-      ]);
-      if (vsL || vsR) {
-        return { pitcherId: parseInt(pitcherId), season: candidateYear, vsL, vsR };
+      const splits = await fetchPitcherSplitsFromMlb(pitcherId, yr);
+      if (splits) {
+        return {
+          pitcherId: parseInt(pitcherId),
+          season:    yr,
+          vsLeft:  splits.vsLeft,
+          vsRight: splits.vsRight,
+          vsL:     splits.vsLeft,
+          vsR:     splits.vsRight,
+        };
       }
     } catch {
       // try next year

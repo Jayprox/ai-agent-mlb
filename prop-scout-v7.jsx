@@ -7801,7 +7801,7 @@ export default function App() {
                             <div style={{ fontSize: 8, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{label}</div>
                             {d ? (<>
                               <div style={{ fontSize: 11, fontWeight: 700, color: parseFloat(d.avg) >= 0.280 ? "#ef4444" : parseFloat(d.avg) <= 0.220 ? "#22c55e" : "#e5e7eb", fontFamily: "monospace" }}>{d.avg} AVG</div>
-                              <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>{d.kPct} K · {d.bbPct} BB · {d.pa} PA</div>
+                              <div style={{ fontSize: 8, color: "#6b7280", marginTop: 1 }}>{d.k9} K/9 · {d.bb9} BB/9{d.ops && d.ops !== "—" ? ` · ${d.ops} OPS` : ""}</div>
                             </>) : <div style={{ fontSize: 9, color: "#4b5563" }}>—</div>}
                           </div>
                         ))}
