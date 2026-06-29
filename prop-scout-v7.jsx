@@ -8683,9 +8683,21 @@ export default function App() {
               </Card>
             )}
             {arsPitcher.arsenal.map(a => {
-              const rawVs = activeBatterVsPitches?.[a.abbr];
-              const vs = normalizePitchMatchup(a.abbr, rawVs);
-              if (!vs) return null;
+              // Use pitcher's own Savant BA-against / whiff data (all batters vs this pitch).
+              // This is what iOS shows and is correct — the Arsenal tab is pitcher-driven,
+              // not tied to any single selected batter.
+              const avg   = a.ba   ?? null;
+              const whiff = a.whiffPct != null ? `${a.whiffPct}%` : null;
+              const slg   = a.slg  ?? null;
+              if (!avg && !whiff) return null; // no data for this pitch yet
+              const good = computePitchMatchupGood(avg, whiff);
+              const vs = {
+                avg,
+                whiff,
+                slg,
+                good,
+                note: computePitchMatchupNote(a.abbr, avg, whiff),
+              };
               const color = vs.good === true ? "#22c55e" : vs.good === false ? "#ef4444" : "#f59e0b";
               const heavy = a.pct >= 25;
               return (
