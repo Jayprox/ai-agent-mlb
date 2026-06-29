@@ -5,6 +5,34 @@ const cache   = require("../services/cache");
 const { fetchBatterPowerProfile } = require("./batterPower");
 const { fetchBatterRecentForm } = require("./batterGamelog");
 const SEASON = new Date().getFullYear();
+const AVG_TTL = 24 * 60 * 60 * 1000; // 24h — season avg is stable intraday
+
+// Season batting average for a single batter. Cached 24h.
+// Falls back to previous season if current season has no AB yet.
+async function fetchBatterSeasonAvg(batterId) {
+  const cacheKey = `batter-avg:${batterId}:${SEASON}`;
+  const cached = cache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const yearsToTry = [SEASON, SEASON - 1];
+  for (const yr of yearsToTry) {
+    try {
+      const { data } = await mlb.get(`/people/${batterId}/stats`, {
+        params: { stats: "season", group: "hitting", season: yr, gameType: "R" },
+      });
+      const stat = data.stats?.[0]?.splits?.[0]?.stat;
+      if (stat?.avg && parseInt(stat.atBats ?? 0, 10) >= 10) {
+        const avg = stat.avg.startsWith(".") ? stat.avg : `.${stat.avg}`;
+        cache.set(cacheKey, avg, AVG_TTL);
+        return avg;
+      }
+    } catch {
+      // try previous year
+    }
+  }
+  cache.set(cacheKey, null, AVG_TTL);
+  return null;
+}
 const CONFIRMED_CACHE_KEY = (gamePk) => `lineups:last-confirmed:${gamePk}`;
 
 // Transform a team's boxscore data into a batting-order array.
@@ -19,8 +47,11 @@ const transformTeam = (teamData) => {
       id:         playerId,
       name:       player.person.fullName,
       pos:        player.position.abbreviation,
+      position:   player.position.abbreviation,          // iOS alias
       primaryPos: player.person.primaryPosition?.abbreviation ?? null,
       hand:       player.batSide?.code ?? "?",
+      batSide:    player.batSide?.code ?? null,          // iOS alias
+      avg:        null,                                  // populated after lineup is confirmed
     };
   }).filter(Boolean);
 };
@@ -34,8 +65,11 @@ const transformRoster = (rosterData) => {
       id:         p.person.id,
       name:       p.person.fullName,
       pos:        p.position.abbreviation,
+      position:   p.position.abbreviation,               // iOS alias
       primaryPos: p.person.primaryPosition?.abbreviation ?? null,
       hand:       p.batSide?.code ?? p.person?.batSide?.code ?? "?",
+      batSide:    p.batSide?.code ?? p.person?.batSide?.code ?? null, // iOS alias
+      avg:        null,
     }));
 };
 
@@ -87,14 +121,16 @@ async function fetchLineupsForGame(gamePk) {
     for (let i = 0; i < allBatters.length; i += chunkSize) {
       const chunk = allBatters.slice(i, i + chunkSize);
 
-      const [profiles, forms] = await Promise.all([
+      const [profiles, forms, avgs] = await Promise.all([
         Promise.all(chunk.map(b => fetchBatterPowerProfile(b.id))),
         Promise.all(chunk.map(b => fetchBatterRecentForm(b.id))),
+        Promise.all(chunk.map(b => fetchBatterSeasonAvg(b.id))),
       ]);
 
       chunk.forEach((b, idx) => {
         b.powerProfile = profiles[idx] ?? null;
-        b.recentForm = forms[idx] ?? null;
+        b.recentForm   = forms[idx]    ?? null;
+        b.avg          = avgs[idx]     ?? null;
       });
     }
 
