@@ -50,8 +50,8 @@ const STADIUMS = {
   "Fenway Park":               { lat: 42.3467,  lon: -71.0972, orientation: 90,  tz: "America/New_York"    },
   "Wrigley Field":             { lat: 41.9484,  lon: -87.6553, orientation: 30,  tz: "America/Chicago"     },
   "Busch Stadium":             { lat: 38.6226,  lon: -90.1928, orientation: 10,  tz: "America/Chicago"     },
-  "T-Mobile Park":             { lat: 47.5914,  lon: -122.3325,orientation: 5,   tz: "America/Los_Angeles" },
-  "Camden Yards":              { lat: 39.2838,  lon: -76.6218, orientation: 5,   tz: "America/New_York"    },
+  "T-Mobile Park":             { lat: 47.5914,  lon: -122.3325,orientation: 5,   tz: "America/Los_Angeles", roof: true },
+  "Oriole Park at Camden Yards": { lat: 39.2838, lon: -76.6218, orientation: 5,  tz: "America/New_York"    },
   "Petco Park":                { lat: 32.7076,  lon: -117.1570,orientation: 35,  tz: "America/Los_Angeles" },
   "Truist Park":               { lat: 33.8907,  lon: -84.4677, orientation: 20,  tz: "America/New_York"    },
   "Great American Ball Park":  { lat: 39.0979,  lon: -84.5082, orientation: 10,  tz: "America/New_York"    },
@@ -1711,7 +1711,11 @@ const buildLiveGame = (sg) => {
 
 const formatSlateWeatherEntry = (game, rawWeather) => {
   const stadium = STADIUMS[game?.stadium];
-  if (stadium?.roof && !rawWeather) {
+  // Dome detection: check frontend STADIUMS table OR backend's explicit isDome flag.
+  // The backend sends { isDome: true, temp: null, ... } for dome games instead of null
+  // so we can't rely on !rawWeather alone.
+  const isDome = !!stadium?.roof || rawWeather?.isDome === true;
+  if (isDome) {
     return {
       condition: "Dome",
       wind: "N/A",
@@ -1728,7 +1732,7 @@ const formatSlateWeatherEntry = (game, rawWeather) => {
       wind: "N/A",
       humidity: "N/A",
       rainChance: "N/A",
-      roof: !!stadium?.roof,
+      roof: false,
       hrFavorable: false,
       live: false,
     };

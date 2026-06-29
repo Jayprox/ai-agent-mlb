@@ -45,7 +45,7 @@ const STADIUMS = {
   "Wrigley Field":             { lat: 41.9484,  lon: -87.6553,  tz: "America/Chicago",     roof: false },
   "Busch Stadium":             { lat: 38.6226,  lon: -90.1928,  tz: "America/Chicago",     roof: false },
   "T-Mobile Park":             { lat: 47.5914,  lon: -122.3325, tz: "America/Los_Angeles", roof: true  },
-  "Camden Yards":              { lat: 39.2838,  lon: -76.6218,  tz: "America/New_York",    roof: false },
+  "Oriole Park at Camden Yards": { lat: 39.2838,  lon: -76.6218,  tz: "America/New_York",  roof: false },
   "Petco Park":                { lat: 32.7076,  lon: -117.1570, tz: "America/Los_Angeles", roof: false },
   "Truist Park":               { lat: 33.8907,  lon: -84.4677,  tz: "America/New_York",    roof: false },
   "Great American Ball Park":  { lat: 39.0979,  lon: -84.5082,  tz: "America/New_York",    roof: false },
