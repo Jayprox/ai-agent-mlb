@@ -49,8 +49,8 @@ const transformTeam = (teamData) => {
       pos:        player.position.abbreviation,
       position:   player.position.abbreviation,          // iOS alias
       primaryPos: player.person.primaryPosition?.abbreviation ?? null,
-      hand:       player.batSide?.code ?? "?",
-      batSide:    player.batSide?.code ?? null,          // iOS alias
+      hand:       player.person?.batSide?.code ?? player.batSide?.code ?? "?",
+      batSide:    player.person?.batSide?.code ?? player.batSide?.code ?? null,  // iOS alias
       avg:        null,                                  // populated after lineup is confirmed
     };
   }).filter(Boolean);
