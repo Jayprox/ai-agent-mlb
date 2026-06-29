@@ -3,7 +3,10 @@ const router  = express.Router();
 const mlb     = require("../services/mlbApi");
 const cache   = require("../services/cache");
 const { fetchBatterPowerProfile } = require("./batterPower");
-const { fetchBatterRecentForm } = require("./batterGamelog");
+const { fetchBatterRecentForm }   = require("./batterGamelog");
+const { fetchBatterPitchSplits }  = require("./splits");
+const { buildArsenalPayloadForJob } = require("./arsenal");
+const { computeMatchupScore }     = require("../services/matchupScore");
 const SEASON = new Date().getFullYear();
 const AVG_TTL = 24 * 60 * 60 * 1000; // 24h — season avg is stable intraday
 
@@ -115,22 +118,67 @@ async function fetchLineupsForGame(gamePk) {
       };
     }
 
+    // ── Fetch probable pitchers + their arsenals (for matchup score) ──────────
+    // Away batters face the HOME pitcher; home batters face the AWAY pitcher.
+    let awayPitcher = null; // probable starting pitcher for the away team
+    let homePitcher = null; // probable starting pitcher for the home team
+    let awayPitcherArsenal = null; // home batters face this
+    let homePitcherArsenal = null; // away batters face this
+
+    try {
+      const { data: schedData } = await mlb.get(`/schedule`, {
+        params: { gamePks: gamePk, hydrate: "probablePitcher", sportId: 1 },
+      });
+      const gameInfo = schedData?.dates?.[0]?.games?.[0];
+      awayPitcher = gameInfo?.teams?.away?.probablePitcher ?? null;
+      homePitcher  = gameInfo?.teams?.home?.probablePitcher  ?? null;
+    } catch (err) {
+      console.warn(`  ⚠ Probable pitcher fetch failed for ${gamePk}: ${err.message}`);
+    }
+
+    if (awayPitcher?.id || homePitcher?.id) {
+      const [awayArsenalResult, homeArsenalResult] = await Promise.allSettled([
+        awayPitcher?.id ? buildArsenalPayloadForJob(awayPitcher.id).catch(() => null) : Promise.resolve(null),
+        homePitcher?.id  ? buildArsenalPayloadForJob(homePitcher.id).catch(() => null)  : Promise.resolve(null),
+      ]);
+      awayPitcherArsenal = awayArsenalResult.status === "fulfilled" ? awayArsenalResult.value?.arsenal ?? null : null;
+      homePitcherArsenal  = homeArsenalResult.status  === "fulfilled" ? homeArsenalResult.value?.arsenal  ?? null : null;
+    }
+
+    // Tag each batter with their side so we know which pitcher they face
+    awayLineup.forEach(b => { b._side = "away"; });
+    homeLineup.forEach(b => { b._side = "home"; });
+
     const allBatters = [...awayLineup, ...homeLineup];
     const chunkSize = 3;
 
     for (let i = 0; i < allBatters.length; i += chunkSize) {
       const chunk = allBatters.slice(i, i + chunkSize);
 
-      const [profiles, forms, avgs] = await Promise.all([
+      const [profiles, forms, avgs, splitsList] = await Promise.all([
         Promise.all(chunk.map(b => fetchBatterPowerProfile(b.id))),
         Promise.all(chunk.map(b => fetchBatterRecentForm(b.id))),
         Promise.all(chunk.map(b => fetchBatterSeasonAvg(b.id))),
+        Promise.all(chunk.map(b => fetchBatterPitchSplits(b.id).catch(() => null))),
       ]);
 
       chunk.forEach((b, idx) => {
         b.powerProfile = profiles[idx] ?? null;
         b.recentForm   = forms[idx]    ?? null;
         b.avg          = avgs[idx]     ?? null;
+
+        // Away batters face HOME pitcher's arsenal; home batters face AWAY pitcher's arsenal
+        const facingArsenal = b._side === "away" ? homePitcherArsenal : awayPitcherArsenal;
+        const facingHand    = b._side === "away"
+          ? (homePitcher?.pitchHand?.code ?? null)
+          : (awayPitcher?.pitchHand?.code ?? null);
+
+        const splits = splitsList[idx];
+        b.matchupScore = (splits && facingArsenal)
+          ? computeMatchupScore(b.hand, splits, facingArsenal, facingHand)
+          : null;
+
+        delete b._side; // internal only — don't send to client
       });
     }
 

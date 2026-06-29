@@ -154,3 +154,26 @@ router.get("/:batterId", async (req, res) => {
 });
 
 module.exports = router;
+
+// Programmatic export for use by other routes (e.g. lineups.js)
+// Returns the splits map { FF: { avg, whiff, slg }, ... } or null.
+// Tries current season, falls back to previous season automatically.
+module.exports.fetchBatterPitchSplits = async (batterId) => {
+  if (!batterId) return null;
+  const yearsToTry = [SEASON, SEASON - 1];
+  for (const year of yearsToTry) {
+    const cacheKey = `splits:batter:${batterId}:${year}`;
+    const cached = cache.get(cacheKey);
+    if (cached) return cached.splits ?? null;
+    try {
+      const splits = await fetchFromCSV(batterId, year);
+      if (splits) {
+        cache.set(cacheKey, { batterId: parseInt(batterId, 10), season: year, splits }, SAVANT_TTL);
+        return splits;
+      }
+    } catch (err) {
+      console.warn(`  · fetchBatterPitchSplits failed  batterId=${batterId} year=${year}: ${err.message}`);
+    }
+  }
+  return null;
+};

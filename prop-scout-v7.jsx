@@ -8029,10 +8029,12 @@ export default function App() {
                 </Card>
               );
 
-              // Compute matchup score for every batter in the facing lineup
+              // Compute matchup score for every batter in the facing lineup.
+              // Use backend-computed score if present; fall back to client-side.
               const scored = facingLineup.map(b => {
                 const enriched = augmentBatterWithSplits(b, batterSplits);
-                return { ...enriched, matchupScore: batterMatchupScoreForPitcher(enriched, activePitcher, batterSplits) };
+                const score = b.matchupScore ?? batterMatchupScoreForPitcher(enriched, activePitcher, batterSplits);
+                return { ...enriched, matchupScore: score };
               });
               const avgScore = Math.round(scored.reduce((s, b) => s + b.matchupScore, 0) / (scored.length || 1));
               const danger   = [...scored].sort((a, b) => b.matchupScore - a.matchupScore).slice(0, 3);
@@ -8292,7 +8294,9 @@ export default function App() {
                     hand:    (hittingLog.hand && hittingLog.hand !== "?") ? hittingLog.hand : rawB.hand,
                   } : rawB;
                   const b = augmentBatterWithSplits(rawBEnriched, batterSplits);
-                  const sc = batterMatchupScoreForPitcher(b, facingPitcher, batterSplits);
+                  // Prefer backend-computed score (same formula, avoids extra client fetches).
+                  // Fall back to client-side computation if API didn't return one yet.
+                  const sc = rawBEnriched.matchupScore ?? batterMatchupScoreForPitcher(b, facingPitcher, batterSplits);
                   const scColor = scoreColor(sc);
                   const isExpanded = expandedBatter === i;
                   const recentHits = (b.hitRate || []).reduce((a, v) => a + v, 0);
