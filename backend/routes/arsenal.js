@@ -388,6 +388,37 @@ async function buildArsenalPayload(pitcherId, year = SEASON) {
   return { result, cacheHit: false };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pitch matchup label helpers (ported from frontend computePitchMatchupGood /
+// computePitchMatchupNote so iOS and web read pre-computed values from the API)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function pitchMatchupGood(avg, whiff) {
+  const a = parseFloat(avg) || 0;
+  const w = parseFloat(whiff) || 0;
+  if (a >= 0.280 && w < 25) return true;   // HANDLES
+  if (a <= 0.215 || w >= 35) return false;  // WEAK SPOT
+  return null;                               // NEUTRAL
+}
+
+function pitchMatchupNote(abbr, avg, whiff) {
+  const a = parseFloat(avg) || 0;
+  const w = parseFloat(whiff) || 0;
+  if (a >= 0.300 && w < 20) return `Elite contact vs ${abbr}`;
+  if (a >= 0.280)            return `Solid contact rate vs ${abbr}`;
+  if (a <= 0.180 || w >= 40) return `Severe weakness vs ${abbr} — high K exposure`;
+  if (a <= 0.215)            return `Weak contact vs ${abbr}`;
+  if (w >= 30)               return `High whiff rate (${Math.round(w)}%) — chases out of zone`;
+  return `Average results vs ${abbr}`;
+}
+
+function pitchRiskNote(pct, good) {
+  if (pct < 25) return null;
+  if (good === false) return `Heavy usage (${pct}%) + weak spot = significant risk`;
+  if (good === true)  return `Heavy usage (${pct}%) + handles well = prop multiplier`;
+  return null;
+}
+
 // ─────────────────────────────────────────────
 // ROUTE: GET /api/arsenal/:pitcherId
 // ─────────────────────────────────────────────
@@ -405,6 +436,69 @@ router.get("/:pitcherId", async (req, res) => {
     }
     console.error(`  ✗ Savant CSV failed for ${pitcherId}: ${err.message}`);
     return res.status(502).json({ error: "Baseball Savant unavailable", pitcherId });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROUTE: GET /api/arsenal/:pitcherId/vs/:batterId
+//
+// Returns the pitcher's arsenal with per-pitch batter matchup data pre-computed:
+//   batterAvg, batterWhiff, batterSlg  — batter's Savant splits vs each pitch
+//   label   — "HANDLES" | "WEAK SPOT" | "NEUTRAL"
+//   note    — one-line description ("Chases down and away", etc.)
+//   riskNote — callout when a heavy-usage pitch is a clear edge (or null)
+//
+// Pitches with no batter split data are still included (label/note will be null).
+// Used by iOS Arsenal tab so no client-side logic is needed.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/:pitcherId/vs/:batterId", async (req, res) => {
+  const { pitcherId, batterId } = req.params;
+  const year = parseInt(req.query.year ?? SEASON, 10);
+
+  const { fetchBatterPitchSplits } = require("./splits");
+
+  try {
+    const [arsenalResult, batterSplits] = await Promise.allSettled([
+      buildArsenalPayload(pitcherId, year),
+      fetchBatterPitchSplits(batterId),
+    ]);
+
+    if (arsenalResult.status === "rejected") {
+      return res.status(502).json({ error: "Baseball Savant unavailable", pitcherId });
+    }
+
+    const { result } = arsenalResult.value;
+    const splits = batterSplits.status === "fulfilled" ? batterSplits.value : null;
+
+    const enrichedArsenal = result.arsenal.map(pitch => {
+      const s = splits?.[pitch.abbr] ?? null;
+      const avg   = s?.avg   ?? null;
+      const whiff = s?.whiff ?? null;
+      const slg   = s?.slg   ?? null;
+      const good  = (avg !== null || whiff !== null) ? pitchMatchupGood(avg, whiff) : null;
+      const note  = (avg !== null || whiff !== null) ? pitchMatchupNote(pitch.abbr, avg, whiff) : null;
+      return {
+        ...pitch,
+        batterAvg:   avg,
+        batterWhiff: whiff,
+        batterSlg:   slg,
+        label:       good === true ? "HANDLES" : good === false ? "WEAK SPOT" : "NEUTRAL",
+        note,
+        riskNote:    good !== null ? pitchRiskNote(pitch.pct, good) : null,
+      };
+    });
+
+    res.setHeader("X-Cache", arsenalResult.value.cacheHit ? "HIT" : "MISS");
+    res.json({
+      pitcherId: parseInt(pitcherId, 10),
+      batterId:  parseInt(batterId, 10),
+      season:    result.season,
+      arsenal:   enrichedArsenal,
+      pitcherStats: result.pitcherStats ?? null,
+    });
+  } catch (err) {
+    console.error(`  ✗ Arsenal vs batter failed  pitcher=${pitcherId} batter=${batterId}: ${err.message}`);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 

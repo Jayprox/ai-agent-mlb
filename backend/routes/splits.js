@@ -47,6 +47,29 @@ function parseCSV(text) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Matchup label helpers — same thresholds as frontend computePitchMatchupGood /
+// computePitchMatchupNote so clients can read pre-computed values directly.
+// ─────────────────────────────────────────────────────────────────────────────
+function pitchMatchupGood(avg, whiff) {
+  const a = parseFloat(avg) || 0;
+  const w = parseFloat(whiff) || 0;
+  if (a >= 0.280 && w < 25) return true;
+  if (a <= 0.215 || w >= 35) return false;
+  return null;
+}
+
+function pitchMatchupNote(abbr, avg, whiff) {
+  const a = parseFloat(avg) || 0;
+  const w = parseFloat(whiff) || 0;
+  if (a >= 0.300 && w < 20) return `Elite contact vs ${abbr}`;
+  if (a >= 0.280)            return `Solid contact rate vs ${abbr}`;
+  if (a <= 0.180 || w >= 40) return `Severe weakness vs ${abbr} — high K exposure`;
+  if (a <= 0.215)            return `Weak contact vs ${abbr}`;
+  if (w >= 30)               return `High whiff rate (${Math.round(w)}%) — chases out of zone`;
+  return `Average results vs ${abbr}`;
+}
+
 async function fetchFromCSV(batterId, year) {
   const url = [
     `https://baseballsavant.mlb.com/statcast_search/csv`,
@@ -99,11 +122,18 @@ async function fetchFromCSV(batterId, year) {
   Object.values(byType)
     .filter(p => p.pitches >= 10)
     .forEach(p => {
+      const avg   = fmtAvg(p.ab > 0 ? p.hits / p.ab : 0);
+      const whiff = `${p.swings > 0 ? Math.round((p.whiffs / p.swings) * 100) : 0}%`;
+      const slg   = fmtAvg(p.ab > 0 ? p.tb / p.ab : 0);
+      const good  = pitchMatchupGood(avg, whiff);
       splits[p.abbr] = {
-        avg:     fmtAvg(p.ab > 0 ? p.hits / p.ab : 0),
-        whiff:   `${p.swings > 0 ? Math.round((p.whiffs / p.swings) * 100) : 0}%`,
-        slg:     fmtAvg(p.ab > 0 ? p.tb / p.ab : 0),
+        avg,
+        whiff,
+        slg,
         pitches: p.pitches,
+        // Pre-computed label and note so clients don't need to recompute
+        label: good === true ? "HANDLES" : good === false ? "WEAK SPOT" : "NEUTRAL",
+        note:  pitchMatchupNote(p.abbr, avg, whiff),
       };
     });
 
