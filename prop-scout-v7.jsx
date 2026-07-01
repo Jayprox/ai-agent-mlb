@@ -3183,6 +3183,16 @@ export default function App() {
   const boxscoreFetched = useRef(new Set());                  // gamePks whose final boxscore is cached
   const [liveBoardResults, setLiveBoardResults] = useState({}); // playerId → { h, hr, ab, live }
   const boardBoxFetched = useRef(new Set());                  // gamePks already fetched for Board results
+  // ── Leaderboard ──────────────────────────────────────────────────────────
+  const [leaderboardData,       setLeaderboardData]       = useState(null);   // { leaderboard[], totalUsers, sortedBy, minGradedPicks }
+  const [leaderboardMe,         setLeaderboardMe]         = useState(null);   // { optIn, username, stats, rank, meetsThreshold }
+  const [leaderboardSort,       setLeaderboardSort]       = useState("win_rate"); // "win_rate" | "pnl"
+  const [leaderboardLoading,    setLeaderboardLoading]    = useState(false);
+  const [leaderboardMeLoading,  setLeaderboardMeLoading]  = useState(false);
+  const [leaderboardOptModal,   setLeaderboardOptModal]   = useState(false);  // opt-in name modal open
+  const [leaderboardOptName,    setLeaderboardOptName]    = useState("");
+  const [leaderboardOptLoading, setLeaderboardOptLoading] = useState(false);
+  const [leaderboardOptError,   setLeaderboardOptError]   = useState("");
   const chatBottomRef = useRef(null);
   const labCalibrationRecorded = useRef(new Set());
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -3321,6 +3331,28 @@ export default function App() {
       })
       .finally(() => setPicksViewLoading(false));
   }, [view, currentUser, picksViewDays]);
+
+  // ── Leaderboard fetch ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (view !== "leaderboard") return;
+    setLeaderboardLoading(true);
+    apiFetch(`/api/leaderboard?sortBy=${leaderboardSort}`)
+      .then(data => setLeaderboardData(data ?? null))
+      .catch(() => setLeaderboardData(null))
+      .finally(() => setLeaderboardLoading(false));
+  }, [view, leaderboardSort]);
+
+  useEffect(() => {
+    if (view !== "leaderboard" || !currentUser) return;
+    setLeaderboardMeLoading(true);
+    apiFetch("/api/leaderboard/me", { headers: { Authorization: `Bearer ${_authToken}` } })
+      .then(data => {
+        setLeaderboardMe(data ?? null);
+        if (data?.username) setLeaderboardOptName(data.username);
+      })
+      .catch(() => setLeaderboardMe(null))
+      .finally(() => setLeaderboardMeLoading(false));
+  }, [view, currentUser]);
 
   // Pre-fetch player props for today's pending prop picks so the live-line lookup works in the Picks tab
   useEffect(() => {
@@ -6023,6 +6055,23 @@ export default function App() {
                 📋 Picks
               </button>
             )}
+            <button
+              onClick={() => setView("leaderboard")}
+              style={{
+                background: view === "leaderboard" ? "#fbbf24" : "#161827",
+                border: `1px solid ${view === "leaderboard" ? "#fbbf24" : "#1f2437"}`,
+                borderRadius: 8,
+                padding: isNarrowPhone ? "6px 10px" : "6px 12px",
+                fontSize: isNarrowPhone ? 9 : 10,
+                color: view === "leaderboard" ? "#000" : "#9ca3af",
+                fontFamily: "monospace",
+                fontWeight: 700,
+                cursor: "pointer",
+                textTransform: "uppercase",
+              }}
+            >
+              🏆 Ranks
+            </button>
           </div>
         </div>
 
@@ -11888,6 +11937,208 @@ export default function App() {
               );
               })}
             </div>
+          );
+        })()}
+
+        {/* ── Leaderboard view ──────────────────────────────────────────────── */}
+        {view === "leaderboard" && (() => {
+          const me = leaderboardMe;
+          const data = leaderboardData;
+          const entries = data?.entries ?? [];
+          const minPicks = data?.min_graded_picks ?? 10;
+
+          const medalFor = (rank) => rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : null;
+
+          const handleOptIn = async () => {
+            const name = leaderboardOptName.trim();
+            if (!name) { setLeaderboardOptError("Username is required"); return; }
+            setLeaderboardOptLoading(true);
+            setLeaderboardOptError("");
+            try {
+              const res = await fetch("/api/leaderboard/opt-in", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${_authToken}` },
+                body: JSON.stringify({ username: name }),
+              });
+              const json = await res.json();
+              if (!res.ok) { setLeaderboardOptError(json.error ?? "Failed to join"); }
+              else {
+                setLeaderboardOptModal(false);
+                setLeaderboardMe(json);
+                // refresh public list
+                apiFetch(`/api/leaderboard?sortBy=${leaderboardSort}`)
+                  .then(d => setLeaderboardData(d ?? null)).catch(() => {});
+              }
+            } catch { setLeaderboardOptError("Network error"); }
+            finally { setLeaderboardOptLoading(false); }
+          };
+
+          const handleOptOut = async () => {
+            if (!window.confirm("Leave the leaderboard? Your stats will be hidden from the public list.")) return;
+            try {
+              const res = await fetch("/api/leaderboard/opt-out", {
+                method: "POST",
+                headers: { Authorization: `Bearer ${_authToken}` },
+              });
+              if (res.ok) {
+                setLeaderboardMe(prev => prev ? { ...prev, opted_in: false, rank: null } : null);
+                apiFetch(`/api/leaderboard?sortBy=${leaderboardSort}`)
+                  .then(d => setLeaderboardData(d ?? null)).catch(() => {});
+              }
+            } catch {}
+          };
+
+          return (
+            <>
+            <div style={{ padding: "16px 12px", maxWidth: 540, margin: "0 auto" }}>
+              {/* Header */}
+              <div style={{ textAlign: "center", marginBottom: 16 }}>
+                <div style={{ fontSize: 22, marginBottom: 2 }}>🏆</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", letterSpacing: 1 }}>LEADERBOARD</div>
+                <div style={{ fontSize: 10, color: "#6b7280", marginTop: 2 }}>Min {minPicks} graded picks to appear</div>
+              </div>
+
+              {/* Sort toggle */}
+              <div style={{ display: "flex", gap: 6, marginBottom: 16, background: "#0f1117", borderRadius: 8, padding: 4, border: "1px solid #1f2437" }}>
+                {[["win_rate", "Win Rate"], ["pnl", "P&L"]].map(([val, label]) => (
+                  <button key={val} onClick={() => setLeaderboardSort(val)} style={{
+                    flex: 1, padding: "6px 0", borderRadius: 6, border: "none", cursor: "pointer",
+                    background: leaderboardSort === val ? "#fbbf24" : "transparent",
+                    color: leaderboardSort === val ? "#000" : "#6b7280",
+                    fontFamily: "monospace", fontSize: 11, fontWeight: 700,
+                  }}>{label}</button>
+                ))}
+              </div>
+
+              {/* Your Rank card */}
+              {currentUser && (
+                <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderRadius: 12, padding: "14px 16px", marginBottom: 14 }}>
+                  {leaderboardMeLoading ? (
+                    <div style={{ textAlign: "center", color: "#6b7280", fontSize: 12, padding: "8px 0" }}>Loading your stats…</div>
+                  ) : me?.opted_in ? (
+                    <>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                        <div style={{ fontSize: 28 }}>{me.rank ? (medalFor(me.rank) ?? `#${me.rank}`) : "—"}</div>
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace" }}>{me.username}</div>
+                          <div style={{ fontSize: 9, color: "#6b7280" }}>Your rank</div>
+                        </div>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6, marginBottom: 12 }}>
+                        {[
+                          ["Win Rate", me.win_rate_pct != null ? `${me.win_rate_pct.toFixed(1)}%` : "—", "#fbbf24"],
+                          ["P&L", me.total_pnl != null ? `${me.total_pnl >= 0 ? "+" : ""}${me.total_pnl.toFixed(1)}` : "—", me.total_pnl >= 0 ? "#22c55e" : "#ef4444"],
+                          ["Graded", me.graded_picks ?? "—", "#9ca3af"],
+                          ["Hits", me.hits ?? "—", "#22c55e"],
+                          ["Misses", me.misses ?? "—", "#ef4444"],
+                        ].map(([label, val, color]) => (
+                          <div key={label} style={{ background: "#161827", borderRadius: 8, padding: "8px 4px", textAlign: "center" }}>
+                            <div style={{ fontSize: 13, fontWeight: 800, color, fontFamily: "monospace" }}>{val}</div>
+                            <div style={{ fontSize: 8, color: "#6b7280", marginTop: 2 }}>{label}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <button onClick={handleOptOut} style={{
+                        width: "100%", padding: "8px 0", borderRadius: 8, border: "1px solid rgba(239,68,68,0.4)",
+                        background: "rgba(239,68,68,0.08)", color: "#ef4444", fontFamily: "monospace",
+                        fontSize: 11, fontWeight: 700, cursor: "pointer",
+                      }}>Leave Leaderboard</button>
+                    </>
+                  ) : (
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 10 }}>
+                        {(me?.graded_picks ?? 0) < minPicks
+                          ? `You need ${minPicks - (me?.graded_picks ?? 0)} more graded picks to qualify`
+                          : "Join the leaderboard to show your rank publicly"}
+                      </div>
+                      {(me?.graded_picks ?? 0) >= minPicks && (
+                        <button onClick={() => setLeaderboardOptModal(true)} style={{
+                          padding: "8px 20px", borderRadius: 8, border: "1px solid rgba(251,191,36,0.5)",
+                          background: "rgba(251,191,36,0.1)", color: "#fbbf24", fontFamily: "monospace",
+                          fontSize: 11, fontWeight: 700, cursor: "pointer",
+                        }}>Join Leaderboard</button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Public list */}
+              {leaderboardLoading ? (
+                <div style={{ textAlign: "center", color: "#6b7280", fontSize: 12, padding: "24px 0" }}>Loading rankings…</div>
+              ) : entries.length === 0 ? (
+                <div style={{ textAlign: "center", color: "#6b7280", fontSize: 12, padding: "24px 0" }}>No ranked players yet — be the first!</div>
+              ) : (
+                <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderRadius: 12, overflow: "hidden" }}>
+                  {/* Table header */}
+                  <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 70px 54px", gap: 0, padding: "8px 14px", borderBottom: "1px solid #1f2437" }}>
+                    {["Rank", "Player", leaderboardSort === "pnl" ? "P&L" : "W%", "Picks"].map((h, i) => (
+                      <div key={i} style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace", fontWeight: 700, textAlign: i > 1 ? "right" : "left" }}>{h}</div>
+                    ))}
+                  </div>
+                  {entries.map((e, idx) => {
+                    const isMe = me?.opted_in && me?.username === e.username;
+                    const medal = medalFor(e.rank);
+                    return (
+                      <div key={e.username} style={{
+                        display: "grid", gridTemplateColumns: "40px 1fr 70px 54px", gap: 0,
+                        padding: "10px 14px",
+                        borderBottom: idx < entries.length - 1 ? "1px solid #1a1f2e" : "none",
+                        background: isMe ? "rgba(251,191,36,0.05)" : "transparent",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", fontSize: 13 }}>
+                          {medal
+                            ? <span>{medal}</span>
+                            : <span style={{ fontFamily: "monospace", fontSize: 11, color: "#6b7280", fontWeight: 700 }}>#{e.rank}</span>
+                          }
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+                          <span style={{ fontSize: 12, fontWeight: isMe ? 800 : 600, color: isMe ? "#fbbf24" : "#e5e7eb", fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.username}</span>
+                          {isMe && <span style={{ fontSize: 8, color: "#fbbf24", border: "1px solid rgba(251,191,36,0.4)", borderRadius: 3, padding: "0 4px", flexShrink: 0 }}>YOU</span>}
+                        </div>
+                        <div style={{ textAlign: "right", fontFamily: "monospace", fontSize: 12, fontWeight: 700 }}>
+                          {leaderboardSort === "pnl"
+                            ? <span style={{ color: e.total_pnl >= 0 ? "#22c55e" : "#ef4444" }}>{e.total_pnl >= 0 ? "+" : ""}{e.total_pnl?.toFixed(1) ?? "—"}</span>
+                            : <span style={{ color: "#f9fafb" }}>{e.win_rate_pct?.toFixed(1) ?? "—"}%</span>
+                          }
+                        </div>
+                        <div style={{ textAlign: "right", fontFamily: "monospace", fontSize: 10, color: "#9ca3af" }}>
+                          <span style={{ color: "#22c55e" }}>{e.hits ?? 0}</span>
+                          <span style={{ color: "#374151" }}>:</span>
+                          <span style={{ color: "#ef4444" }}>{e.misses ?? 0}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {leaderboardOptModal && (
+              <div style={{ position: "fixed", inset: 0, zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.7)" }}
+                onClick={() => setLeaderboardOptModal(false)}>
+                <div style={{ background: "#161827", border: "1px solid #1f2437", borderRadius: 14, padding: "24px 20px", width: 300, maxWidth: "90vw" }}
+                  onClick={e => e.stopPropagation()}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: "#f9fafb", fontFamily: "monospace", marginBottom: 4 }}>Join the Leaderboard</div>
+                  <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 16 }}>Choose a public username. This is how you'll appear in the ranked list.</div>
+                  <input
+                    value={leaderboardOptName}
+                    onChange={e => { setLeaderboardOptName(e.target.value); setLeaderboardOptError(""); }}
+                    placeholder="Username (3–20 chars)"
+                    maxLength={20}
+                    style={{ width: "100%", boxSizing: "border-box", background: "#0f1117", border: "1px solid #1f2437", borderRadius: 8, padding: "9px 12px", color: "#f9fafb", fontFamily: "monospace", fontSize: 13, marginBottom: 10, outline: "none" }}
+                    onKeyDown={e => e.key === "Enter" && handleOptIn()}
+                  />
+                  {leaderboardOptError && <div style={{ fontSize: 11, color: "#ef4444", marginBottom: 10 }}>{leaderboardOptError}</div>}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => setLeaderboardOptModal(false)} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "1px solid #374151", background: "transparent", color: "#9ca3af", fontFamily: "monospace", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+                    <button onClick={handleOptIn} disabled={leaderboardOptLoading} style={{ flex: 2, padding: "9px 0", borderRadius: 8, border: "none", background: "#fbbf24", color: "#000", fontFamily: "monospace", fontSize: 11, fontWeight: 800, cursor: leaderboardOptLoading ? "not-allowed" : "pointer", opacity: leaderboardOptLoading ? 0.7 : 1 }}>
+                      {leaderboardOptLoading ? "Joining…" : "Join Leaderboard"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            </>
           );
         })()}
 
