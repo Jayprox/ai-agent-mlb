@@ -50,9 +50,10 @@ app.use("/api/prediction-markets", require("./routes/predictionMarkets"));
 app.use("/api/props",        require("./routes/props"));        // Anthropic: AI-generated prop recommendations per game
 app.use("/api/player-props", require("./routes/playerProps")); // Odds API: sportsbook player prop lines per game (shared 10-min cache)
 app.use("/api/team-stats", require("./routes/teamStats"));
-app.use("/api/auth",       authRouter);
-app.use("/api/picks",     picksRouter);
-app.use("/api/notes",     notesRouter);
+app.use("/api/auth",        authRouter);
+app.use("/api/picks",      picksRouter);
+app.use("/api/leaderboard", require("./routes/leaderboard")); // public ranked list + opt-in management
+app.use("/api/notes",      notesRouter);
 app.use("/api/digest",    digestRouter);
 app.use("/api/daily-card", dailyCardRouter); // Full-slate AI card
 app.use("/api/scout", require("./routes/scout"));

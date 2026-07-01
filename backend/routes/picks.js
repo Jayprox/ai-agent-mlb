@@ -158,6 +158,13 @@ async function ensurePicksSchema() {
     await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS actual_stat NUMERIC`);
     await query(`ALTER TABLE picks ADD COLUMN IF NOT EXISTS grade_status TEXT`);
 
+    // Leaderboard performance index — speeds up the per-user aggregate query
+    await query(`
+      CREATE INDEX IF NOT EXISTS picks_leaderboard_idx
+        ON picks (user_id, voided, result_hit, grade_status)
+        WHERE voided = FALSE
+    `);
+
     await query(`
       CREATE TABLE IF NOT EXISTS board_card_snapshots (
         card_id      TEXT         NOT NULL,
