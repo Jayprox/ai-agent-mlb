@@ -11944,10 +11944,23 @@ export default function App() {
         {view === "leaderboard" && (() => {
           const me = leaderboardMe;
           const data = leaderboardData;
-          const entries = data?.entries ?? [];
-          const minPicks = data?.min_graded_picks ?? 10;
+          // API returns { leaderboard: [...], minGradedPicks, totalUsers, sortedBy }
+          const entries = data?.leaderboard ?? [];
+          const minPicks = data?.minGradedPicks ?? me?.minGradedPicks ?? 10;
 
           const medalFor = (rank) => rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : null;
+
+          // Refresh /me from server (called after opt-in/opt-out to get fresh stats + rank)
+          const refreshMe = () => {
+            setLeaderboardMeLoading(true);
+            apiFetch("/api/leaderboard/me", { headers: { Authorization: `Bearer ${_authToken}` } })
+              .then(d => {
+                setLeaderboardMe(d ?? null);
+                if (d?.username) setLeaderboardOptName(d.username);
+              })
+              .catch(() => {})
+              .finally(() => setLeaderboardMeLoading(false));
+          };
 
           const handleOptIn = async () => {
             const name = leaderboardOptName.trim();
@@ -11961,11 +11974,11 @@ export default function App() {
                 body: JSON.stringify({ username: name }),
               });
               const json = await res.json();
-              if (!res.ok) { setLeaderboardOptError(json.error ?? "Failed to join"); }
+              if (!res.ok) { setLeaderboardOptError(json.message ?? json.error ?? "Failed to join"); }
               else {
                 setLeaderboardOptModal(false);
-                setLeaderboardMe(json);
-                // refresh public list
+                // Re-fetch /me for fresh stats + rank, and bust public list
+                refreshMe();
                 apiFetch(`/api/leaderboard?sortBy=${leaderboardSort}`)
                   .then(d => setLeaderboardData(d ?? null)).catch(() => {});
               }
@@ -11981,12 +11994,21 @@ export default function App() {
                 headers: { Authorization: `Bearer ${_authToken}` },
               });
               if (res.ok) {
-                setLeaderboardMe(prev => prev ? { ...prev, opted_in: false, rank: null } : null);
+                // Optimistic update, then re-fetch for accuracy
+                setLeaderboardMe(prev => prev ? { ...prev, optIn: false, rank: null } : null);
                 apiFetch(`/api/leaderboard?sortBy=${leaderboardSort}`)
                   .then(d => setLeaderboardData(d ?? null)).catch(() => {});
               }
             } catch {}
           };
+
+          // Derived from /me response shape: { optIn, username, meetsThreshold, stats: { gradedPicks, hits, misses, winRate (0-1), pnl }, rank }
+          const myStats      = me?.stats;
+          const myOptIn      = me?.optIn === true;
+          const myGraded     = myStats?.gradedPicks ?? 0;
+          const myWinRate    = myStats?.winRate != null ? (myStats.winRate * 100).toFixed(1) : null;
+          const myPnl        = myStats?.pnl;
+          const myMeets      = me?.meetsThreshold === true;
 
           return (
             <>
@@ -12015,7 +12037,7 @@ export default function App() {
                 <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderRadius: 12, padding: "14px 16px", marginBottom: 14 }}>
                   {leaderboardMeLoading ? (
                     <div style={{ textAlign: "center", color: "#6b7280", fontSize: 12, padding: "8px 0" }}>Loading your stats…</div>
-                  ) : me?.opted_in ? (
+                  ) : myOptIn ? (
                     <>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
                         <div style={{ fontSize: 28 }}>{me.rank ? (medalFor(me.rank) ?? `#${me.rank}`) : "—"}</div>
@@ -12026,11 +12048,11 @@ export default function App() {
                       </div>
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6, marginBottom: 12 }}>
                         {[
-                          ["Win Rate", me.win_rate_pct != null ? `${me.win_rate_pct.toFixed(1)}%` : "—", "#fbbf24"],
-                          ["P&L", me.total_pnl != null ? `${me.total_pnl >= 0 ? "+" : ""}${me.total_pnl.toFixed(1)}` : "—", me.total_pnl >= 0 ? "#22c55e" : "#ef4444"],
-                          ["Graded", me.graded_picks ?? "—", "#9ca3af"],
-                          ["Hits", me.hits ?? "—", "#22c55e"],
-                          ["Misses", me.misses ?? "—", "#ef4444"],
+                          ["Win Rate", myWinRate != null ? `${myWinRate}%` : "—", "#fbbf24"],
+                          ["P&L", myPnl != null ? `${myPnl >= 0 ? "+" : ""}${Number(myPnl).toFixed(1)}` : "—", (myPnl ?? 0) >= 0 ? "#22c55e" : "#ef4444"],
+                          ["Graded", myStats?.gradedPicks ?? "—", "#9ca3af"],
+                          ["Hits", myStats?.hits ?? "—", "#22c55e"],
+                          ["Misses", myStats?.misses ?? "—", "#ef4444"],
                         ].map(([label, val, color]) => (
                           <div key={label} style={{ background: "#161827", borderRadius: 8, padding: "8px 4px", textAlign: "center" }}>
                             <div style={{ fontSize: 13, fontWeight: 800, color, fontFamily: "monospace" }}>{val}</div>
@@ -12047,11 +12069,11 @@ export default function App() {
                   ) : (
                     <div style={{ textAlign: "center" }}>
                       <div style={{ fontSize: 12, color: "#9ca3af", marginBottom: 10 }}>
-                        {(me?.graded_picks ?? 0) < minPicks
-                          ? `You need ${minPicks - (me?.graded_picks ?? 0)} more graded picks to qualify`
+                        {!myMeets
+                          ? `You need ${minPicks - myGraded} more graded picks to qualify`
                           : "Join the leaderboard to show your rank publicly"}
                       </div>
-                      {(me?.graded_picks ?? 0) >= minPicks && (
+                      {myMeets && (
                         <button onClick={() => setLeaderboardOptModal(true)} style={{
                           padding: "8px 20px", borderRadius: 8, border: "1px solid rgba(251,191,36,0.5)",
                           background: "rgba(251,191,36,0.1)", color: "#fbbf24", fontFamily: "monospace",
@@ -12072,13 +12094,15 @@ export default function App() {
                 <div style={{ background: "#0f1117", border: "1px solid #1f2437", borderRadius: 12, overflow: "hidden" }}>
                   {/* Table header */}
                   <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 70px 54px", gap: 0, padding: "8px 14px", borderBottom: "1px solid #1f2437" }}>
-                    {["Rank", "Player", leaderboardSort === "pnl" ? "P&L" : "W%", "Picks"].map((h, i) => (
+                    {["Rank", "Player", leaderboardSort === "pnl" ? "P&L" : "W%", "H:M"].map((h, i) => (
                       <div key={i} style={{ fontSize: 9, color: "#6b7280", fontFamily: "monospace", fontWeight: 700, textAlign: i > 1 ? "right" : "left" }}>{h}</div>
                     ))}
                   </div>
                   {entries.map((e, idx) => {
-                    const isMe = me?.opted_in && me?.username === e.username;
+                    // e shape: { rank, username, winRate (0-1), winRatePct "62.1%", pnl, gradedPicks, hits, misses }
+                    const isMe = myOptIn && me?.username === e.username;
                     const medal = medalFor(e.rank);
+                    const winPct = e.winRate != null ? (e.winRate * 100).toFixed(1) : null;
                     return (
                       <div key={e.username} style={{
                         display: "grid", gridTemplateColumns: "40px 1fr 70px 54px", gap: 0,
@@ -12098,8 +12122,8 @@ export default function App() {
                         </div>
                         <div style={{ textAlign: "right", fontFamily: "monospace", fontSize: 12, fontWeight: 700 }}>
                           {leaderboardSort === "pnl"
-                            ? <span style={{ color: e.total_pnl >= 0 ? "#22c55e" : "#ef4444" }}>{e.total_pnl >= 0 ? "+" : ""}{e.total_pnl?.toFixed(1) ?? "—"}</span>
-                            : <span style={{ color: "#f9fafb" }}>{e.win_rate_pct?.toFixed(1) ?? "—"}%</span>
+                            ? <span style={{ color: (e.pnl ?? 0) >= 0 ? "#22c55e" : "#ef4444" }}>{(e.pnl ?? 0) >= 0 ? "+" : ""}{e.pnl != null ? Number(e.pnl).toFixed(1) : "—"}</span>
+                            : <span style={{ color: "#f9fafb" }}>{winPct != null ? `${winPct}%` : "—"}</span>
                           }
                         </div>
                         <div style={{ textAlign: "right", fontFamily: "monospace", fontSize: 10, color: "#9ca3af" }}>
